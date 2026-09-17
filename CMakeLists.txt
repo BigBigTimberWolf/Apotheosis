@@ -223,7 +223,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/StatsPage.h"
     "${QT_UI_DIR}/pages/TargetPage.cpp"
     "${QT_UI_DIR}/pages/TargetPage.h"
-    "${QT_UI_DIR}/widgets/AdaptiveStack.h"
     "${QT_UI_DIR}/widgets/CardWidget.cpp"
     "${QT_UI_DIR}/widgets/CardWidget.h"
     "${QT_UI_DIR}/widgets/FormKit.cpp"
@@ -246,7 +245,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/widgets/ToggleSwitch.h"
     "${QT_UI_DIR}/widgets/TopNavBar.cpp"
     "${QT_UI_DIR}/widgets/TopNavBar.h"
-    "${QT_UI_DIR}/widgets/TriggerVisualWidget.h"
 )
 
 add_library(serial_embedded STATIC

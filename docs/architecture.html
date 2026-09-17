@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 架构图</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1d2129; --line:#2b3040;
+    --ink:#e6e8ee; --dim:#98a0b3; --faint:#6b7385;
+    --cap:#3b82f6;      /* 采集 */
+    --inf:#8b5cf6;      /* 推理 */
+    --ctl:#10b981;      /* 控制 */
+    --drv:#f59e0b;      /* 驱动 */
+    --ui:#ec4899;       /* UI */
+    --cfg:#64748b;      /* 配置 */
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    padding:28px 22px 60px;
+  }
+  .wrap{max-width:1500px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 4px;font-weight:650;letter-spacing:.3px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:22px}
+  .sub code{background:#22262f;padding:1px 6px;border-radius:4px;color:#c9d1e0;font-size:12px}
+
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:26px;
+          padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+  .legend span{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dim)}
+  .dot{width:10px;height:10px;border-radius:3px;flex:none}
+
+  .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;align-items:start}
+  @media(max-width:1180px){.cols{grid-template-columns:1fr}}
+
+  .lane{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;
+        position:relative;overflow:hidden}
+  .lane::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--acc,var(--cfg))}
+  .lane-h{display:flex;align-items:center;gap:9px;margin:0 0 4px;font-size:15px;font-weight:640}
+  .lane-h .dot{background:var(--acc)}
+  .lane-n{font-size:11.5px;color:var(--faint);margin:0 0 13px;
+          padding-bottom:11px;border-bottom:1px dashed var(--line)}
+
+  .node{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+        padding:9px 12px;margin-bottom:8px;position:relative}
+  .node.tall{padding:11px 13px}
+  .node b{display:block;font-size:13.5px;font-weight:620;margin-bottom:3px}
+  .node p{margin:0;font-size:12px;color:var(--dim);line-height:1.55}
+  .node .fn{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;
+            color:#8fa8d8;background:#151922;padding:1.5px 6px;border-radius:4px;
+            display:inline-block;margin-top:5px}
+  .node.acc{border-color:var(--acc);box-shadow:0 0 0 1px rgba(255,255,255,.03) inset}
+  .node.hi{background:#1a2430;border-color:#2f4a63}
+
+  .tag{position:absolute;top:9px;right:10px;font-size:10.5px;padding:1.5px 7px;border-radius:20px;
+       background:#252a36;color:var(--faint);border:1px solid var(--line);font-weight:500}
+  .tag.new{background:#3d2f14;color:#f0b849;border-color:#5c4720}
+
+  .arrow{text-align:center;color:var(--faint);font-size:17px;line-height:1;margin:2px 0 8px}
+
+  .note{background:#141821;border:1px solid var(--line);border-left:3px solid var(--cfg);
+        border-radius:8px;padding:11px 15px;margin-top:16px;font-size:12.5px;color:var(--dim)}
+  .note b{color:var(--ink)}
+  .warn{border-left-color:var(--drv);background:#1c1913}
+
+  .flow{margin-top:26px;background:var(--panel);border:1px solid var(--line);
+        border-radius:12px;padding:16px 18px}
+  .flow h2{font-size:15px;margin:0 0 13px;font-weight:640}
+  .steps{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+        padding:7px 12px;font-size:12.5px}
+  .step em{color:var(--faint);font-style:normal;font-size:11px;display:block;margin-top:2px}
+  .step.k{border-color:var(--ctl);background:#12211c}
+  .ar{color:var(--faint);font-size:15px}
+
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:12.5px}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--faint);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
+  td code{background:#22262f;padding:1px 6px;border-radius:4px;color:#c9d1e0;
+          font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
+  td:first-child{white-space:nowrap;color:var(--ink);font-weight:560}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Apotheosis — 当前架构</h1>
+  <div class="sub">
+    实时目标检测 + 通用控制器瞄准链。检测像素坐标系，一<strong>批检测 = 一拍控制</strong>。
+    代码路径对应提交 <code>54dd7ef</code>。
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--cap)"></i>采集 Capture</span>
+    <span><i class="dot" style="background:var(--inf)"></i>推理 Inference</span>
+    <span><i class="dot" style="background:var(--ctl)"></i>控制 Control</span>
+    <span><i class="dot" style="background:var(--drv)"></i>驱动 Drive</span>
+    <span><i class="dot" style="background:var(--ui)"></i>界面 UI</span>
+    <span><i class="dot" style="background:var(--cfg)"></i>配置 Config</span>
+    <span style="margin-left:auto;color:var(--faint)">★ = 本轮新增/接通</span>
+  </div>
+
+  <!-- ══════════════ 三列 ══════════════ -->
+  <div class="cols">
+
+    <!-- ── 列 1 ── -->
+    <div class="lane" style="--acc:var(--cap)">
+      <h2 class="lane-h"><i class="dot"></i>① 采集线程</h2>
+      <p class="lane-n">CaptureThread · capture/capture.cpp</p>
+
+      <div class="node acc">
+        <b>屏幕捕获</b>
+        <p>DXGI 桌面复制 / MediaFoundation 采集卡。事件等待驱动，不轮询。</p>
+        <span class="fn">IScreenCapture → MFCapture / DesktopDuplication</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node acc">
+        <b>中心裁切 + 缩放</b>
+        <p>按 FOV 椭圆裁出中心方块，缩放到 <b>detection_resolution</b>（= 模型输入边长）。</p>
+        <span class="fn">GpuColorOps / gpu_color_ops.cu</span>
+      </div>
+      <div class="arrow">↓</div>
+
+      <div class="node">
+        <b>旁路：主机拷贝</b>
+        <p>预览窗 + CPU 找色走这条。<b>HostCopyWorker</b> / <b>GpuCrosshairWorker</b> 各自独立线程，不阻塞主链。</p>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node">
+        <b>找色（准星）</b>
+        <p>GPU 优先、CPU 兜底。结果带时间戳，供新鲜度门禁判断。</p>
+        <span class="fn">crosshair_runtime::read()</span>
+      </div>
+
+      <div class="note">
+        <b>为什么要旁路线程：</b>预览和找色都不该拖慢推理节拍。
+        采集帧率与推理批次是<b>解耦</b>的 —— 采集可以比推理快，多余的帧只喂预览。
+      </div>
+    </div>
+
+    <!-- ── 列 2 ── -->
+    <div class="lane" style="--acc:var(--inf)">
+      <h2 class="lane-h"><i class="dot"></i>② 推理线程</h2>
+      <p class="lane-n">DetectorThread · detector/trt_detector.cpp</p>
+
+      <div class="node acc">
+        <b>TensorRT 推理</b>
+        <p>CUDA 预处理 → TRT engine → 后处理（NMS/解码）。输出框 + classId + confidence。</p>
+        <span class="fn">cuda_preprocess.cu → trt_detector → postProcess</span>
+      </div>
+      <div class="arrow">↓</div>
+
+      <div class="node hi">
+        <b>detectionBuffer 发布</b>
+        <p>整批结果原子写入共享缓冲，<code>bumpVersionLocked()</code> + <code>notify_all()</code>。
+        <b>这是推理与控制之间唯一的接口。</b></p>
+        <span class="fn">detectionBuffer{ boxes, precise_boxes, classes, confidences }</span>
+      </div>
+      <div class="arrow">↓</div>
+
+      <div class="node hi">
+        <b>tick() — 每批一拍</b>
+        <p><b>节拍由检测决定，不是采集帧率。</b>用采集帧重复喂同一个框会让滤波器误判"目标停住了"。</p>
+        <p style="margin-top:5px;color:#e8b84b">⚠ 必须在 <code>detectionBuffer.mutex</code> <b>释放之后</b>调用 —— tick() 自己要拿那把锁，持锁调用会自死锁。</p>
+        <span class="fn">runtime::aim_loop::tick()</span>
+      </div>
+
+      <div class="note warn">
+        <b>异常隔离：</b>tick() 整体包在 try/catch 里且<b>静默吞掉</b>。
+        控制层出问题不该把推理管线拖下水 —— 预览仍然工作。
+        刻意不打日志（每帧一条会刷爆）。
+      </div>
+    </div>
+
+    <!-- ── 列 3 ── -->
+    <div class="lane" style="--acc:var(--ctl)">
+      <h2 class="lane-h"><i class="dot"></i>③ 控制链（在推理线程上跑）</h2>
+      <p class="lane-n">aim_loop.cpp · control/*</p>
+
+      <div class="node acc">
+        <b>配置快照 → ControllerConfig</b>
+        <p><code>flattenProfile()</code> 把 HotkeyProfile 摊平，<code>toControllerConfig()</code> 转成控制器配置。<b>纯函数、可测。</b></p>
+        <span class="fn">runtime/aim_loop_config.cpp</span>
+      </div>
+      <div class="arrow">↓</div>
+
+      <div class="node acc">
+        <b>① 选靶 selector</b>
+        <p>Aim 桶筛选 → <span class="tag new">★ 逐类置信度门槛</span><br>
+        最近目标 + 滞回（防止在等距目标间反复跳）。</p>
+        <span class="fn">filterAimCandidates() → selectTarget()</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node acc">
+        <b>② 稳定器 stabilizer</b>
+        <p>认目标 + 剔除异常框，<b>不滤波</b>。判定 Common / Snap / NoHistory。</p>
+        <span class="fn">stabilize()</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node">
+        <b>③ 滤波 α-β</b>
+        <p><b>唯一一处滤波</b>，且只平滑框<b>中心点</b>（2 个数），不平滑四角/宽高。</p>
+        <p style="margin-top:5px">Snap/NoHistory ⇒ 硬重置滤波与 PID，否则换目标会"滑过去"并冲一下。</p>
+        <span class="fn">alpha_beta_filter · filter.h</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node acc">
+        <b>④ 瞄点 anchor</b>
+        <p>中心点 + y_offset × 框高。<span class="tag new">★ 逐类覆盖</span><br>
+        按锁定目标的 classId 查表；查不到退回热键级。</p>
+        <span class="fn">computeAnchor() · ClassAimPoint</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node">
+        <b>⑤⑥ PID + 量化</b>
+        <p>输出鼠标<b>计数</b>。含链路死区补偿（46ms）、单拍限幅。</p>
+        <span class="fn">pid_controller · kCountsPerPixel</span>
+      </div>
+      <div class="arrow">↓</div>
+
+      <div class="node">
+        <b>扳机 / 轨迹（后置整形）</b>
+        <p><b>TriggerFsm</b> 五相状态机 · <b>AimPathDriver</b> 贝塞尔+风力曲线 · <b>ScopeController</b> 自动开镜 · <b>AutoStopController</b> 急停。</p>
+        <span class="fn">mouse/trigger_fsm.h · aim_path.h · trigger_scope.h · auto_stop.h</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node hi">
+        <b>sendRawMove(x, y)</b>
+        <p>与旧控制链<b>同一条驱动通道</b>。内部有下标队列。</p>
+        <span class="fn">MouseThread::sendRawMove</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 驱动 + UI ══════════════ -->
+  <div class="cols" style="margin-top:18px;grid-template-columns:1fr 1fr">
+
+    <div class="lane" style="--acc:var(--drv)">
+      <h2 class="lane-h"><i class="dot"></i>④ 驱动层</h2>
+      <p class="lane-n">mouse/ · 三种后端 + 一条 move 工作线程</p>
+
+      <div class="node acc">
+        <b>moveWorkerLoop</b>
+        <p>独立线程消费移动请求，带下标队列 —— 保证计数不丢、不乱序。</p>
+        <span class="fn">MouseThread::moveWorkerLoop</span>
+      </div>
+      <div class="arrow">↓</div>
+      <table>
+        <tr><th>后端</th><th>通道</th><th>说明</th></tr>
+        <tr><td>Makcu</td><td>串口</td><td>带连接监控线程</td></tr>
+        <tr><td>MAKCUNEW</td><td>串口</td><td>supervisor + reader 两条线程，<b>唯一有键盘通道</b>（急停用）</td></tr>
+        <tr><td>kmboxNet</td><td>网络</td><td>UDP + 监听线程</td></tr>
+      </table>
+      <div class="note">
+        <b>实测常数（constexpr，禁止改动）：</b><br>
+        链路死区 <code>kLoopDeadTimeMs = 46.0</code> ·
+        临界增益 <code>kCriticalGain = 0.2602</code> ·
+        <code>kCountsPerPixel = 0.593</code><br>
+        <span style="color:#e8b84b">★ 这些是唯一记录，没有文档依据可查。</span>
+      </div>
+    </div>
+
+    <div class="lane" style="--acc:var(--ui)">
+      <h2 class="lane-h"><i class="dot"></i>⑤ 界面层</h2>
+      <p class="lane-n">Qt6 Widgets · qt_ui/ · 主线程</p>
+
+      <div class="node acc">
+        <b>MainWindow → 各设置页</b>
+        <p>AimSettingsPage / TargetPage / DebugPage …</p>
+        <span class="fn">qt_ui/pages/*</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node hi">
+        <b>ConfigBridge — 唯一的双向闸门</b>
+        <p><code>syncFromRuntime()</code> 把运行时配置推给界面<br>
+        <code>markDirty()</code> → 防抖 → <code>flush()</code> 落盘<br>
+        <b>界面永不直接碰 config 全局。</b></p>
+        <span class="fn">qt_ui/config/config_bridge.h</span>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="node">
+        <b>config.ini + 配置方案</b>
+        <p>SimpleIni 读写。<code>configs/</code> 下多套方案，<code>active.txt</code> 决定生效项。</p>
+        <span class="fn">config.h / config.cpp · ConfigProfiles</span>
+      </div>
+
+      <div class="note">
+        <b>数据流方向：</b>UI 写 config → 控制器每拍<b>重读</b>配置（改完立即生效，不用重启会话）。<br>
+        <b>唯一例外：</b>所有 Qt 控件都在主线程，控制器在推理线程 —— 靠 <code>configMutex</code> 互斥。
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 一拍 ══════════════ -->
+  <div class="flow">
+    <h2>一拍的生命周期（一批检测 = 一拍控制）</h2>
+    <div class="steps">
+      <div class="step">采集帧<em>CaptureThread</em></div><span class="ar">→</span>
+      <div class="step">裁切缩放<em>detection_resolution</em></div><span class="ar">→</span>
+      <div class="step">TRT 推理<em>DetectorThread</em></div><span class="ar">→</span>
+      <div class="step">发布 detectionBuffer<em>notify_all</em></div><span class="ar">→</span>
+      <div class="step k">tick()<em>每批一次</em></div><span class="ar">→</span>
+      <div class="step k">①选靶 → ②稳定 → ③滤波 → ④瞄点 → ⑤⑥PID<em>control/</em></div><span class="ar">→</span>
+      <div class="step k">扳机 / 轨迹整形<em>TriggerFsm · AimPath</em></div><span class="ar">→</span>
+      <div class="step">sendRawMove<em>moveWorkerLoop</em></div><span class="ar">→</span>
+      <div class="step">硬件<em>Makcu / kmbox</em></div>
+    </div>
+  </div>
+
+  <!-- ══════════════ 关键约定 ══════════════ -->
+  <div class="flow">
+    <h2>容易踩的约定（都是花过代价的）</h2>
+    <table>
+      <tr><th>约定</th><th>为什么</th></tr>
+      <tr>
+        <td>tick() 在 <code>detectionBuffer.mutex</code> 释放后调用</td>
+        <td>tick() 自己要拿那把锁拷贝检测，持锁调用会<b>自死锁</b>。</td>
+      </tr>
+      <tr>
+        <td><code>ClassBucket{Delete=0,Filter=1,Aim=2}</code> 必须与 <code>toControllerConfig</code> 的 case 标签一致</td>
+        <td>有 <code>static_assert</code> 守着。不一致会让界面设的类别静默失效。</td>
+      </tr>
+      <tr>
+        <td>控制器配置映射（<code>flattenProfile</code>）必须在无 OpenCV 的 TU 里</td>
+        <td>放 <code>aim_loop.cpp</code> 就<b>编不进逻辑测试</b> ⇒ 漏映射这类 bug 零覆盖。这是"界面能改、跑起来没变"的根源。</td>
+      </tr>
+      <tr>
+        <td>逐类参数（y_offset / min_conf）必须有逐类断言</td>
+        <td>它们此前<b>存盘但没人读</b> —— 界面上能调、跑起来没反应。现已接通并钉住。</td>
+      </tr>
+      <tr>
+        <td>滤波只有一处，且只平滑中心点</td>
+        <td>平滑四角/宽高会让框变形，瞄点跟着漂。</td>
+      </tr>
+      <tr>
+        <td><code>u8"..."</code> 里不能用 ASCII 双引号</td>
+        <td>硬编译错误（C3688/C3872/C3873）。用「」代替。</td>
+      </tr>
+    </table>
+  </div>
+
+</div>
+</body>
+</html>
