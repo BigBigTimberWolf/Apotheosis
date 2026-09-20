@@ -71,35 +71,20 @@ std::string errWith(const char* what, const std::string& detail)
     return s;
 }
 
-// HID usage id (Keyboard/Keypad page 0x07) -> Windows Virtual-Key。
-// 只覆盖自动急停用到的四个方向键 —— 覆盖全部 256 个键没有意义,
-// 而**漏转**比不支持更危险(会发出别的键), 所以不认识的键一律返回 0 = 拒绝。
 int hidUsageToVk(int hid)
 {
     switch (hid)
     {
-    case 0x1A: return 0x57;   // W
-    case 0x04: return 0x41;   // A
-    case 0x16: return 0x53;   // S
-    case 0x07: return 0x44;   // D
-    default:   return 0;      // 明确拒绝, 不瞎猜
+    case 0x1A: return 0x57;
+    case 0x04: return 0x41;
+    case 0x16: return 0x53;
+    case 0x07: return 0x44;
+    default:   return 0;
     }
 }
 
-} // namespace
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 包装适配器实现 —— 不拥有连接对象, 只转发
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── MAKCU (官方库) ──
-//
-// 能力位取自 Makcu.cpp 的实际实现: toButton(1..5) 覆盖左/右/中/侧1/侧2,
-// 有 click/press/release/move/wheel, 而且 `device_.setMouseButtonCallback`
-// 提供**物理按键回读**(缓存进 shooting/zooming/middle/side1/side2_active)。
-//
-// ★ 但**没有** tapKey —— 所以自动急停在 MAKCU 档自动失效(这是既有的本意行为,
-//   不是遗漏: 官方库没有键盘注入通道)。
 WrappedMakcuDriver::WrappedMakcuDriver(MakcuConnection* conn) : conn_(conn) {}
 
 const char* WrappedMakcuDriver::name() const { return kBackendMakcu; }
@@ -121,8 +106,6 @@ bool WrappedMakcuDriver::move(int dx, int dy)
 {
     if (!isOpen()) return false;
     conn_->move(dx, dy);
-    // 官方库的 move 无返回值, 用"发完之后口还是开的"作为成功判据 ——
-    // 这是旧代码的原判据, 保留以免改变既有行为。
     return conn_->isOpen();
 }
 
@@ -140,7 +123,6 @@ bool WrappedMakcuDriver::wheel(int delta)
     return true;
 }
 
-// 官方库没有键盘注入通道 —— 明确失败, 让自动急停判定为不可用。
 bool WrappedMakcuDriver::tapKey(int, int, int) { return false; }
 
 int WrappedMakcuDriver::physicalButtonPressed(int button) const
@@ -157,81 +139,93 @@ int WrappedMakcuDriver::physicalButtonPressed(int button) const
     }
 }
 
-// ── MAKCUNEW (直通透传固件) ──
-//
-// 能力最全: 有 0x22 KEY_TAP 键盘通道(自动急停靠它), 也有物理按键回读。
-WrappedMakcuNewDriver::WrappedMakcuNewDriver(MakcuNewConnection* conn) : conn_(conn) {}
+WrappedMakcuNewDriver::WrappedMakcuNewDriver(MakcuNewConnection* connMouse,
+                                             MakcuNewConnection* connKbd)
+    : conn_mouse_(connMouse), conn_kbd_(connKbd) {}
 
 const char* WrappedMakcuNewDriver::name() const { return kBackendMakcuNew; }
 
 uint32_t WrappedMakcuNewDriver::capabilities() const
 {
-    return kCapMove | kCapButtonLeft | kCapButtonRight | kCapButtonMiddle |
-           kCapButtonSide | kCapWheel | kCapKeyboard | kCapPhysicalRead;
+    // 鼠标能力恒有; 键盘能力【只在这台真的接了键盘硬件时】才声明。
+    //
+    // 这很关键: 上层用 kCapKeyboard 判断"能不能注入键盘/能不能做自动急停"。
+    // 若这里无脑声明键盘能力, 但实际没有键盘硬件, 上层会一路走到 tapKey(),
+    // 而 tapKey 必须失败 —— 表现为"自动急停配了却没反应", 且无法从能力位看出原因。
+    // 如实上报后, 上层能直接判断出不可用。
+    uint32_t caps = kCapMove | kCapButtonLeft | kCapButtonRight | kCapButtonMiddle |
+                    kCapButtonSide | kCapWheel | kCapPhysicalRead;
+    if (keyboardConnection() != nullptr)
+        caps |= kCapKeyboard;
+    return caps;
 }
 
-bool WrappedMakcuNewDriver::isOpen() const { return conn_ != nullptr && conn_->isOpen(); }
+bool WrappedMakcuNewDriver::isOpen() const { return conn_mouse_ != nullptr && conn_mouse_->isOpen(); }
 
 std::string WrappedMakcuNewDriver::lastError() const
 {
-    // 固件波特率不持久化, 每次上电一定在 115200; 协商失败会自动退回。
-    // 这条理由带上"协商"这层, 因为连不上最常见的原因就是速率没谈成。
     return u8"[MAKCUNEW] 串口未打开或会话探活失败(固件上电必为 115200, 协商失败会自动退回)";
 }
 
 bool WrappedMakcuNewDriver::move(int dx, int dy)
 {
     if (!isOpen()) return false;
-    return conn_->move(dx, dy);
+    return conn_mouse_->move(dx, dy);
 }
 
-bool WrappedMakcuNewDriver::leftDown()   { if (!isOpen()) return false; conn_->press(1);   return true; }
-bool WrappedMakcuNewDriver::leftUp()     { if (!isOpen()) return false; conn_->release(1); return true; }
-bool WrappedMakcuNewDriver::rightDown()  { if (!isOpen()) return false; conn_->press(2);   return true; }
-bool WrappedMakcuNewDriver::rightUp()    { if (!isOpen()) return false; conn_->release(2); return true; }
-bool WrappedMakcuNewDriver::middleDown() { if (!isOpen()) return false; conn_->press(3);   return true; }
-bool WrappedMakcuNewDriver::middleUp()   { if (!isOpen()) return false; conn_->release(3); return true; }
+bool WrappedMakcuNewDriver::leftDown()   { if (!isOpen()) return false; conn_mouse_->press(1);   return true; }
+bool WrappedMakcuNewDriver::leftUp()     { if (!isOpen()) return false; conn_mouse_->release(1); return true; }
+bool WrappedMakcuNewDriver::rightDown()  { if (!isOpen()) return false; conn_mouse_->press(2);   return true; }
+bool WrappedMakcuNewDriver::rightUp()    { if (!isOpen()) return false; conn_mouse_->release(2); return true; }
+bool WrappedMakcuNewDriver::middleDown() { if (!isOpen()) return false; conn_mouse_->press(3);   return true; }
+bool WrappedMakcuNewDriver::middleUp()   { if (!isOpen()) return false; conn_mouse_->release(3); return true; }
 
 bool WrappedMakcuNewDriver::wheel(int delta)
 {
     if (!isOpen()) return false;
-    conn_->wheel(delta);
+    conn_mouse_->wheel(delta);
     return true;
 }
 
 bool WrappedMakcuNewDriver::tapKey(int hidKey, int holdMs, int mod)
 {
     if (!isOpen()) return false;
-    return conn_->tapKey(hidKey, holdMs, mod);
+    // 键盘动作走【键盘那台硬件】: 只插键盘的硬件才有意义把键盘事件送给它,
+    // 送错硬件会被它自己的 C 口真实设备状态覆盖/冲突。
+    MakcuNewConnection* kb = keyboardConnection();
+    if (!kb || !kb->isOpen()) return false;
+    return kb->tapKey(hidKey, holdMs, mod);
+}
+
+// 屏蔽真实键盘输入 durationMs 毫秒 —— 从【键盘那台硬件】发出。
+//
+// 自动急停的核心动作: 触发时把玩家按住的方向键冻住, 角色凭游戏自身惯性/
+// 停止行为停下, 而不是注入反向键去"刹车"。因此这里只发 km.mask, 不注入任何键。
+//
+// <=0 走 maskOff(解除), 与固件 km.maskoff 语义一致。
+bool WrappedMakcuNewDriver::maskRealKeyboard(int durationMs)
+{
+    if (!isOpen()) return false;
+    MakcuNewConnection* kb = keyboardConnection();
+    if (!kb || !kb->isOpen()) return false;
+    return (durationMs > 0) ? kb->mask(durationMs) : kb->maskOff();
 }
 
 int WrappedMakcuNewDriver::physicalButtonPressed(int button) const
 {
     if (!isOpen()) return -1;
-    const bool down = conn_->physicalButtonPressed(button);
+    // 物理按键读数只对鼠标那台有意义(鼠标 C 口插的是鼠标)。
+    const bool down = conn_mouse_->physicalButtonPressed(button);
     return down ? 1 : 0;
 }
 
 void WrappedMakcuNewDriver::cancelMove()
 {
-    if (isOpen()) conn_->cancelMove();
+    if (isOpen()) conn_mouse_->cancelMove();
 }
 
-// 直发: 每一拍推理结果要贴合, 排队会多一层调度延迟(既有行为)。
 bool WrappedMakcuNewDriver::directSend() const { return true; }
 
-// ── KMBOXNET (以太网 UDP) ──
-//
-// 能力: 位移 / 左右中侧键 / 滚轮 / 键盘 / 物理回读。
-//
-// ★ 两个必须说清的差异 (恢复这段代码时不能假装没这回事):
-//   ①**键盘用 vkey, 不是 HID usage id。** 自动急停那套是 HID usage
-//     (W=0x1A/A=0x04/S=0x16/D=0x07), 而 kmNet_keydown 吃的是 Windows
-//     Virtual-Key (W=0x57/A=0x41/S=0x53/D=0x44)。必须转换, 直接填 HID 值
-//     会发出完全无关的键。
-//   ②**固件没有"定时弹起"**, 必须在 keyUp 之前自己 hold —— 而且必须补抬,
-//     否则漏一次就把玩家的键永久卡住(与本项目"用 KEY_TAP 而不是 KEY_MASK"
-//     那条教训是同一个理由, 只是这里固件不提供自清, 只能我们自己保证)。
 WrappedKmboxNetDriver::WrappedKmboxNetDriver(KmboxNetConnection* conn) : conn_(conn) {}
 
 const char* WrappedKmboxNetDriver::name() const { return kBackendKmboxNet; }
@@ -274,7 +268,7 @@ bool WrappedKmboxNetDriver::tapKey(int hidKey, int holdMs, int)
 {
     if (!isOpen()) return false;
     const int vk = hidUsageToVk(hidKey);
-    if (vk == 0) return false;   // 这个键我们不会转, 明确失败, 不瞎猜
+    if (vk == 0) return false;
 
     conn_->keyDown(vk);
     if (holdMs > 0) Sleep(static_cast<DWORD>(holdMs));
@@ -296,18 +290,14 @@ int WrappedKmboxNetDriver::physicalButtonPressed(int button) const
     }
 }
 
-// 直发: UDP sendto 是微秒级且无阻塞握手, 不需要排队。
 bool WrappedKmboxNetDriver::directSend() const { return true; }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 工厂 —— 对应 AimMagic 的 `FUN_140040ff0`
-// ─────────────────────────────────────────────────────────────────────────────
 
 OpenResult open(const std::string& backend,
                 const std::string& makcuPort, unsigned int makcuBaud,
                 const std::string& makcuNewPort, unsigned int makcuNewBaud,
                 const std::string& kmboxNetIp, const std::string& kmboxNetPort,
-                const std::string& kmboxNetUuid)
+                const std::string& kmboxNetUuid,
+                const std::string& makcuNewPortKbd, unsigned int makcuNewBaudKbd)
 {
     OpenResult result;
 
@@ -333,7 +323,19 @@ OpenResult open(const std::string& backend,
                                    makcuNewPort + "@" + std::to_string(makcuNewBaud));
             return result;
         }
-        result.driver = new OwningDriver<WrappedMakcuNewDriver>(std::move(conn));
+        // 第二台(键盘)。端口为空或与第一台相同 => 不开, 键盘动作回落到第一台。
+        // 打开失败不阻断启动: 鼠标那台仍可用, 只是键盘动作会落到鼠标硬件上
+        // (真实键盘并不在那台上, 表现为键盘失效), 因此这里不报致命错误。
+        std::unique_ptr<MakcuNewConnection> connKbd;
+        if (!makcuNewPortKbd.empty() && makcuNewPortKbd != makcuNewPort)
+        {
+            connKbd = std::make_unique<MakcuNewConnection>(makcuNewPortKbd, makcuNewBaudKbd);
+            if (!connKbd->isOpen())
+                connKbd.reset();
+        }
+
+        result.driver = new OwningDriver<WrappedMakcuNewDriver>(
+            std::move(conn), std::move(connKbd));
         return result;
     }
 
@@ -355,7 +357,6 @@ OpenResult open(const std::string& backend,
         return result;
     }
 
-    // 不认识的档位: 给得出理由, 不默默选一个默认后端。
     result.error = u8"[输入后端] 不认识的名字 \"";
     result.error += backend.empty() ? std::string(u8"(空)") : backend;
     result.error += u8"\", 可选: ";
@@ -368,4 +369,4 @@ OpenResult open(const std::string& backend,
     return result;
 }
 
-} // namespace mouse_driver
+}

@@ -1,13 +1,3 @@
-// 通用控制器层 —— "配置 → 控制器" 的纯映射
-//
-// ★★ 为什么从 aim_loop.cpp 拆出来:
-//   aim_loop.cpp 要 include OpenCV / Windows / Qt（它读 detectionBuffer、
-//   找色快照、MouseThread），所以在非 Windows 上【编不了】。
-//   而本文件的映射逻辑是纯函数 —— 拆出来就能进逻辑测试。
-//   ★ 漏映射的表现是"界面能改、跑起来没变"，不报错不留痕，
-//     这类 bug 只能靠测试挡，所以它必须可测。
-//
-
 
 #include "runtime/aim_loop.h"
 
@@ -18,8 +8,6 @@
 namespace runtime::aim_loop
 {
 
-// ── 纯映射（实现见 aim_loop.h 的说明）────────────────────────────────────
-
 std::vector<int> buildClassBuckets(const std::vector<int>& aimClassIds)
 {
     int maxClassId = -1;
@@ -28,7 +16,6 @@ std::vector<int> buildClassBuckets(const std::vector<int>& aimClassIds)
     if (maxClassId < 0)
         return {};
 
-    // ★ 默认全 Delete —— "未知类别不瞄"是安全默认。
     std::vector<int> buckets(static_cast<size_t>(maxClassId) + 1, 0);
     for (int id : aimClassIds)
     {
@@ -42,18 +29,6 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
 {
     control::ControllerConfig cfg;
 
-    // ── 类别桶（两源合并）────────────────────────────────────────────
-    // ★ 三桶语义（方案 §3.4）: Aim 可瞄 / Filter 可见不瞄 / Delete 排除。
-    //
-    // ★★ 两个来源【都读】, 这是修掉"前后端对不上"的关键:
-    //   · flat.classFilters —— TargetPage 维护的【全局】类别桶(class_filters)
-    //   · flat.aimClassIds   —— 逐热键的 aim_classes 优先级列表
-    //   合并规则（顺序很重要, 见下）:
-    //     1. 先按 classFilters 铺全局桶
-    //     2. 再用 aimClassIds 把其中出现的类别【提升】为 Aim
-    //        （★ 只提升, 不降级 —— 逐热键写"Aim"是更具体的意图, 不该被全局 Delete 吃掉）
-    //     3. aimClassIds 里超出 classFilters 范围的类别, 补进桶数组
-    //     4. 两个来源都没有的类别 ⇒ Delete（安全默认: 未知类别不瞄）
     {
         int maxId = -1;
         for (const auto& cf : flat.classFilters)
@@ -66,7 +41,6 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
             cfg.buckets.byClassId.assign(static_cast<size_t>(maxId) + 1,
                                          control::Bucket::Delete);
 
-            // 1) 全局桶
             for (const auto& cf : flat.classFilters)
             {
                 if (cf.first < 0)
@@ -79,7 +53,6 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
                 }
             }
 
-            // 2) 逐热键只做"提升为 Aim"
             for (int id : flat.aimClassIds)
             {
                 if (id >= 0)
@@ -88,13 +61,9 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
         }
     }
 
-    // ── 选靶 ──────────────────────────────────────────────────────────
     cfg.selector.hysteresisRatio = flat.hysteresisRatio;
-    // ★ 0 = 不限制。距离门控目前由 FOV 椭圆承担，不在这里重复设第二道。
     cfg.selector.maxDistancePx = flat.maxDistancePx;
 
-    // ★★ 逐类别最低置信度（准入）。下标 = classId, 越界视为不限。
-    //   表的大小取"出现过的最大 classId + 1", 这样越界查询天然返回不限。
     cfg.selector.minConfByClassId.clear();
     for (const auto& mc : flat.classMinConf)
     {
@@ -102,28 +71,20 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
         if (id < 0) continue;
         if (static_cast<size_t>(id) >= cfg.selector.minConfByClassId.size())
             cfg.selector.minConfByClassId.resize(static_cast<size_t>(id) + 1, 0.0);
-        // ★ 同一 classId 出现多次时取【更严】的那个: 门槛是安全约束,
-        //   取宽的那个会让"某一条设置"静默失效。
         cfg.selector.minConfByClassId[static_cast<size_t>(id)] =
             std::max(cfg.selector.minConfByClassId[static_cast<size_t>(id)], mc.second);
     }
 
-    // ── 稳定器（②）───────────────────────────────────────────────────
-    // ★ 这 5 项此前【写死在 control/ 的默认值里、没有配置槽位】——
-    //   等于谁都调不了。现在可调（⚠️ 数值仍全是待实测的占位，方案 §7 第 6 条）。
     cfg.stabilizer.matchCenterRatio = flat.matchCenterRatio;
     cfg.stabilizer.areaRatioTol     = flat.areaRatioTol;
     cfg.stabilizer.kSnapMult        = flat.kSnapMult;
     cfg.stabilizer.minAspect        = flat.minAspect;
     cfg.stabilizer.maxAspect        = flat.maxAspect;
 
-    // ── 瞄点 ──────────────────────────────────────────────────────────
     cfg.aimPoint.yOffset = flat.yOffset;
     cfg.aimPoint.yOffsetMax = flat.yOffsetMax;
-    cfg.aimPoint.randomSeed = flat.randomSeed;   // 0 = 用内部固定常数
+    cfg.aimPoint.randomSeed = flat.randomSeed;
 
-    // ★★ 逐类别瞄点覆盖。查得到就用该类的, 查不到退回上面的热键级。
-    //   ★ 顺序保留（与 aim_classes 一致）, 但下游按 classId 查 —— 顺序无影响。
     cfg.classAimPoints.clear();
     cfg.classAimPoints.reserve(flat.classAimPoints.size());
     for (const auto& cap : flat.classAimPoints)
@@ -132,8 +93,6 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
         p.classId = static_cast<int>(cap[0]);
         p.yOffset = cap[1];
         p.yOffsetMax = cap[2];
-        // ★ 与 config 的 clamp 对齐: 范围必须在 [0,1] 且 lo <= hi。
-        //   不在这里重算的话, 一个"越界的旧配置"会直接把瞄点算到框外。
         p.yOffset = std::clamp(p.yOffset, 0.0, 1.0);
         p.yOffsetMax = std::clamp(p.yOffsetMax, 0.0, 1.0);
         if (p.yOffsetMax < p.yOffset)
@@ -142,7 +101,6 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
             cfg.classAimPoints.push_back(p);
     }
 
-    // ── PID ───────────────────────────────────────────────────────────
     cfg.pid.kpX = flat.kpX;
     cfg.pid.kpY = flat.kpY;
     cfg.pid.kiX = flat.kiX;
@@ -154,20 +112,23 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
     cfg.pid.iMax = flat.iMax;
     cfg.pid.maxOutputCounts = flat.maxOutputCounts;
     cfg.pid.pFullScalePx = flat.pFullScalePx;
-    // ★★ 这里【没有死区字段】—— 死区已整项删除（方案 §5.1）。
-    //    不要因为"少了点什么"就加回来。
+    cfg.pid.kPxPerCount = flat.kPxPerCount;
+    cfg.pid.inflightBeta = flat.inflightBeta;
+    cfg.pid.deadTimeMs = (flat.inflightDeadTimeMs > 0.0) ? flat.inflightDeadTimeMs : control::kLoopDeadTimeMs;
 
-    // ── 新鲜度门禁 ────────────────────────────────────────────────────
+    cfg.predictor.leadMs = flat.predictLeadMs;
+    cfg.predictor.maxVelocityPxPerSec = flat.predictMaxVelocityPxPerSec;
+    cfg.predictor.maxLeadRatio = flat.predictMaxLeadRatio;
+
     cfg.requireFreshDetection = true;
     cfg.requireFreshCrosshair = true;
 
     return cfg;
 }
 
-// HotkeyProfile → FlatConfig。这一层只做"搬字段", 不做任何判断 ——
-// 判断全在 toControllerConfig 里（那样才测得动）。
 FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
-                          const std::vector<ClassFilterState>& classFilters)
+                          const std::vector<ClassFilterState>& classFilters,
+                          const Config& globalConfig)
 {
     FlatConfig flat;
     flat.kpX = hk.ctl_kp_x;
@@ -181,25 +142,29 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     flat.iMax = hk.ctl_i_max;
     flat.maxOutputCounts = hk.ctl_max_output_counts;
     flat.pFullScalePx = hk.ctl_p_full_scale_px;
+    flat.kPxPerCount = hk.ctl_k_px_per_count;
+    flat.inflightBeta = hk.ctl_inflight_beta;
+    flat.inflightDeadTimeMs = hk.ctl_inflight_dead_time_ms;
+    flat.predictLeadMs = hk.ctl_predict_lead_ms;
+    flat.predictMaxVelocityPxPerSec = hk.ctl_predict_max_velocity_px_s;
+    flat.predictMaxLeadRatio = hk.ctl_predict_max_lead_ratio;
     flat.yOffset = hk.ctl_y_offset;
     flat.yOffsetMax = hk.ctl_y_offset_max;
-    flat.hysteresisRatio = hk.ctl_hysteresis_ratio;
-    flat.maxDistancePx = hk.ctl_max_distance_px;
     flat.randomSeed = hk.ctl_random_seed;
-    flat.matchCenterRatio = hk.ctl_match_center_ratio;
-    flat.areaRatioTol = hk.ctl_area_ratio_tol;
-    flat.kSnapMult = hk.ctl_k_snap_mult;
-    flat.minAspect = hk.ctl_min_aspect;
-    flat.maxAspect = hk.ctl_max_aspect;
+
+    // 全局选靶与稳定器
+    flat.hysteresisRatio = globalConfig.target_hysteresis_ratio;
+    flat.maxDistancePx = globalConfig.target_max_distance_px;
+    flat.matchCenterRatio = globalConfig.target_match_center_ratio;
+    flat.areaRatioTol = globalConfig.target_area_ratio_tol;
+    flat.kSnapMult = globalConfig.target_k_snap_mult;
+    flat.minAspect = globalConfig.target_min_aspect;
+    flat.maxAspect = globalConfig.target_max_aspect;
     flat.detectionResolution = detectionResolution;
     flat.aimClassIds.reserve(hk.aim_classes.size());
     for (const auto& ac : hk.aim_classes)
         flat.aimClassIds.push_back(ac.class_id);
 
-    // ★★ 逐类别瞄点 + 置信度门槛。两者都从 aim_classes 里搬 ——
-    //   它们本来就是"逐类别"的参数, 只是重建时后端没接。
-    //   ★ 顺序与 aim_classes 一致（那是优先级顺序）, 但下游按 classId 查,
-    //     不依赖顺序 —— 顺序只影响选靶优先级, 由 aimClassIds 那条路管。
     flat.classAimPoints.clear();
     flat.classAimPoints.reserve(hk.aim_classes.size());
     flat.classMinConf.clear();
@@ -212,13 +177,6 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
         flat.classMinConf.push_back({ ac.class_id, static_cast<double>(ac.min_conf) });
     }
 
-    // ★★ 全局类别桶: TargetPage 写的就是它。
-    //   不读它 ⇒ 用户在界面上设的类别对控制器【完全无效】(这就是原来的断层)。
-    //   ★ ClassBucket 的数值(Delete=0/Filter=1/Aim=2)与 toControllerConfig 里
-    //     的 case 标签一致, 所以直接 static_cast, 不做映射表。
-    //   ★★ 但"一致"这件事是【隐含契约】—— 若有人给 ClassBucket 重排序,
-    //      编译照样通过, 而 Filter 会静默变成 Aim(或反过来)。
-    //      下面这组 static_assert 把契约变成编译期错误: 重排序会直接编不过。
     static_assert(static_cast<int>(ClassBucket::Delete) == 0, "ClassBucket::Delete 必须 = 0");
     static_assert(static_cast<int>(ClassBucket::Filter) == 1, "ClassBucket::Filter 必须 = 1");
     static_assert(static_cast<int>(ClassBucket::Aim)    == 2, "ClassBucket::Aim 必须 = 2");
@@ -229,4 +187,4 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     return flat;
 }
 
-} // namespace runtime::aim_loop
+}

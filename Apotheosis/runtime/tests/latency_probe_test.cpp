@@ -1,14 +1,3 @@
-// =============================================================================
-// runtime/latency_probe.h 自测
-// =============================================================================
-//
-// 探针是纯 header、纯 std 依赖, 因此在任何平台都能编译运行 (不牵扯 Windows /
-// CUDA / OpenCV)。这让它可以脱离 Apotheosis 主工程单独回归。
-//
-//   c++ -std=c++20 -fno-char8_t -I Apotheosis Apotheosis/runtime/tests/latency_probe_test.cpp -o lp_test
-//
-// 覆盖: 阶段数学 / 丢帧统计 / 无戳消费 / reset / 开关 / 并发冒烟
-// =============================================================================
 
 #include "runtime/latency_probe.h"
 
@@ -30,10 +19,9 @@ namespace lat = runtime::latency;
 static void spin_us(int us)
 {
     const int64_t until = lat::nowNs() + static_cast<int64_t>(us) * 1000;
-    while (lat::nowNs() < until) { /* busy wait: 让区间可预测 */ }
+    while (lat::nowNs() < until) {   }
 }
 
-// 跑一整帧, 三段各插入指定的忙等。
 static void runFrame(int capWaitUs, int inferUs, int pubToAimUs)
 {
     lat::noteCaptureForStats(lat::markCapture());
@@ -52,11 +40,10 @@ int main()
 {
     printf(u8"=== latency_probe 自测 ===\n\n");
 
-    // ---------------------------------------------------------------- [1]
     printf(u8"[1] 阶段拆分与总延迟\n");
     {
         lat::reset();
-        for (int i = 0; i < 60; ++i) runFrame(0, 0, 0);   // 预热 EMA
+        for (int i = 0; i < 60; ++i) runFrame(0, 0, 0);
         lat::reset();
         for (int i = 0; i < 40; ++i) runFrame(200, 3000, 100);
 
@@ -64,7 +51,6 @@ int main()
         CHECK(s.frames_consumed == 40, u8"结算帧数 == 40");
         CHECK(s.stages[lat::kTotal].n == 40, u8"总延迟样本数 == 40");
 
-        // 采集->取帧 应约 0.2ms, 推理 应约 3.0ms
         CHECK(s.stages[lat::kCaptureWait].ema_ms > 0.1 &&
               s.stages[lat::kCaptureWait].ema_ms < 2.0,
               u8"采集->取帧 EMA 落在 [0.1, 2.0] ms");
@@ -72,7 +58,6 @@ int main()
               s.stages[lat::kInference].ema_ms < 6.0,
               u8"推理 EMA 落在 [2.5, 6.0] ms");
 
-        // 总延迟 = 三段之和, 必须 >= 各段
         CHECK(s.stages[lat::kTotal].ema_ms >= s.stages[lat::kInference].ema_ms,
               u8"总延迟 >= 推理段");
         CHECK(s.stages[lat::kEndToEnd].ema_ms > s.stages[lat::kTotal].ema_ms,
@@ -85,16 +70,14 @@ int main()
                s.stages[lat::kEndToEnd].ema_ms);
     }
 
-    // ---------------------------------------------------------------- [2]
     printf(u8"\n[2] detector 跟不上时统计丢帧\n");
     {
         lat::reset();
         for (int i = 0; i < 5; ++i) runFrame(0, 0, 0);
         CHECK(lat::snapshot().dropped_capture == 0, u8"连续取帧不记账为丢帧");
 
-        // 模拟 detector 卡了 3 帧: 采集继续产帧, 但没人 markSubmit
         for (int i = 0; i < 3; ++i) lat::noteCaptureForStats(lat::markCapture());
-        runFrame(0, 0, 0);   // detector 恢复, 一次取走最新的
+        runFrame(0, 0, 0);
 
         const auto s = lat::snapshot();
         CHECK(s.dropped_capture == 3, u8"跳过 3 帧被计入 dropped_capture");
@@ -103,14 +86,12 @@ int main()
                (unsigned long long)s.capture_frames);
     }
 
-    // ---------------------------------------------------------------- [3]
     printf(u8"\n[3] 无采集戳的消费不应污染统计\n");
     {
         lat::reset();
         for (int i = 0; i < 10; ++i) runFrame(0, 0, 0);
         const uint64_t before = lat::snapshot().stages[lat::kTotal].n;
 
-        // frame_stamp_ns == 0 (空检测帧 / 采集不可用)
         lat::markAimConsume(0, lat::nowNs());
         lat::markAimConsume(0, lat::nowNs());
 
@@ -119,7 +100,6 @@ int main()
         CHECK(s.stale_consumes == 2, u8"无戳消费计入 stale_consumes");
     }
 
-    // ---------------------------------------------------------------- [4]
     printf(u8"\n[4] reset 清空\n");
     {
         lat::reset();
@@ -129,7 +109,6 @@ int main()
               u8"阶段统计归零");
     }
 
-    // ---------------------------------------------------------------- [5]
     printf(u8"\n[5] 开关\n");
     {
         lat::setEnabled(false);
@@ -139,7 +118,6 @@ int main()
         CHECK(lat::enabled(), u8"重新开启");
     }
 
-    // ---------------------------------------------------------------- [6]
     printf(u8"\n[6] 输出格式\n");
     {
         lat::reset();
@@ -159,7 +137,6 @@ int main()
         for (const auto& line : ascii) printf("      %s\n", line.c_str());
     }
 
-    // ---------------------------------------------------------------- [7]
     printf(u8"\n[7] 并发冒烟 (采集线程 + 消费线程)\n");
     {
         lat::reset();
@@ -193,8 +170,6 @@ int main()
                (unsigned long long)s.frames_consumed, s.stages[lat::kTotal].ema_ms);
     }
 
-
-    // The same frame stamp must survive backend decoding and overlapping input.
     {
         lat::reset();
         const auto received = lat::nowNs() - 40'000'000;
@@ -223,7 +198,6 @@ int main()
               lat::snapshot().engine_inference_ms == -1.0,
               "session reset invalidates device and engine telemetry");
     }
-
 
     {
         lat::reset();

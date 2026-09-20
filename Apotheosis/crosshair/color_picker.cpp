@@ -12,17 +12,17 @@ namespace crosshair
 {
 namespace
 {
-std::atomic<int> g_armed_token{ 0 }; // 0 = idle; else current owner token
+std::atomic<int> g_armed_token{ 0 };
 std::atomic<int> g_pick_half{ kPickHalf };
 
-std::mutex g_result_mutex;           // guards everything below
+std::mutex g_result_mutex;
 int  g_next_token   = 0;
 bool g_result_ready = false;
 int  g_result_token = 0;
 int  g_result_h = 0;
 int  g_result_s = 0;
 int  g_result_v = 0;
-} // namespace
+}
 
 int ArmColorPick(int sampleHalf)
 {
@@ -32,7 +32,7 @@ int ArmColorPick(int sampleHalf)
         std::lock_guard<std::mutex> lk(g_result_mutex);
         g_result_ready = false;
         token = ++g_next_token;
-        if (token == 0) token = ++g_next_token; // never hand out 0
+        if (token == 0) token = ++g_next_token;
     }
     g_armed_token.store(token);
     return token;
@@ -62,7 +62,7 @@ void SubmitPickedColor(int h, int s, int v)
 {
     const int token = g_armed_token.load();
     if (token == 0)
-        return; // nobody armed — ignore stray click
+        return;
     {
         std::lock_guard<std::mutex> lk(g_result_mutex);
         g_result_h = h;
@@ -71,7 +71,7 @@ void SubmitPickedColor(int h, int s, int v)
         g_result_token = token;
         g_result_ready = true;
     }
-    g_armed_token.store(0); // result now carries the token; session done
+    g_armed_token.store(0);
 }
 
 bool TakePickedColor(int token, int& h, int& s, int& v)
@@ -102,17 +102,13 @@ bool SampleRegionHSV(const cv::Mat& bgr, int cx, int cy, int half,
     const cv::Rect roi(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
 
     cv::Mat hsv;
-    cv::cvtColor(bgr(roi), hsv, cv::COLOR_BGR2HSV); // H 0..179, S/V 0..255
+    cv::cvtColor(bgr(roi), hsv, cv::COLOR_BGR2HSV);
 
     std::vector<int> sVals;
     std::vector<int> vVals;
     sVals.reserve(roi.area());
     vVals.reserve(roi.area());
 
-    // H is angular: averaging raw hues breaks across the red 0/179 seam (e.g.
-    // hues 2 and 178 are 4 apart, not 176). Accumulate unit vectors and take
-    // the circular mean instead. 0..179 maps to 0..2pi at 2 deg/unit, i.e.
-    // angle = hue * (pi / 90).
     double sumSin = 0.0;
     double sumCos = 0.0;
     for (int y = 0; y < hsv.rows; ++y)
@@ -130,7 +126,7 @@ bool SampleRegionHSV(const cv::Mat& bgr, int cx, int cy, int half,
     if (sVals.empty())
         return false;
 
-    double meanAng = std::atan2(sumSin, sumCos); // -pi..pi
+    double meanAng = std::atan2(sumSin, sumCos);
     if (meanAng < 0.0)
         meanAng += 2.0 * CV_PI;
     h = static_cast<int>(std::lround(meanAng * (90.0 / CV_PI))) % 180;
@@ -145,4 +141,4 @@ bool SampleRegionHSV(const cv::Mat& bgr, int cx, int cy, int half,
     return true;
 }
 
-} // namespace crosshair
+}

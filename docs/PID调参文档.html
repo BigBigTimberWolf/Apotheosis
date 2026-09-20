@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis · PID 调参文档</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --line:#2b3444;
+    --fg:#e6edf3; --dim:#9aa7b6; --accent:#4da3ff; --accent2:#7c5cff;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --code:#0b0f16;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 120px}
+
+  header{
+    padding:56px 0 32px;border-bottom:1px solid var(--line);margin-bottom:8px;
+    background:linear-gradient(180deg,rgba(77,163,255,.09),transparent);
+  }
+  h1{font-size:30px;margin:0 0 10px;letter-spacing:.5px}
+  .sub{color:var(--dim);font-size:14px}
+  .badges{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap}
+  .badge{
+    font-size:12px;padding:4px 11px;border-radius:999px;
+    background:var(--panel2);border:1px solid var(--line);color:var(--dim);
+  }
+  .badge b{color:var(--accent);font-weight:600}
+
+  h2{
+    font-size:21px;margin:52px 0 16px;padding-left:13px;
+    border-left:4px solid var(--accent);
+  }
+  h3{font-size:16.5px;margin:30px 0 10px;color:#cfe3ff}
+  h4{font-size:14.5px;margin:20px 0 8px;color:var(--dim);font-weight:600}
+  p{margin:10px 0}
+  ul,ol{margin:10px 0;padding-left:24px}
+  li{margin:5px 0}
+  a{color:var(--accent)}
+
+  code{
+    font-family:"Cascadia Mono",Consolas,"SF Mono",monospace;
+    font-size:.88em;background:var(--code);padding:2px 6px;
+    border-radius:4px;color:#8fd3ff;border:1px solid #1e2735;
+  }
+  pre{
+    background:var(--code);border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;overflow:auto;font-size:13px;line-height:1.65;
+  }
+  pre code{background:none;border:none;padding:0;color:#c9d6e4}
+  .k{color:#ff7b72} .f{color:#d2a8ff} .n{color:#79c0ff} .c{color:#6b7d92;font-style:italic}
+  .s{color:#a5d6ff}
+
+  table{
+    width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px;
+  }
+  th,td{padding:9px 12px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--panel2);font-weight:600;color:#cfe3ff;white-space:nowrap}
+  tbody tr:nth-child(even){background:rgba(255,255,255,.017)}
+  td.num{text-align:right;font-family:"Cascadia Mono",Consolas,monospace}
+  .tw{overflow-x:auto}
+
+  .card{
+    background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:18px 20px;margin:18px 0;
+  }
+  .callout{
+    border-radius:10px;padding:14px 18px;margin:18px 0;
+    border-left:4px solid;background:var(--panel);
+  }
+  .callout .t{font-weight:700;margin-bottom:6px;font-size:14px}
+  .bad{border-color:var(--bad)}   .bad .t{color:var(--bad)}
+  .warn{border-color:var(--warn)} .warn .t{color:var(--warn)}
+  .ok{border-color:var(--ok)}     .ok .t{color:var(--ok)}
+  .info{border-color:var(--accent)}.info .t{color:var(--accent)}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:820px){.grid{grid-template-columns:1fr}}
+
+  nav{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px 22px;margin:28px 0;
+  }
+  nav ol{columns:2;column-gap:34px;margin:6px 0;padding-left:20px}
+  @media(max-width:640px){nav ol{columns:1}}
+  nav a{text-decoration:none}
+  nav a:hover{text-decoration:underline}
+
+  .pill{
+    display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:5px;
+    font-family:Consolas,monospace;font-weight:600;
+  }
+  .p-must{background:rgba(248,81,73,.16);color:#ff9a92;border:1px solid rgba(248,81,73,.4)}
+  .p-tune{background:rgba(77,163,255,.15);color:#8fd3ff;border:1px solid rgba(77,163,255,.4)}
+  .p-adv {background:rgba(124,92,255,.16);color:#c4b0ff;border:1px solid rgba(124,92,255,.4)}
+  .p-rare{background:rgba(63,185,80,.14);color:#7ee787;border:1px solid rgba(63,185,80,.4)}
+  .p-off {background:rgba(154,167,182,.13);color:#9aa7b6;border:1px solid rgba(154,167,182,.35)}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:13.5px;margin:10px 0}
+  .kv dt{color:var(--dim);font-family:Consolas,monospace}
+  .kv dd{margin:0}
+
+  .formula{
+    background:linear-gradient(180deg,#131a26,#0f1520);
+    border:1px solid #24304a;border-radius:10px;padding:18px 22px;
+    text-align:center;font-family:"Cascadia Mono",Consolas,monospace;
+    font-size:15px;margin:18px 0;color:#cfe3ff;overflow-x:auto;
+  }
+  .formula em{color:var(--accent);font-style:normal;font-weight:700}
+  .formula .r{color:var(--bad);font-weight:700}
+
+  .step{
+    display:flex;gap:14px;margin:14px 0;align-items:flex-start;
+  }
+  .step .no{
+    flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent2);
+    color:#fff;display:flex;align-items:center;justify-content:center;
+    font-weight:700;font-size:14px;
+  }
+  .step .bd{flex:1}
+  .step .bd b{color:#cfe3ff}
+
+  footer{
+    margin-top:70px;padding-top:22px;border-top:1px solid var(--line);
+    color:var(--dim);font-size:12.5px;
+  }
+  .src{font-size:12px;color:var(--dim);font-family:Consolas,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Apotheosis · PID 瞄准控制器调参文档</h1>
+  <div class="sub">
+    面向 <code>Apotheosis/control/pid_controller.*</code> 与 <code>Apotheosis/runtime/aim_loop.cpp</code>
+    的实测调参指南。所有默认值、钳位区间、常数均由源码逐行核对得出。
+  </div>
+  <div class="badges">
+    <span class="badge">内核 <b>control::PidController</b></span>
+    <span class="badge">默认 <b>Kp=35</b> / Ki=0 / Kd=0</span>
+    <span class="badge">单拍限幅 <b>200 counts</b></span>
+    <span class="badge">稳定判据 <b>Kp·dt·0.593 &lt; 0.2602</b></span>
+    <span class="badge">刻度 <b>0.593 counts/px</b></span>
+  </div>
+</header>
+
+<nav>
+  <b>目录</b>
+  <ol>
+    <li><a href="#s0">先读这一节（结论速览）</a></li>
+    <li><a href="#s1">控制器在链路里的位置</a></li>
+    <li><a href="#s2">数学：逐行公式</a></li>
+    <li><a href="#s3">★ 稳定判据与回路速度</a></li>
+    <li><a href="#s4">参数逐项手册</a></li>
+    <li><a href="#s5">安全 Kp 速查表</a></li>
+    <li><a href="#s6">推荐整定流程（六步）</a></li>
+    <li><a href="#s7">在途补偿（预测提前量）</a></li>
+    <li><a href="#s8">选靶 / 稳定器（影响 PID 的前提）</a></li>
+    <li><a href="#s9">场景配方</a></li>
+    <li><a href="#s10">故障排查表</a></li>
+    <li><a href="#s11">源码索引与存疑项</a></li>
+  </ol>
+</nav>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s0">0. 先读这一节（结论速览）</h2>
+
+<div class="callout bad">
+  <div class="t">★ 最重要的一条：Kp=35 是「按 120fps 标定」的，低帧率下不安全</div>
+  <p>
+    控制器有一条硬性的稳定判据，同时取决于 <b>Kp</b> 和 <b>实际回路 dt</b>：
+  </p>
+  <div class="formula">
+    <em>Kp</em> × <em>dt</em> × <b>0.593</b> &lt; <b>0.2602</b>
+    &nbsp;&nbsp;⟺&nbsp;&nbsp;
+    <em>Kp</em> &lt; 0.4388 / <em>dt</em>
+  </div>
+  <p>
+    在 <b>120 fps</b>（<code>dt=8.33ms</code>）下，Kp 的临界值是 <b>52.6</b>，默认 35 只用到 66%，
+    安全。<br>
+    但在 <b>60 fps</b>（<code>dt=16.67ms</code>）下，临界值掉到 <b>26.3</b> ——
+    <b>默认的 35 已经越过稳定线（比值 1.33），会抽。</b>
+  </p>
+  <p style="margin-bottom:0">
+    ⇒ <b>调 Kp 之前，先确认你的实际回路帧率。</b>帧率掉一半，Kp 必须跟着掉一半。
+  </p>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h4 style="margin-top:0">三个数必须一起看</h4>
+    <dl class="kv">
+      <dt>k = 0.593</dt><dd><b>增益刻度 k̂</b> —— 不是「像素→计数」的换算率，见 3.1.1</dd>
+      <dt>0.2602</dt><dd>临界每拍增益 g_crit —— 越过它回路开始振荡</dd>
+      <dt>46.0 ms</dt><dd>回路死区（dead time），<b>实测值不是估算</b></dd>
+    </dl>
+    <p style="margin-bottom:0;color:var(--dim);font-size:13px">
+      代码注释明确警告：<b>不许用软件 E2E 的 11ms 去算</b>这三个数。
+    </p>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">默认值是「安全起点」不是「性能最优」</h4>
+    <p style="margin-bottom:0">
+      <code>Kp=35, Ki=0, Kd=0</code> —— 只有 P 项、无积分、无微分。
+      UI 的原文说明是：<b>「六个增益默认 Kp=35 / 其余 0，等价于历史单套行为 —— 是安全起点。」</b>
+      它能跑，但不等于调好了。真正要花时间的是 Kp，其次 Kd。
+    </p>
+  </div>
+</div>
+
+<div class="callout warn">
+  <div class="t">第二个坑：单拍限幅 200 counts 会把大误差「削平」</div>
+  <p style="margin-bottom:0">
+    纯 P 项输出是 <code>Kp × 误差</code>。Kp=35 时，
+    <b>误差只要超过 5.7 像素，P 项就已经超过 200 的限幅了</b>。
+    也就是说在中远距离上，无论目标差多远，输出恒为满量程 200 counts ——
+    控制器工作在<b>纯饱和区</b>，此时手感由「限幅」而不是「Kp」决定。
+    Kp 只影响<b>误差进入 5.7px 以内的末段</b>行为。
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s1">1. 控制器在链路里的位置</h2>
+
+<p>每帧调用一次 <code>runtime::aim_loop::tick()</code>，内部整条链是：</p>
+
+<pre><code>detectionBuffer.boxes
+   │
+   ├─① <span class="f">filterAimCandidates</span>()   类别桶过滤 + 逐类置信度门槛
+   │
+   ├─② <span class="f">selectTarget</span>()          最近优先 + 锁定滞回（hysteresisRatio）
+   │
+   ├─③ <span class="f">stabilize</span>()             同目标判定 / Snap 突变检测 / 宽高比过滤
+   │        └─ Snap 或 NoHistory ⇒ <span class="k">硬重置</span> 滤波器 + PID + 预测状态
+   │
+   ├─④ <span class="f">AlphaBetaFilter::observe</span>()  τ=30ms 的 α-β 滤波 → 平滑中心 + 速度
+   │
+   ├─⑤ <span class="f">predictAnchor</span>()          在途补偿：中心 + v×leadMs
+   │        └─ <span class="f">computeAnchor</span>()       叠加 yOffset / 随机抖动 → 最终瞄点
+   │
+   ├─⑥ <span class="f">PidController::update</span>()   ★ <b>误差 = 瞄点 − 准星</b> → counts
+   │
+   ├─⑦ <span class="f">AimPathDriver::step</span>()     可选：贝塞尔/风力 路径整形
+   │
+   └─⑧ <span class="f">MouseThread::sendRawMove</span>()  → MAKCU / MAKCUNEW / KMBOXNET 硬件</code></pre>
+
+<div class="callout info">
+  <div class="t">误差定义与符号</div>
+  <p style="margin-bottom:0">
+    <code>e = anchor − cross</code>（瞄点减准星）。
+    PID 输出的是<b>把准星推向瞄点所需的位移</b>，方向由误差符号自然决定 ——
+    控制器内部<b>不</b>做任何方向反转。准星默认取检测画面几何中心
+    （<code>detection_resolution/2</code>），除非该热键开了准星找色。
+  </p>
+</div>
+
+<h3>1.1 每拍的时间步长 dt</h3>
+
+<div class="callout info">
+  <div class="t">回路是「事件驱动」，不是定时器驱动</div>
+  <p style="margin-bottom:0">
+    <code>tick()</code> 唯一的调用点是推理完成后发布检测结果的那一刻
+    （<code>detector/trt_detector.cpp:1603</code>）。
+    <b>没有 <code>SetTimer</code>、没有 <code>sleep</code>、没有固定 Hz。</b><br>
+    ⇒ <b>回路帧率 = 推理发布帧率</b>，它的下限由推理吞吐决定。
+    这正是「Kp 必须按帧率匹配」的根本原因。
+  </p>
+</div>
+
+<p>
+  <code>dt</code> 是<b>实测</b>的两次 tick 之间间隔，不是固定值：
+</p>
+<pre><code><span class="c">// aim_loop.cpp:285-312</span>
+dtSec = duration&lt;double&gt;(now - g_last_tick).count();
+
+<span class="c">// aim_loop.h:68-74 —— 可用性闸门</span>
+kMinDtSec = <span class="n">0.001</span>;   <span class="c">// 1 ms</span>
+kMaxDtSec = <span class="n">0.250</span>;   <span class="c">// 250 ms</span>
+dtIsUsable(dt) ⇔ 0.001 ≤ dt ≤ 0.250</code></pre>
+
+<ul>
+  <li><b>第一拍</b>只记录时间戳并重置控制器，直接返回，不产生输出。</li>
+  <li><b>dt 落在区间外</b>（卡顿 &gt;250ms、或时钟异常）⇒ 控制器被 <code>reset()</code>，
+      本拍不出力。这是刻意的保护：用一个坏 dt 去算积分/微分会把状态污染掉。</li>
+  <li>因为 dt 是实测的，<b>掉帧会直接改变增益等效值</b> —— 这正是第 3 节要讲的核心风险。</li>
+</ul>
+
+<h3>1.2 配置热重载</h3>
+<p>
+  每一拍都调用 <code>toControllerConfig(flattenProfile(...))</code> 重新下发配置
+  （<code>aim_loop.cpp:319</code>）。所以 <b>UI 改完立即生效，不用重启会话</b>。
+  注意 <code>setConfig</code> 只换参数，<b>不重置积分/余量状态</b>。
+</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s2">2. 数学：逐行公式</h2>
+
+<p>两轴完全独立，各有自己的 P/I/D 增益与状态。以下为 <code>pid_controller.cpp::stepAxis</code> 的精确语义。</p>
+
+<h3>2.1 主输出</h3>
+<div class="formula">
+  <em>u</em> = <em>dt</em> × <em>Kp</em> × ( <em>P</em> + <em>I</em> + <em>Kd</em> · <em>D</em> )
+</div>
+<pre><code><span class="c">// pid_controller.cpp:77-78</span>
+p = saturateForP(error, cfg_.pFullScalePx);
+u = dtSec * kp * (p + st.integral + kd * deriv);</code></pre>
+
+<div class="callout warn">
+  <div class="t">★ 注意 dt 乘在最外面 —— 这是与「教科书 PID」最容易看错的一点</div>
+  <p>
+    整体乘以 <code>dt</code>，意味着输出是<b>「这一拍应该走的位移」</b>而不是「速度」。
+    再加上单拍限幅 200，控制器的本质是：<b>每拍最多走 200 个 count，
+    走多少由 Kp·dt·误差 决定</b>。
+  </p>
+  <p style="margin-bottom:0">
+    推论：<b>同样的 Kp，帧率越低单拍位移越大</b>（因为 dt 大），
+    这就是低帧率下会抽的物理原因 —— 每一拍都跨得太远，直接冲过目标往复振荡。
+  </p>
+</div>
+
+<h3>2.2 P 项与连续饱和</h3>
+<pre><code>P = clamp(error, −pFullScalePx, +pFullScalePx)     <span class="c">// pFullScalePx &gt; 0 时</span>
+P = error                                          <span class="c">// pFullScalePx == 0（默认，不限）</span></code></pre>
+<p>
+  <code>ctl_p_full_scale_px</code> 是<b>连续</b>饱和（不是 hard clamp 后的死区）。
+  它的作用是「末段不冲过头」，<b>取代了早期版本的死区</b>。
+  默认 0 = 不限。
+</p>
+
+<h3>2.3 I 项与反向回吐（anti-windup）</h3>
+<pre><code><span class="c">// ① 误差反向 ⇒ 积分按指数回吐</span>
+<span class="k">if</span> (hasPrev &amp;&amp; error * prevError &lt; 0)
+    integral *= exp(−dt / tauUnwindSec);
+
+<span class="c">// ② 累加并夹取</span>
+integral += ki * error * dt;
+iMax_eff = (iMax &gt; 0) ? iMax : max(1, maxOutputCounts);   <span class="c">// 默认 iMax=0 ⇒ 用 200</span>
+integral = clamp(integral, −iMax_eff, +iMax_eff);</code></pre>
+<p>
+  两处细节：<br>
+  · <b>Ki 为 0 时积分被强制清零</b>（<code>else</code> 分支），所以关掉 Ki 不会留下残留。<br>
+  · 回吐判据是「误差符号与本拍相减的前一拍相反」，即<b>目标刚被超过/刚反向</b>那一刻，
+    旧积分立刻开始衰减，避免被它顶着继续冲。
+</p>
+
+<h3>2.4 D 项（带一阶低通）</h3>
+<pre><code>de = error − prevError;
+a  = 1 − exp(−dt / tauDerivSec);
+derivLp += (de − derivLp) * a;      <span class="c">// 一阶低通</span>
+D  = derivLp / dt;                  <span class="c">// 还原成「每秒变化率」</span></code></pre>
+<p>
+  低通时间常数 <code>tauDerivSec</code>（默认 20ms）专门用来削掉「目标急停时误差导数的尖峰」——
+  没有它，急停会产生一个巨大 D 冲量，把准星朝目标原来运动的方向猛推一下。
+  设为 0 = 不低通（噪声直接进 D）。
+</p>
+
+<h3>2.5 量化与余量（carry）</h3>
+<pre><code>limited      = clamp(u, −maxOutputCounts, +maxOutputCounts);
+withCarry    = limited + st.carry;
+rounded      = round(withCarry);
+countsClamped= clamp(rounded, −maxOutputCounts, +maxOutputCounts);
+st.carry     = withCarry − countsClamped;      <span class="c">← 未走完的小数留到下一拍</span></code></pre>
+<div class="callout ok">
+  <div class="t">carry 是精度补偿，不是 bug</div>
+  <p style="margin-bottom:0">
+    鼠标只能走整数 count，而 PID 算出的是小数。若直接截断，小误差会永远走不动（静差）。
+    <code>carry</code> 把小数部分记着、下一拍补上，保证<b>长期平均值精确</b>。
+    代价是控制器的有效分辨率被量化到 1 count。
+  </p>
+</div>
+
+<h3>2.6 稳定度读数 <code>stabilityRatio</code></h3>
+<pre><code><span class="c">// pid_controller.cpp:8-14</span>
+g     = kp * dtSec * kCountsPerPixel;     <span class="c">// = kp · dt · 0.593</span>
+ratio = g / kCriticalGain;                <span class="c">// ÷ 0.2602</span></code></pre>
+<p>
+  它被写进 <code>AxisTelemetry::stabilityRatio</code>，<b>但当前没有接到任何 UI 或日志</b>
+  （全仓库仅 <code>pid_controller.cpp</code> 赋值、<code>tests/control_layer_test.cpp</code> 断言）。
+  本调参文档把它手工算给你看 —— 它是判断「当前 Kp 在你的帧率下安不安全」的唯一依据。
+</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s3">3. ★ 稳定判据与回路速度</h2>
+
+<h3>3.1 三个常数从哪来</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>常数</th><th>值</th><th>含义</th><th>依据</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>kLoopDeadTimeMs</code></td><td class="num">46.0</td>
+      <td>回路纯延迟（采集→推理→瞄准→下发→游戏内部）</td>
+      <td>
+        <b>实机实测</b>（注释：「46ms 是实测不是估算」）<br>
+        <span class="pill p-off">死代码</span>
+        <b style="color:var(--bad)">⚠ 该常数在任何一个 .cpp 里都没有被使用！</b>
+        全仓库唯一出现处就是它自己的声明行。见下方警告框。
+      </td>
+    </tr>
+    <tr>
+      <td><code>kCriticalGain</code></td><td class="num">0.2602</td>
+      <td>临界增益：越过 ⇒ 振荡</td>
+      <td>实机标定（见 3.2 的交叉验证）</td>
+    </tr>
+    <tr>
+      <td><code>kCountsPerPixel</code></td><td class="num">0.593</td>
+      <td>像素 → 鼠标计数 的刻度</td>
+      <td>实机标定</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout bad">
+  <div class="t">★ 重要更正：46ms 死区并没有被补偿，它只是一个「记录用的」常数</div>
+  <p>
+    实测核对（全仓库 grep）：<code>kLoopDeadTimeMs</code> <b>只出现在它自己的声明行</b>
+    （<code>pid_controller.h:90</code>），<b>没有任何 .cpp 引用它</b>。<br>
+    也就是说：本控制器里<b>没有 Smith 预估器、没有延迟缓冲、没有事件同步、没有任何死区补偿</b>。
+    46ms 这个数字的作用是<b>解释「为什么临界增益是 0.2602」</b>，
+    而不是「在线补偿 46ms」。
+  </p>
+  <p style="margin-bottom:0">
+    UI 面板的说明提到 <code>s_max</code>（= 增益×刻度）与 46ms 的关系：
+    <code>Kp×s_max ≲ 52</code> 是实机整定出来的经验上限。
+    这与第 3 节的判据一致（120fps 下 Kp 临界 52.6）。
+  </p>
+</div>
+
+<div class="callout warn">
+  <div class="t">★ 第二条更正：<code>stabilityRatio</code> 是「死遥测」—— 面板上看不到</div>
+  <p style="margin-bottom:0">
+    它每拍每轴都被算出来存进 <code>AxisTelemetry::stabilityRatio</code>，
+    但 <code>telemetry()</code> <b>在生产代码里零调用点</b>
+    （仅单元测试读取）。所以：<b>不要指望界面或日志里能看到稳定度读数，
+    必须按本节公式手工核算。</b>
+  </p>
+</div>
+
+<div class="callout bad">
+  <div class="t">★ 不许用「软件 E2E 11ms」去重算这三个数</div>
+  <p style="margin-bottom:0">
+    代码注释里留了这条警告。软件内部测到的端到端 11ms
+    <b>不包含游戏引擎内部延迟</b>，而后者才是回路延迟的大头。
+    用 11ms 反推会把临界增益放大 4 倍以上，得到一组「算着安全、实机必抽」的参数。
+  </p>
+</div>
+
+<h3>3.1.1 那 0.593 到底是什么？（不是「像素→计数」换算率）</h3>
+
+<p>
+  名字叫 <code>kCountsPerPixel</code>，字面意思是「每像素多少计数」，
+  很容易被读成「屏幕 1 像素 = 0.593 个鼠标计数」——
+  <b>但这是误读</b>。它是<b>回路增益刻度 k̂</b>：
+</p>
+
+<div class="formula">
+  g = <em>Kp</em> × <em>dt</em> × <em>k̂</em>
+  &nbsp;&nbsp;其中&nbsp;&nbsp;<em>k̂</em> = 0.593
+</div>
+
+<p>
+  <b>g 是「每拍的开环增益」</b>（无量纲）。<code>k̂</code> 是这条链路里
+  「控制器输出 → 实际瞄准点位移」之间的总折算系数，
+  它把「虚拟摇杆的 1 个计数」和「屏幕上 1 个像素」联系起来。
+</p>
+
+<div class="callout info">
+  <div class="t">它衡量的是「灵敏度」，不是「分辨率」</div>
+  <p>
+    <code>k̂ = 0.593</code> 的物理含义：<b>发出 1 个计数，目标画面大约移动 1/0.593 ≈ 1.69 像素。</b>
+    （即 <code>1/k̂ ≈ 1.686 px/count</code>）
+  </p>
+  <p style="margin-bottom:0">
+    它同时被<b>游戏内灵敏度</b>和<b>检测分辨率</b>共同决定 ——
+    所以它是<b>「本机（本灵敏度设置）」的实测值</b>，
+    换灵敏度或换 <code>detection_resolution</code> 就该重标。
+  </p>
+</div>
+
+<h4>它是怎么标定出来的：由实机振荡反推</h4>
+<p>
+  标定过程记录在 <code>tools/pid_sim/_verify_crit.py</code>，思路是<b>用实机日志反解</b>：
+</p>
+
+<pre><code><span class="c"># 1) 离散「积分 + 纯延迟 d 拍」环路的临界每拍增益（解析式）</span>
+g_crit(d) = 2 · sin( π / (2·(2d+1)) )
+
+<span class="c"># 2) 由实机振荡周期反推纯延迟拍数</span>
+<span class="c">#    环路振荡周期 = 2·(2d+1) 拍</span>
+实机摆动周期 = 200.0 ms = 24.0 拍   (dt = 8.333 ms)
+⇒ d = (24 − 2) / 4 = 5.50 拍 = <b>45.8 ms</b>
+⇒ 与 kAimDeadTimeS = 46.0 ms 相印证（差 0.2 ms）✓
+
+<span class="c"># 3) 实机在 Kp=100 时测到 g = 0.494，验证 g/k_crit = 1.892</span>
+<span class="c">#    与文档记载的「1.9 倍临界」吻合 ✓</span></code></pre>
+
+<p>
+  也就是说这三个常数是<b>互相自洽、交叉验证过</b>的一组实测值，
+  不是拍脑袋填的魔数：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>量</th><th>值</th><th>怎么来的</th><th>验证</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>死区 d</td><td class="num">46.0 ms<br>(5.52 拍 @120fps)</td>
+      <td>由实机 200ms 摆动周期反推</td>
+      <td>反推值 45.8ms，<b>差 0.2ms 吻合</b> ✓</td>
+    </tr>
+    <tr>
+      <td>g_crit</td><td class="num">0.2602</td>
+      <td><code>2·sin(π/(2·(2·5.52+1)))</code> 取 d≈5.5</td>
+      <td>实机 Kp=100 时 g=0.494，比值 1.892 ≈ 记载的 1.9 ✓</td>
+    </tr>
+    <tr>
+      <td>k̂</td><td class="num">0.593</td>
+      <td>实机标定的灵敏度折算（本机）</td>
+      <td>另两档刻度 0.25 / 1.0 作为对照一并计算</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout ok">
+  <div class="t">这份标定还独立确认了第 3 节的 Kp 天花板</div>
+  <p style="margin-bottom:0">
+    <code>tools/pid_sim/results/step1_crit.txt</code> 用解析式算出：
+    <b>120fps 下 Kp 临界值 ≈ 48.8 ~ 57.6</b>（取决于 d 取 5 还是 6 拍）。<br>
+    这与 <code>kCriticalGain/k̂/dt = 0.2602/0.593/0.008333 = 52.65</code>
+    <b>落在同一区间</b>，两条独立路径互相印证。
+    同一份报告还写明实机观测「Kp=30 稳、Kp=100 抽」，
+    天花板确实落在这个区间内 —— <b>完全自洽。</b>
+  </p>
+</div>
+
+<h4>⚠️ 耦合风险：改灵敏度或分辨率必须重标 k̂</h4>
+<p>
+  因为 <code>g = Kp·dt·k̂</code> 直接正比于 <code>k̂</code>，
+  <b>k̂ 变大会等比例地把回路推向不稳定</b>。
+  <code>step1_crit.txt</code> 里明确标注了这条：
+</p>
+<pre><code><span class="c"># k 摄动 +30% 等价于增益摄动 +30%，会顶到安全上界 —— 见 robustness.py</span>
+  k=0.25   d=5: Kp 安全上界 = 82.0
+  k=0.593  d=5: Kp 安全上界 = 34.6     <span class="c">← 本机</span>
+  k=1.0    d=5: Kp 安全上界 = 20.5</code></pre>
+<div class="callout warn">
+  <div class="t">实战含义</div>
+  <p style="margin-bottom:0">
+    如果你把<b>游戏内灵敏度调高 30%</b>，等效于 k̂ 涨到 0.77，
+    此时原来的安全 Kp 会直接顶上边界。
+    <b>换灵敏度装备/改分辨率之后，请把 Kp 按比例降回去再重新整定。</b>
+    这一点在源码和 UI 里都没有提示。
+  </p>
+</div>
+
+<h3>3.2 判据的交叉验证（为什么可信）</h3>
+<p>
+  <code>tests/control_layer_test.cpp:551-559</code> 用三组实机结论钉住了这条公式
+  （<code>dt = 1/120</code>）：
+</p>
+<div class="tw">
+<table>
+  <thead><tr><th>Kp</th><th>ratio = Kp·dt·0.593/0.2602</th><th>实机结论</th><th>公式判定</th><th>一致</th></tr></thead>
+  <tbody>
+    <tr><td class="num">30</td><td class="num">0.5697</td><td>稳</td><td>&lt; 1.0 → 稳</td><td style="color:var(--ok)">✓</td></tr>
+    <tr><td class="num">52</td><td class="num">0.9875</td><td>接近临界</td><td>0.9~1.0</td><td style="color:var(--ok)">✓</td></tr>
+    <tr><td class="num">100</td><td class="num">1.8990</td><td>抽</td><td>&gt; 1.0 → 抽</td><td style="color:var(--ok)">✓</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  三组全部吻合，且公式对 Kp 单调 —— 这条判据可以放心用来外推到别的帧率。
+  同一测试还验证了 <code>τ=30ms</code> 的积分回吐确实比历史值 <code>200ms</code> 快
+  （反向两拍后残余积分更小）。
+</p>
+
+<h3>3.3 把判据换算成「不同帧率下的 Kp 上限」</h3>
+<div class="formula">
+  <em>Kp</em><sub>max</sub> = 0.2602 / ( <em>dt</em> × 0.593 ) = 0.4388 / <em>dt</em>
+</div>
+
+<div class="tw">
+<table>
+  <thead>
+    <tr><th>回路帧率</th><th>dt</th><th>Kp 临界值<br><span style="font-weight:400;color:var(--dim)">ratio = 1.0</span></th>
+        <th>推荐上限<br><span style="font-weight:400;color:var(--dim)">ratio ≈ 0.8</span></th>
+        <th>保守值<br><span style="font-weight:400;color:var(--dim)">ratio ≈ 0.5</span></th>
+        <th>默认 35 的 ratio</th><th>默认值是否安全</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>30 fps</td><td class="num">33.3 ms</td><td class="num">13.2</td><td class="num">10.5</td><td class="num">6.6</td>
+        <td class="num" style="color:var(--bad)">2.66</td><td style="color:var(--bad)">✗ 严重超限</td></tr>
+    <tr><td>60 fps</td><td class="num">16.7 ms</td><td class="num">26.3</td><td class="num">21.1</td><td class="num">13.2</td>
+        <td class="num" style="color:var(--bad)">1.33</td><td style="color:var(--bad)">✗ 超限</td></tr>
+    <tr><td>90 fps</td><td class="num">11.1 ms</td><td class="num">39.5</td><td class="num">31.6</td><td class="num">19.7</td>
+        <td class="num" style="color:var(--warn)">0.89</td><td style="color:var(--warn)">△ 逼近临界</td></tr>
+    <tr><td><b>120 fps</b></td><td class="num">8.3 ms</td><td class="num"><b>52.6</b></td><td class="num"><b>42.1</b></td><td class="num"><b>26.3</b></td>
+        <td class="num" style="color:var(--ok)">0.66</td><td style="color:var(--ok)">✓ 安全（标定点）</td></tr>
+    <tr><td>144 fps</td><td class="num">6.9 ms</td><td class="num">63.2</td><td class="num">50.6</td><td class="num">31.6</td>
+        <td class="num" style="color:var(--ok)">0.55</td><td style="color:var(--ok)">✓ 安全</td></tr>
+    <tr><td>165 fps</td><td class="num">6.1 ms</td><td class="num">72.4</td><td class="num">57.9</td><td class="num">36.2</td>
+        <td class="num" style="color:var(--ok)">0.48</td><td style="color:var(--ok)">✓ 安全</td></tr>
+    <tr><td>240 fps</td><td class="num">4.2 ms</td><td class="num">105.3</td><td class="num">84.3</td><td class="num">52.7</td>
+        <td class="num" style="color:var(--ok)">0.33</td><td style="color:var(--ok)">✓ 很安全</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout warn">
+  <div class="t">实战含义：帧率波动会让「安全参数」变成「危险参数」</div>
+  <p style="margin-bottom:0">
+    游戏帧率、推理耗时都不是恒定的。你在 144fps 下调好的 Kp=50，
+    一旦掉到 60fps，ratio 从 0.79 直接跳到 <b>1.90</b> —— 必抽。
+    <b>按你帧率的下限、而不是平均值来定 Kp。</b>
+  </p>
+</div>
+
+<h3>3.4 正确读出你的实际回路帧率</h3>
+<p>
+  回路帧率 <b>≠ 采集 FPS</b>。它受采集、推理、检测缓冲、热键是否触发共同影响。
+  最可靠的读法是看模型发布日志里 <code>[predict]</code> 行的间隔，
+  或直接看 <code>runtime::latency</code> 快照里的 <code>capture_interval_ms</code> / <code>capture_fps</code>。
+</p>
+<div class="callout info">
+  <div class="t">快速自测法</div>
+  <p style="margin-bottom:0">
+    把 <code>ctl_kp_x</code> 从 35 往上加：<b>出现左右摆动/嗡嗡响的那个值，就是接近临界了</b>。
+    往回退 30~40% 作为工作点。这比算 dt 更直接，因为它自动包含了所有你没测到的延迟。
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s4">4. 参数逐项手册</h2>
+
+<p>
+  全部键位于 <code>config.ini</code> 的 <code>[hotkey.N]</code> 段，
+  UI 路径：<b>瞄准设置 → 瞄准控制器（通用控制器层）</b>。
+</p>
+
+<h3>4.1 增益</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>键 / UI 标签</th><th>默认</th><th>范围</th><th>作用与调法</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>ctl_kp_x</code><br><span class="src">Kp · 水平</span><br><span class="pill p-must">首要</span></td>
+      <td class="num">35.0</td><td class="num">0 – 500<br>步进 0.5</td>
+      <td>
+        <b>比例增益（跟枪 / 水平轴）。唯一非零的默认增益，调参先只动它。</b><br>
+        调大 ⇒ 贴上目标更快；配合高帧率过高 ⇒ 左右摆动。<br>
+        <b>上限由第 3 节的判据决定，不是由 0–500 决定。</b>
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_kp_y</code><br><span class="src">Kp · 垂直</span></td>
+      <td class="num">35.0</td><td class="num">0 – 500</td>
+      <td>压枪轴。与水平轴分开，因为「跟枪」和「压枪」手感需求不同。默认与水平相同。</td>
+    </tr>
+    <tr>
+      <td><code>ctl_ki_x</code> / <code>ctl_ki_y</code><br><span class="src">Ki · 水平/垂直</span><br><span class="pill p-off">默认关</span></td>
+      <td class="num">0.0</td><td class="num">0 – 100<br>步进 0.01</td>
+      <td>
+        消掉匀速目标留下的<b>稳态滞后</b>。<br>
+        <b>默认 0（关闭）。</b>开太大遇到目标急停会过冲、来回甩。<br>
+        <b>只在确认存在稳态滞后时才加</b>，且从 0.01 量级起试。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_kd_x</code> / <code>ctl_kd_y</code><br><span class="src">Kd · 水平/垂直</span><br><span class="pill p-off">默认关</span></td>
+      <td class="num">0.0</td><td class="num">0 – 100<br>步进 0.01</td>
+      <td>
+        按误差变化速度提前刹车，<b>抑制过冲</b>。<br>
+        <b>默认 0。对检测噪声非常敏感</b> —— 调大之前先确认框是稳的（看稳定器那一节）。<br>
+        与 <code>tauDerivSec</code> 配合使用；先开低通再提 Kd。
+      </td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>4.2 整形与限幅</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>键 / UI 标签</th><th>默认</th><th>范围</th><th>作用与调法</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>ctl_p_full_scale_px</code><br><span class="src">P 项饱和 (像素, 0=不限)</span><br><span class="pill p-adv">进阶</span></td>
+      <td class="num">0.0</td><td class="num">0 – 2000</td>
+      <td>
+        P 项连续饱和阈值。误差超过它之后 P 项不再增大，<b>负责「末段不冲过头」
+        —— 它是死区的替代品</b>。<br>
+        <b>0 = 不限（默认）。</b>设成非 0 会削平大甩枪的力度。<br>
+        想在接近目标时变「柔和」而不引入死区静差，就调它。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_tau_unwind_sec</code><br><span class="src">积分回吐时间常数 (秒)</span></td>
+      <td class="num">0.030</td><td class="num">0.001 – 5.0<br>步进 0.005</td>
+      <td>
+        误差反向时积分按 <code>exp(−dt/τ)</code> 回吐的时间常数。<b>越小回吐越快</b>，
+        越不容易在目标变向时被旧积分顶着走。<br>
+        <b>30ms 是历史调整后的起点，注释注明「无实测依据」。</b>
+        仅在 <code>Ki ≠ 0</code> 时才有意义。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_tau_deriv_sec</code><br><span class="src">D 项低通时间常数 (秒)</span></td>
+      <td class="num">0.020</td><td class="num">0 – 5.0<br>步进 0.005</td>
+      <td>
+        削掉目标急停时误差导数的尖峰。<br>
+        <b>0 = 不低通</b>（噪声直接进 D 项）。仅在 <code>Kd ≠ 0</code> 时才有意义。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_i_max</code><br><span class="src">积分上限 (0=用输出限幅)</span></td>
+      <td class="num">0.0</td><td class="num">0 – 5000</td>
+      <td>
+        积分项上限。<b>0 = 直接用输出限幅（默认 200）当上限。</b><br>
+        限制积分是防止长时间同向误差把积分喂得过大，一旦反向就变成一大坨甩不掉的输出。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_max_output_counts</code><br><span class="src">单拍最大位移 (计数)</span><br><span class="pill p-must">安全闸</span></td>
+      <td class="num">200</td><td class="num">1 – 1000<br>步进 1</td>
+      <td>
+        <b>最后一道安全闸：不管 PID 算出多大，单拍都不会超过它。</b><br>
+        <b>调小 ⇒ 更安全但更慢；调大 ⇒ 甩枪更猛，错的时候也更猛。</b><br>
+        第一次打开控制器建议先设小（如 50–80）。
+      </td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout info">
+  <div class="t">限幅与 Kp 的耦合关系（很实用）</div>
+  <p>
+    纯 P 工作时，输出 = <code>Kp · dt · e</code>。取 <code>maxOutputCounts</code> 为 M，则
+    <b>P 项开始饱和的误差阈值</b>是：
+  </p>
+  <div class="formula" style="margin:10px 0">
+    <em>e</em><sub>sat</sub> = M / ( <em>Kp</em> · <em>dt</em> )
+  </div>
+  <div class="tw">
+  <table>
+    <thead><tr><th>配置</th><th>M</th><th>Kp</th><th>dt</th><th>e_sat</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td>默认 @120fps</td><td class="num">200</td><td class="num">35</td><td class="num">8.3ms</td><td class="num">686 px</td><td>几乎不饱和，Kp 全程有效</td></tr>
+      <tr><td><b>实际（含 46ms 死区感受）</b></td><td class="num">200</td><td class="num">35</td><td class="num">—</td><td class="num"><b>≈5.7 px</b></td><td><b>误差 &gt;5.7px 即满量程</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-bottom:0">
+    ⚠️ 这两行看着矛盾，是因为<b>两套口径</b>：公式 <code>u=dt·Kp·(P+I+Kd·D)</code> 里的 dt 是拍间隔，
+    但<code>e_sat = M/(Kp·dt)</code> 代进 8.3ms 得 686px，与实机手感（贴上去就满速）不符。
+    <b>实测口径下 e_sat ≈ 5.7px，说明实际生效的刻度远大于 Kp·dt≈0.29。</b>
+    这一点源码里没有被解释，已列入第 11 节的「待确认项」——
+    调参时请以 <b>实测手感</b>为准，不要只信公式。
+  </p>
+</div>
+
+<h3>4.3 输出与随机化</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>键 / UI 标签</th><th>默认</th><th>范围</th><th>作用与调法</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>ctl_random_seed</code><br><span class="src">瞄点随机种子 (0=固定)</span></td>
+      <td class="num">0</td><td class="num">0 – 999999</td>
+      <td>
+        瞄点 Y 随机抖动的种子。<b>0 = 用内部固定常数</b>（同一帧可复现）。<br>
+        非 0 ⇒ 每次启动得到不同抖动序列。<br>
+        <b>只在「瞄准类别」里某类的『随机锁点 Y』上下限不相等时才有意义。</b>
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_enabled</code><br><span class="src">★ 启用控制器</span><br><span class="pill p-must">总开关</span></td>
+      <td class="num">false</td><td class="num">bool</td>
+      <td>
+        <b>默认关闭。</b>打开后程序会真的往游戏机发鼠标位移。<br>
+        UI 明确警告：<b>参数未在真机标定过，第一次打开请先把最大位移调小、
+        并准备好随时关掉。</b>
+      </td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s5">5. 安全 Kp 速查表</h2>
+
+<p>按第 3 节判据直接取值。三档对应「激进 / 平衡 / 保守」，<b>取你帧率下限量那一行</b>。</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>你的回路帧率</th><th>激进 <span style="font-weight:400;color:var(--dim)">ratio≈0.95</span></th>
+    <th>平衡 <span style="font-weight:400;color:var(--dim)">ratio≈0.75</span></th>
+    <th>保守 <span style="font-weight:400;color:var(--dim)">ratio≈0.5</span></th>
+    <th>配合 maxOutputCounts</th></tr></thead>
+  <tbody>
+    <tr><td>30 fps</td><td class="num">12</td><td class="num">10</td><td class="num">6</td><td class="num">50–80</td></tr>
+    <tr><td>60 fps</td><td class="num">25</td><td class="num">20</td><td class="num">13</td><td class="num">80–120</td></tr>
+    <tr><td>90 fps</td><td class="num">37</td><td class="num">30</td><td class="num">19</td><td class="num">120–160</td></tr>
+    <tr><td><b>120 fps</b>（标定点）</td><td class="num"><b>50</b></td><td class="num"><b>39</b></td><td class="num"><b>26</b></td><td class="num"><b>150–200</b></td></tr>
+    <tr><td>144 fps</td><td class="num">60</td><td class="num">47</td><td class="num">31</td><td class="num">180–240</td></tr>
+    <tr><td>165 fps</td><td class="num">68</td><td class="num">54</td><td class="num">36</td><td class="num">200–280</td></tr>
+    <tr><td>240 fps</td><td class="num">100</td><td class="num">79</td><td class="num">52</td><td class="num">280–400</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout ok">
+  <div class="t">验证过程（可复算）</div>
+  <p style="margin-bottom:0">
+    以 120fps 平衡档为例：<code>ratio = Kp·dt·0.593/0.2602 = 39×0.008333×0.593/0.2602 = 0.741</code> ✓<br>
+    以 240fps 保守档为例：<code>52×0.004167×0.593/0.2602 = 0.494</code> ✓
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s6">6. 推荐整定流程（六步）</h2>
+
+<div class="step"><div class="no">1</div><div class="bd">
+  <b>确认前提：检测框要稳。</b>
+  Kd 对噪声极其敏感，框在抖的时候调 Kd 等于放大噪声。
+  先看检测预览窗口，框是否逐帧稳定跟随目标。若在跳，先回去调
+  <code>confidence_threshold</code> / <code>nms_threshold</code>，
+  不要动 PID。
+</div></div>
+
+<div class="step"><div class="no">2</div><div class="bd">
+  <b>测出你的实际回路帧率</b>（第 3.4 节），算出 Kp 上限。
+  记下来，这是后面所有增益的天花板。
+</div></div>
+
+<div class="step"><div class="no">3</div><div class="bd">
+  <b>把安全闸调小。</b><code>ctl_max_output_counts</code> 先设 <b>50–80</b>。
+  这一步是为了「万一参数错了，伤害有限」。
+</div></div>
+
+<div class="step"><div class="no">4</div><div class="bd">
+  <b>只调 Kp（水平），Ki=Kd=0。</b>
+  从低往上加，每次 +20~30%，每次实机试。
+  找到<b>刚开始出现左右摆动的值</b>，然后<b>退回 30~40%</b> 作为工作点。
+  垂直轴 <code>ctl_kp_y</code> 独立再调一次（压枪通常可以更高，因为目标是单向运动）。
+</div></div>
+
+<div class="step"><div class="no">5</div><div class="bd">
+  <b>需要阻尼才加 Kd。</b>
+  症状：接近目标时冲过头、来回荡一两次才停。
+  先把 <code>ctl_tau_deriv_sec</code> 确认在 <b>0.020</b>（有低通保护），
+  再从小值起加 <code>ctl_kd_x</code>。<br>
+  <b>加 Kd 会让响应变慢</b>，如果只是「有点慢」而不是「冲过头」，不要加 Kd。
+</div></div>
+
+<div class="step"><div class="no">6</div><div class="bd">
+  <b>最后才考虑 Ki，且通常不需要。</b>
+  症状：目标匀速移动时，准星<b>稳定地落后一个固定距离</b>、追不上但也不摆。
+  这才是稳态滞后。从 <code>0.01</code> 量级起加，同时确认
+  <code>ctl_tau_unwind_sec</code> 保持 0.030。<br>
+  <b>如果表现是「抖」而不是「稳定落后」，那不是 Ki 的问题。</b>
+</div></div>
+
+<div class="callout warn">
+  <div class="t">调参纪律</div>
+  <ul style="margin-bottom:0">
+    <li><b>一次只动一个参数。</b>PID 三个增益互相耦合，同时改两个无法归因。</li>
+    <li><b>改完立即生效</b>（每拍重读配置），但<b>积分/余量状态不会重置</b> ——
+        调完最好松开热键重新按下，让状态干净。</li>
+    <li><b>先降 Kp 再加 Kd</b>，不要用 Kd 去救一个过大的 Kp。</li>
+  </ul>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s7">7. 在途补偿（预测提前量）</h2>
+
+<p>
+  作用于 PID <b>之前</b>：按目标速度把瞄点往前推一段，抵消链路延迟。
+  链路是「采集 → 推理 → 瞄准 → 下发 → 游戏内部」。
+</p>
+
+<div class="formula">
+  <em>lead</em> = clamp( <em>v</em>, v<sub>max</sub> ) × ( <em>autoLatency</em> + <em>leadMs</em> ) / 1000
+  &nbsp;&nbsp;然后&nbsp;&nbsp;
+  lead ← clamp( lead, maxLeadRatio × 框对角线 )
+</div>
+
+<h3>7.1 三个键</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>键 / UI 标签</th><th>默认</th><th>范围</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>ctl_predict_lead_ms</code><br><span class="src">预测提前时间 (毫秒, 0=关闭)</span><br><span class="pill p-must">总开关</span></td>
+      <td class="num">0.0</td><td class="num">0 – 1000</td>
+      <td>
+        <b>手填的、程序测不到的那部分延迟</b> —— 即游戏从收到鼠标移动到画面真正变化之间的内部延迟。<br>
+        <b>★ 0 = 关闭（默认），此时另外两个参数不读取，行为与没有该功能时完全一致。</b><br>
+        调大 ⇒ 更早打提前量；太大 ⇒ 目标急停时冲过头。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_predict_max_velocity_px_s</code><br><span class="src">速度上限 (像素/秒, 0=不限)</span></td>
+      <td class="num">0.0</td><td class="num">0 – 100000</td>
+      <td>
+        速度估计超限时<b>钳住速度（保留方向、只压大小）</b>。<br>
+        <b>0 = 不限制（默认）。</b><br>
+        <b>怎么定：先看日志里 <code>[predict] v=</code> 打出的实际速度，再往上留余量。</b>
+        定太低会把正常移动的目标当异常，提前量被白白压掉。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_predict_max_lead_ratio</code><br><span class="src">预测距离上限 (目标框对角线倍数, 0=不限)</span></td>
+      <td class="num">0.0</td><td class="num">0 – 100</td>
+      <td>
+        预测推进量的硬上限，<b>单位是目标框对角线倍数</b>（1.0 = 最多提前一个对角线）。<br>
+        <b>0 = 不限制（默认）。</b><br>
+        用相对量而非绝对像素，是为了让远近目标的保护尺度一致 ——
+        固定像素数在近处（框大）显得太小、远处（框小）显得太大。<br>
+        <b>它是最后一道保险：异常速度估计不会把准星甩出去。</b>
+      </td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>7.2 自动累加的延迟</h3>
+<p>程序能测到的那几段由 <code>latency_probe</code> 自动累加（全部取 EMA 平滑平均值，不取瞬时值，避免提前量每帧乱跳）：</p>
+<pre><code>autoLatencyMs = kCaptureWait + kInference + kPublishToAim + kAimToMove
+<span class="c">// 只累加已产生过样本的段；一段样本都没有时返回 −1</span>
+<span class="c">// −1 ⇒ 本拍没测到 ⇒ 沿用上一帧；上一帧也没有 ⇒ 本拍不预测</span></code></pre>
+<p>
+  <b>不会拿 0 或负数去顶</b> —— 这是刻意的失效保护。关闭功能时 predictor 状态被一并重置，
+  所以「调回 0 再调回来」不会沿用关闭期间的陈旧延迟。
+</p>
+
+<h3>7.3 调法</h3>
+<ol>
+  <li>先<b>把 lead 设成一个小值（如 10ms）打开功能</b>，此时预测器开始打日志。</li>
+  <li>看 <code>[predict]</code> 行：<code>v=</code> 是目标实际速度，<code>lead=</code> 是实际使用的提前时间
+      （括号里拆成 <code>auto + user</code>），<code>dx/dy</code> 是实际推进量，
+      <code>cap=</code> 是距离上限，<code>speed=</code> 显示是否触发速度钳制。</li>
+  <li>用观测到的 <code>v</code> 峰值来定 <code>max_velocity</code>（留 1.5~2 倍余量）。</li>
+  <li>用 <code>lead</code> 与 <code>dx</code> 的关系来定 <code>max_lead_ratio</code>：
+      若日志频繁出现 <code>[LEAD CLAMPED]</code>，说明上限在起作用。</li>
+  <li>最后微调 <code>lead_ms</code> 本体，直到「移动目标命中率上升、静止目标不冲过头」。</li>
+</ol>
+<p class="src">
+  日志默认每 30 帧一行；调参时可把 <code>aim_loop.cpp</code> 的
+  <code>kPredictLogEveryFrame</code> 改成 <code>true</code> 切成每帧。
+</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s8">8. 选靶 / 稳定器（影响 PID 的前提）</h2>
+
+<div class="callout info">
+  <div class="t">为什么这些「不是 PID」的参数要写进 PID 调参文档</div>
+  <p style="margin-bottom:0">
+    因为它们会<b>触发 PID 的硬重置</b>，或者决定 PID 拿到的是不是一个干净的误差信号。
+    UI 里作者自己也标注了：<b>「稳定器」那 5 项与滞回倍数目前都是【占位值】，没有实测依据，
+    默认值只保证「程序能跑」。</b>
+  </p>
+</div>
+
+<h3>8.1 PID 会被硬重置的时机</h3>
+
+<div class="callout bad">
+  <div class="t">★★ 最容易被忽略的坑：<code>matchCenterRatio</code> 默认 0.5 让 Snap 极其频繁</div>
+  <p>看 <code>stabilizer.cpp:48-58</code> 的判决逻辑：</p>
+  <pre style="margin:10px 0"><code>snapped = (centerDist &gt; lastDiag × kSnapMult)      <span class="c">// 1.15 × 对角线</span>
+       || (面积比超出 [1/2, 2]);
+
+<span class="k">if</span> (snapped)  verdict = Snap;
+<span class="k">else</span>          verdict = (centerDist &lt;= lastDiag × matchCenterRatio)   <span class="c">// 0.5 × 对角线</span>
+                      ? Ok : <b>Snap</b>;      <span class="c">← 注意这里：不满足就判 Snap</span></code></pre>
+  <p>
+    也就是说，<b>「没有明显瞬移」但「中心移动超过半个对角线」的帧，
+    照样判成 Snap，照样触发滤波 + PID 硬重置。</b>
+    阈值不是 1.15 个对角线，而是 <b>0.5 个对角线</b>（<code>matchCenterRatio</code> 默认 0.5）。
+  </p>
+  <p><b>算一下实际余量：</b></p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>目标框尺寸</th><th>对角线</th><th>允许的单拍中心位移</th><th>在 120fps 下相当于</th></tr></thead>
+    <tbody>
+      <tr><td>40 × 80（远距小目标）</td><td class="num">89 px</td><td class="num" style="color:var(--bad)">≈ 45 px</td><td class="num">5,360 px/s</td></tr>
+      <tr><td>80 × 160（中距）</td><td class="num">179 px</td><td class="num">≈ 89 px</td><td class="num">10,700 px/s</td></tr>
+      <tr><td>160 × 320（贴脸）</td><td class="num">358 px</td><td class="num">≈ 179 px</td><td class="num">21,500 px/s</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-bottom:0">
+    小目标 45px/拍 的门槛，在快速跟枪时会<b>反复踩线</b>。
+    每次踩线 ⇒ 滤波和 PID 状态被清空 ⇒ 等效于「控制器不停地重新起步」，
+    表现为<b>跟枪时一顿一顿、始终贴不紧</b>，而<b>看参数完全找不出原因</b>。<br>
+    ⇒ 若出现这种症状，<b>先把 <code>ctl_match_center_ratio</code> 从 0.5 调大到 1.0~1.5</b>
+    （更容易认成同一个目标），再回头调 PID。
+  </p>
+</div>
+
+<div class="tw">
+<table>
+  <thead><tr><th>时机</th><th>条件</th><th>重置范围</th></tr></thead>
+  <tbody>
+    <tr><td>新目标 / 瞬移</td>
+        <td><code>stabilize()</code> 返回 <code>Snap</code> 或 <code>NoHistory</code><br>
+            <span class="src">Snap：位移 &gt; 0.5×对角 或 &gt; 1.15×对角 或面积比超限</span></td>
+        <td>滤波器 + <b>PID</b> + 预测状态</td></tr>
+    <tr><td>无可瞄候选</td><td>类别桶过滤后候选为空</td>
+        <td>选靶 + 稳定器 + 滤波器 + <b>PID</b> + 预测</td></tr>
+    <tr><td>第一拍</td><td>会话刚激活</td><td>全套</td></tr>
+    <tr><td>dt 非法</td><td><code>dt &lt; 1ms</code> 或 <code>dt &gt; 250ms</code></td><td><b>仅 PID</b></td></tr>
+    <tr><td>目标丢失后恢复</td>
+        <td>无检测的拍会提前返回、<b>不更新 <code>g_last_tick</code></b>，
+            于是恢复后的第一拍 dt 必然变大、常超 250ms</td>
+        <td><b>仅 PID</b>（经 dt 非法路径）</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  代码注释点明了设计意图：<b>「Snap/NoHistory ⇒ 硬重置滤波与 PID，否则换目标会『滑过去』并冲一下。」</b>
+</p>
+
+<h3>8.2 选靶与稳定器参数</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>键 / UI 标签</th><th>默认</th><th>范围</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>ctl_hysteresis_ratio</code><br><span class="src">选靶滞回倍数</span></td>
+      <td class="num">1.3</td><td class="num">1.0 – 10.0</td>
+      <td>
+        已锁定时，新候选必须比它<b>近这么多倍</b>才换目标。<br>
+        <b>1.0 = 没有滞回（每帧都选最近的）。</b><br>
+        <b>★ 它不是一个手感旋钮，是滤波能否生效的前提</b> ——
+        不加滞回时，两个目标交替成为「最近」会让滤波器每帧复位，滤波等于白做。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_max_distance_px</code><br><span class="src">选靶距离上限 (0=不限)</span></td>
+      <td class="num">0.0</td><td class="num">0 – 5000</td>
+      <td>超出此距离（检测像素）的候选不参与选靶。<b>默认 0 = 不限</b>，因为距离门控已由 FOV 椭圆承担。</td>
+    </tr>
+    <tr>
+      <td><code>ctl_match_center_ratio</code><br><span class="src">稳定器·认目标中心系数</span><br><span class="pill p-must">影响 PID</span></td>
+      <td class="num">0.5</td><td class="num">0.001 – 10.0</td>
+      <td>
+        「这帧的框和上帧是同一目标吗」的判据：
+        <b>中心距离 ≤ 上帧框对角线 × 该系数</b> ⇒ <code>Ok</code>；<b>否则直接判 <code>Snap</code></b>
+        （见 8.1，这是最容易踩的坑）。<br>
+        调大 ⇒ 更容易认成同一个（目标跳一下也接着跟）；调小 ⇒ 更容易判成换目标（触发重置）。<br>
+        <b>★ 出现「跟枪一顿一顿」时优先调它，而不是调 PID。</b>
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_area_ratio_tol</code><br><span class="src">稳定器·面积容差倍数</span></td>
+      <td class="num">2.0</td><td class="num">1.0 – 100.0</td>
+      <td>面积比超出 <code>[1/该值, 该值]</code> 判为换目标。目标跑远/跑近时框面积本来就会变，这是留给它的容差。<b>不能小于 1。</b></td>
+    </tr>
+    <tr>
+      <td><code>ctl_k_snap_mult</code><br><span class="src">稳定器·突变系数</span></td>
+      <td class="num">1.15</td><td class="num">0.001 – 100.0</td>
+      <td>
+        本帧位移超过「上帧框对角线 × 该系数」判为瞬移（Snap）⇒ <b>触发滤波与 PID 硬重置</b>。<br>
+        调小 ⇒ 更敏感（换目标反应快，但抖动可能误判）；调大 ⇒ 更宽容（可能把真换目标当成快速移动）。
+      </td>
+    </tr>
+    <tr>
+      <td><code>ctl_min_aspect</code> / <code>ctl_max_aspect</code><br><span class="src">稳定器·最小/最大宽高比</span></td>
+      <td class="num">0.2 / 5.0</td><td class="num">0.001 – 100.0</td>
+      <td>宽高比在区间外 ⇒ 当离谱误检丢掉。<b>会自动排序保证 min ≤ max。</b></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>8.3 滤波器（决定 PID 的输入质量）</h3>
+<p>
+  <code>AlphaBetaFilter</code>，时间常数 <code>kAnchorFilterTauMs = 30.0</code>（源码常量，未暴露为配置项）。
+</p>
+<pre><code><span class="f">alphaForTau</span>(τ, dt) = clamp( 1 − exp(−dt/τ), 0, 1 )
+<span class="f">betaForTau</span> (τ, dt) = clamp( α² / (2 − α), 0, 1 )
+
+predicted = estimate + velocity × dt
+residual  = 测量中心 − predicted
+estimate += residual × α
+velocity += residual × (β / dt)</code></pre>
+<p>
+  这是数学上等价于稳态恒速 Kalman 的极限形式。
+  <b>τ=30ms 是固定的</b>：τ 越小 ⇒ α 越大 ⇒ 越信测量（跟得紧但更抖）；
+  τ 越大 ⇒ 越平滑但滞后越大。<b>目前不开放调节</b>，如果觉得「跟得肉」或「太抖」，
+  只能从 Kp 与在途补偿两端去补。
+</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s9">9. 场景配方</h2>
+
+<div class="grid">
+<div class="card">
+<h4 style="margin-top:0">A · 低帧率机器（60–90 fps）</h4>
+<p style="font-size:13.5px;margin-bottom:6px">
+<b>最关键：Kp 必须降下来</b>，否则必抽。
+</p>
+<pre style="font-size:12.5px"><code>ctl_kp_x = <span class="n">20</span>       <span class="c"># 60fps 平衡档</span>
+ctl_kp_y = <span class="n">20</span>
+ctl_ki_x = <span class="n">0</span>
+ctl_kd_x = <span class="n">0</span>
+ctl_max_output_counts = <span class="n">100</span>
+ctl_predict_lead_ms = <span class="n">0</span>   <span class="c"># 先不开</span></code></pre>
+<p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
+  90fps 可以用 30。先跑通再逐步加。
+</p>
+</div>
+
+<div class="card">
+<h4 style="margin-top:0">B · 120 fps 标准</h4>
+<pre style="font-size:12.5px"><code>ctl_kp_x = <span class="n">39</span>
+ctl_kp_y = <span class="n">39</span>
+ctl_ki_x = <span class="n">0</span>
+ctl_kd_x = <span class="n">0</span>
+ctl_max_output_counts = <span class="n">200</span>
+ctl_hysteresis_ratio = <span class="n">1.3</span></code></pre>
+<p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
+  就是默认 35 的小幅提升，ratio=0.74。
+</p>
+</div>
+
+<div class="card">
+<h4 style="margin-top:0">C · 高刷 144–240 fps</h4>
+<pre style="font-size:12.5px"><code>ctl_kp_x = <span class="n">47</span>       <span class="c"># 144fps 平衡</span>
+ctl_kp_y = <span class="n">47</span>
+ctl_kd_x = <span class="n">0.10</span>     <span class="c"># 有余量再加阻尼</span>
+ctl_tau_deriv_sec = <span class="n">0.020</span>
+ctl_max_output_counts = <span class="n">240</span></code></pre>
+<p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
+  240fps 可到 Kp≈79 / M≈350。
+</p>
+</div>
+
+<div class="card">
+<h4 style="margin-top:0">D · 移动目标（开在途补偿）</h4>
+<pre style="font-size:12.5px"><code>ctl_predict_lead_ms = <span class="n">15</span>   <span class="c"># 起点，先小</span>
+ctl_predict_max_velocity_px_s = <span class="n">0</span>
+ctl_predict_max_lead_ratio = <span class="n">0.5</span>  <span class="c"># 半个对角线封顶</span></code></pre>
+<p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
+  先看日志 <code>v=</code> 再回填速度上限。
+</p>
+</div>
+
+<div class="card">
+<h4 style="margin-top:0">E · 跟得慢 / 有稳态落后</h4>
+<pre style="font-size:12.5px"><code>ctl_kp_x = <span class="n">45</span>       <span class="c"># 先加 P</span>
+<span class="c"># 若仍稳定落后固定距离：</span>
+ctl_ki_x = <span class="n">0.02</span>     <span class="c"># 很小量</span>
+ctl_tau_unwind_sec = <span class="n">0.030</span>
+ctl_i_max = <span class="n">0</span>          <span class="c"># 用输出限幅</span></code></pre>
+<p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
+  <b>先确认是「稳定落后」而不是「抖」。</b>
+</p>
+</div>
+
+<div class="card">
+<h4 style="margin-top:0">F · 过冲 / 来回荡</h4>
+<pre style="font-size:12.5px"><code>ctl_kp_x = <span class="n">35</span>       <span class="c"># 先降 P</span>
+ctl_tau_deriv_sec = <span class="n">0.020</span>  <span class="c"># 确认低通在</span>
+ctl_kd_x = <span class="n">0.08</span>     <span class="c"># 再小量加 D</span></code></pre>
+<p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
+  优先降 Kp。<b>不要用 Kd 救过大的 Kp。</b>
+</p>
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s10">10. 故障排查表</h2>
+
+<div class="tw">
+<table>
+  <thead><tr><th>现象</th><th>最可能的原因</th><th>怎么改</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>完全不动</b></td>
+      <td><code>ctl_enabled=false</code>；或类别不在 <code>aim</code> 桶；或设备没连</td>
+      <td>确认总开关打开；目标页确认类别；硬件页「移动测试」</td>
+    </tr>
+    <tr>
+      <td><b>左右/上下摆动（抽）</b></td>
+      <td><b>Kp 超过你帧率下的临界值</b>（第 3 节）</td>
+      <td>降 Kp；或提帧率；或降 <code>max_output_counts</code> 压缩单拍幅度</td>
+    </tr>
+    <tr>
+      <td><b>帧率一变就抽</b></td>
+      <td>按平均帧率而非<b>下限</b>定的 Kp</td>
+      <td>按帧率下限重定 Kp（取速查表更保守那一行）</td>
+    </tr>
+    <tr>
+      <td><b>移动太慢 / 跟不上</b></td>
+      <td>Kp 太小；或 <code>max_output_counts</code> 太小</td>
+      <td>先提 Kp（在安全范围内），再提限幅</td>
+    </tr>
+    <tr>
+      <td><b>冲过目标再荡回来</b></td>
+      <td>Kp 偏大；Kd 为 0；或 dt 偏大</td>
+      <td>降 Kp 20%；确认 <code>tau_deriv_sec=0.020</code> 后小量加 Kd</td>
+    </tr>
+    <tr>
+      <td><b>匀速移动的目标永远落后一点</b></td>
+      <td>稳态滞后（纯 P 的固有特性）</td>
+      <td>小量加 <code>ctl_ki_x</code>（0.01–0.03）；或开在途补偿</td>
+    </tr>
+    <tr>
+      <td><b>目标急停时被猛推一下</b></td>
+      <td>D 项导数尖峰；或积分残留顶着</td>
+      <td>确认 <code>tau_deriv_sec</code> 非 0；减小 <code>ctl_ki_*</code>；减小 <code>tau_unwind_sec</code></td>
+    </tr>
+    <tr>
+      <td><b>准星在目标附近高频抖</b></td>
+      <td>Kd 太大 + 检测框在抖；或 D 低通关了</td>
+      <td><b>先修检测稳定性</b>（confidence/NMS），再降 Kd，确认 <code>tau_deriv_sec &gt; 0</code></td>
+    </tr>
+    <tr>
+      <td><b>换目标时「滑过去」并冲一下</b></td>
+      <td>Snap 判定没触发，PID 带着旧状态追新目标</td>
+      <td>调小 <code>ctl_k_snap_mult</code>（更敏感）；调小 <code>ctl_match_center_ratio</code></td>
+    </tr>
+    <tr>
+      <td><b>两个目标之间来回换锁</b></td>
+      <td>没有滞回，滤波器每帧复位</td>
+      <td>确认 <code>ctl_hysteresis_ratio &gt; 1.0</code>（默认 1.3）</td>
+    </tr>
+    <tr>
+      <td><b>预测开了但没效果</b></td>
+      <td><code>lead_ms=0</code>；或没有自动延迟样本；或速度估计为 0</td>
+      <td>看 <code>[predict]</code> 日志的 <code>idle(...)</code> 原因：<code>auto-latency gap</code> / <code>no-velocity</code></td>
+    </tr>
+    <tr>
+      <td><b>预测开了反而冲过头</b></td>
+      <td><code>lead_ms</code> 太大</td>
+      <td>降 <code>lead_ms</code>；设 <code>max_lead_ratio</code> 封顶；设速度上限</td>
+    </tr>
+    <tr>
+      <td><b>偶发一帧猛跳</b></td>
+      <td>dt 异常被 <code>reset()</code>，或 Snap 重置后第一拍</td>
+      <td>正常保护行为。若频繁发生 ⇒ 检查系统卡顿 / 帧率稳定性</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="s11">11. 源码索引与存疑项</h2>
+
+<h3>11.1 关键源码位置</h3>
+<div class="tw">
+<table>
+  <thead><tr><th>内容</th><th>位置</th></tr></thead>
+  <tbody>
+    <tr><td>PID 内核实现</td><td class="src">Apotheosis/control/pid_controller.cpp:27-105</td></tr>
+    <tr><td>PidConfig 默认值</td><td class="src">Apotheosis/control/pid_controller.h:7-25</td></tr>
+    <tr><td>三个实测常数</td><td class="src">Apotheosis/control/pid_controller.h:90-92</td></tr>
+    <tr><td>稳定判据实现</td><td class="src">Apotheosis/control/pid_controller.cpp:8-14</td></tr>
+    <tr><td>配置键默认值与钳位</td><td class="src">Apotheosis/config/config.h:46-57、config.cpp:518-529、config.cpp:620-637</td></tr>
+    <tr><td>UI 面板与提示文本</td><td class="src">qt_ui/pages/AimSettingsPage.cpp:720-871</td></tr>
+    <tr><td>运行时 dt 与整链</td><td class="src">Apotheosis/runtime/aim_loop.cpp:232-443</td></tr>
+    <tr><td>dt 可用性闸门</td><td class="src">Apotheosis/runtime/aim_loop.h:68-74</td></tr>
+    <tr><td>配置下发（热重载）</td><td class="src">Apotheosis/runtime/aim_loop_config.cpp:28-124</td></tr>
+    <tr><td>α-β 滤波器</td><td class="src">Apotheosis/control/alpha_beta_filter.cpp:28-75</td></tr>
+    <tr><td>在途补偿</td><td class="src">Apotheosis/control/predictor.cpp:30-121</td></tr>
+    <tr><td>自动延迟累加</td><td class="src">Apotheosis/runtime/latency_probe.h:341-359</td></tr>
+    <tr><td>选靶与滞回</td><td class="src">Apotheosis/control/selector.cpp:38-120</td></tr>
+    <tr><td>稳定判据的实机断言</td><td class="src">tests/control_layer_test.cpp:551-559</td></tr>
+    <tr><td>预测日志格式</td><td class="src">Apotheosis/runtime/aim_loop.cpp:121-185</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>11.2 已核实的事实（不是推测）</h3>
+<div class="callout bad">
+  <div class="t">以下三条已用全仓库 grep + 逐行读码核实</div>
+  <ol>
+    <li>
+      <b><code>kLoopDeadTimeMs = 46.0</code> 是死代码。</b>
+      唯一出现处是 <code>pid_controller.h:90</code> 的声明行，
+      <b>没有任何 .cpp 引用</b>。所以本控制器<b>没有死区补偿</b> ——
+      没有 Smith 预估器、没有延迟缓冲、没有事件同步。
+      46ms 只用于「解释临界增益为何是 0.2602」，不在运行时起作用。
+      <span class="src">（<code>docs/architecture.html:217</code> 声称 PID「含链路死区补偿（46ms）」，与代码不符。）</span>
+    </li>
+    <li>
+      <b><code>stabilityRatio</code> 是死遥测。</b>
+      每拍每轴都算并存入 <code>AxisTelemetry::stabilityRatio</code>，
+      但 <code>telemetry()</code> 在<b>生产代码里零调用点</b>
+      （仅 <code>tests/control_layer_test.cpp</code> 读取）。
+      <b>UI、日志、IPC 都拿不到它</b> ⇒ 必须手工按第 3 节公式核算。
+    </li>
+    <li>
+      <b>Snap 判据的实际阈值是 0.5 个对角线，不是 1.15。</b>
+      <code>stabilizer.cpp:56-57</code>：不满足 <code>centerDist ≤ lastDiag × matchCenterRatio(0.5)</code>
+      就判 <code>Snap</code> ⇒ 触发滤波 + PID 硬重置。
+      小目标（40×80）在 120fps 下只需 <b>≈45 px/拍</b> 就踩线。
+      <b>这是「跟枪一顿一顿但参数看不出问题」的头号嫌疑。</b>
+    </li>
+    <li>
+      <b><code>kCountsPerPixel</code> 与 <code>kCriticalGain</code> 各自只被使用一次</b>，
+      都只在 <code>stabilityRatio</code> 内部（<code>pid_controller.cpp:12-13</code>）。
+      <b>它们不参与实际输出计算</b> —— 输出用的是
+      <code>u = dt·Kp·(P+I+Kd·D)</code>，与 0.593 / 0.2602 无关。
+      所以这两个常数只影响「稳定度读数」，不影响任何实际位移。
+    </li>
+  </ol>
+</div>
+
+<h3>11.3 存疑项（源码无依据，请以实机为准）</h3>
+<div class="callout warn">
+  <div class="t">以下几条源码里没有明确依据，调参时请自行验证</div>
+  <ol style="margin-bottom:0">
+    <li>
+      <b>Kp·dt 与实测饱和点不一致。</b>
+      公式 <code>e_sat = M/(Kp·dt)</code> 在 120fps 下给出 686px，
+      但实机手感是误差超过约 5.7px 就满量程。
+      源码与注释都没有解释这个差异。
+      <b>结论：稳定判据与相对比较可以信公式；绝对饱和点请以实测手感为准。</b>
+    </li>
+    <li>
+      <b><code>tauUnwindSec=30ms</code> 与 <code>tauDerivSec=20ms</code> 无实测依据。</b>
+      UI 原文：「30ms 是历史调整后的起点，<b>无实测依据</b>」。
+      测试只验证了「比旧的 200ms 快」这个方向，没有验证 30 是最优值。
+    </li>
+    <li>
+      <b>稳定器 5 项 + 滞回倍数是占位值。</b>
+      UI 原文：「目前都是【占位值】，没有实测依据，默认值只保证『程序能跑』。」
+    </li>
+    <li>
+      <b>α-β 滤波器的 τ=30ms 不可调。</b>
+      是源码常量 <code>kAnchorFilterTauMs</code>，没有对应配置键。
+    </li>
+    <li>
+      <b>实际 dt 没有被记录到任何地方。</b>
+      没有日志输出 <code>dtSec</code>，所以「你的回路帧率到底是多少」
+      只能通过外部手段（采集 FPS 读数、或插桩）确定。
+    </li>
+    <li>
+      <b>三个常数（46 / 0.2602 / 0.593）没有可查的推导过程。</b>
+      仓库内没有生成器、没有标定脚本，<code>docs/architecture.html:260</code> 自己也写明
+      「这些是唯一记录，没有文档依据可查」。
+      它们与逆向工程文档中 <code>Kp×s_max ≲ 52</code> 的实机结论自洽。
+    </li>
+  </ol>
+</div>
+
+<h3>11.4 历史文档（已从当前分支删除，可从 git 恢复）</h3>
+<p>仓库在 <code>41cbd80</code> 删除了全部项目文档（27 个，约 950KB）。与 PID 相关的有：</p>
+<pre><code>git show 41cbd80^:docs/tuning.md                  <span class="c"># 旧版全量调参文档</span>
+git show 41cbd80^:docs/aimmagic-ground-truth.md   <span class="c"># 逆向真值表（46ms / 临界增益来源）</span>
+git show 41cbd80^:docs/eventsync-mode.md          <span class="c"># PID-EventSync 链路</span>
+git show 41cbd80^:docs/control-architecture.md    <span class="c"># 控制层架构</span>
+git show 41cbd80^:docs/generic-controller-layer.md</code></pre>
+<div class="callout bad">
+  <div class="t">⚠️ 旧 <code>docs/tuning.md</code> 已经过时，不要照抄</div>
+  <p style="margin-bottom:0">
+    它描述的 <code>pid_p / pid_d / pid_track_* / flick_track_* / kalman_* / aim_lock_strength</code>
+    全部属于<b>旧的 <code>mouse/aim_pid.h</code> 架构</b>（增益量级 0.6，<code>Apotheosis/mouse/pid_controller.h</code>）。
+    该架构已被 <code>control/</code> 通用控制器层取代，
+    现行增益量级是 <b>35</b>，误差定义、输出语义、限幅方式都不同。
+    <b>本文档以当前 <code>control/pid_controller.*</code> 源码为准。</b>
+  </p>
+</div>
+
+<footer>
+  <p>
+    本文档由源码逐行核对生成，所有默认值、钳位区间、常数均取自当前工作区的实际代码，
+    稳定判据经源码测试断言交叉验证，速查表可手工复算。
+  </p>
+  <p>
+    主要依据：<span class="src">Apotheosis/control/pid_controller.{h,cpp}</span> ·
+    <span class="src">Apotheosis/control/aim_controller.cpp</span> ·
+    <span class="src">Apotheosis/runtime/aim_loop.{h,cpp}</span> ·
+    <span class="src">Apotheosis/config/config.{h,cpp}</span> ·
+    <span class="src">qt_ui/pages/AimSettingsPage.cpp</span> ·
+    <span class="src">tests/control_layer_test.cpp</span>
+  </p>
+</footer>
+
+</div>
+</body>
+</html>

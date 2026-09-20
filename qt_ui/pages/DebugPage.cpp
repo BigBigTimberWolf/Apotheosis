@@ -16,10 +16,6 @@
 #include <QVBoxLayout>
 #include <QTimer>
 
-// ────────────────────────────────────────────────────────────────────────────
-// Construction
-// ────────────────────────────────────────────────────────────────────────────
-
 DebugPage::DebugPage(QWidget* parent)
     : QWidget(parent) {
     auto* outerLayout = new QVBoxLayout(this);
@@ -43,7 +39,6 @@ DebugPage::DebugPage(QWidget* parent)
 
     layout->addStretch();
 
-    // Load initial values from config and connect reload signal.
     auto& cfg = ConfigManager::instance();
     connect(&cfg, &ConfigManager::configLoaded, this, &DebugPage::onLoadConfig);
     onLoadConfig();
@@ -64,14 +59,9 @@ DebugPage::DebugPage(QWidget* parent)
     statusTimer->start();
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Card 1 : Screenshot
-// ────────────────────────────────────────────────────────────────────────────
-
 void DebugPage::buildScreenshotCard(QVBoxLayout* layout) {
     auto* card = new CardWidget(QStringLiteral("截图"), QStringLiteral("camera"));
 
-    // ── Screenshot key binding ──
     m_screenshotKey = new QComboBox;
     m_screenshotKey->addItem(QStringLiteral("未绑定"), QStringLiteral("None"));
     m_screenshotKey->addItem(QStringLiteral("鼠标左键"), QStringLiteral("LeftMouseButton"));
@@ -95,7 +85,6 @@ void DebugPage::buildScreenshotCard(QVBoxLayout* layout) {
                     m_screenshotKey->itemData(index).toString());
             });
 
-    // ── Screenshot delay ──
     card->contentLayout()->addWidget(
         FormKit::sliderRow(QStringLiteral("截图延迟"), 0, 5000, 100,
                            m_screenshotDelaySlider, m_screenshotDelay,
@@ -112,15 +101,10 @@ void DebugPage::buildScreenshotCard(QVBoxLayout* layout) {
     layout->addWidget(card);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Card 2 : Replay (collapsible)
-// ────────────────────────────────────────────────────────────────────────────
-
 void DebugPage::buildReplayCard(QVBoxLayout* layout) {
     auto* card = new CardWidget(QStringLiteral("瞄准轨迹回放"), QStringLiteral("history"));
     card->setCollapsible(true);
 
-    // ── Enable recording ──
     card->contentLayout()->addWidget(
         FormKit::toggleRow(QStringLiteral("启用环形录制"), false, m_enableRecording));
     m_enableRecording->setToolTip(tr(
@@ -132,7 +116,6 @@ void DebugPage::buildReplayCard(QVBoxLayout* layout) {
                 ConfigManager::instance().setReplayRecordEnabled(v);
             });
 
-    // ── Replay duration (seconds) ──
     card->contentLayout()->addWidget(
         FormKit::sliderRow(QStringLiteral("保留秒数"), 1, 60, 10,
                            m_replayDurationSlider, m_replayDuration,
@@ -145,7 +128,6 @@ void DebugPage::buildReplayCard(QVBoxLayout* layout) {
                 ConfigManager::instance().setReplaySeconds(v);
             });
 
-    // ── Playback speed ──
     card->contentLayout()->addWidget(
         FormKit::sliderRowD(QStringLiteral("回放速度"), 0.05, 2.0, 0.25, 0.05, 2,
                             m_replaySpeedSlider, m_replaySpeed,
@@ -188,14 +170,9 @@ void DebugPage::buildReplayCard(QVBoxLayout* layout) {
     layout->addWidget(card);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Card 3 : Diagnostics
-// ────────────────────────────────────────────────────────────────────────────
-
 void DebugPage::buildDiagCard(QVBoxLayout* layout) {
     auto* card = new CardWidget(QStringLiteral("诊断"), QStringLiteral("bug"));
 
-    // ── Verbose logging ──
     card->contentLayout()->addWidget(
         FormKit::toggleRow(QStringLiteral("控制台输出详细日志"), false, m_verboseLog));
     m_verboseLog->setToolTip(tr(
@@ -207,7 +184,6 @@ void DebugPage::buildDiagCard(QVBoxLayout* layout) {
                 ConfigManager::instance().setVerbose(v);
             });
 
-    // ── Show FPS ──
     card->contentLayout()->addWidget(
         FormKit::toggleRow(QStringLiteral("显示 FPS"), false, m_showFps));
 
@@ -216,7 +192,6 @@ void DebugPage::buildDiagCard(QVBoxLayout* layout) {
                 ConfigManager::instance().setShowFps(v);
             });
 
-    // ── Show window ──
     card->contentLayout()->addWidget(
         FormKit::toggleRow(QStringLiteral("显示窗口"), false, m_showWindow));
 
@@ -227,10 +202,6 @@ void DebugPage::buildDiagCard(QVBoxLayout* layout) {
 
     layout->addWidget(card);
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Card 4 : Dynamic FOV (read-only telemetry)
-// ────────────────────────────────────────────────────────────────────────────
 
 void DebugPage::buildDynamicFovCard(QVBoxLayout* layout) {
     auto* card = new CardWidget(QStringLiteral("动态 FOV (实时)"), QStringLiteral("target"));
@@ -247,10 +218,6 @@ void DebugPage::buildDynamicFovCard(QVBoxLayout* layout) {
     layout->addWidget(card);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Config load
-// ────────────────────────────────────────────────────────────────────────────
-
 void DebugPage::setFovReadout(const QString& text) {
     if (m_fovReadout) m_fovReadout->setText(text);
 }
@@ -258,19 +225,16 @@ void DebugPage::setFovReadout(const QString& text) {
 void DebugPage::onLoadConfig() {
     auto& cfg = ConfigManager::instance();
 
-    // Screenshot
     m_screenshotKey->blockSignals(true);
     const int keyIndex = m_screenshotKey->findData(cfg.screenshotButton());
     m_screenshotKey->setCurrentIndex(keyIndex >= 0 ? keyIndex : 0);
     m_screenshotKey->blockSignals(false);
     m_screenshotDelay->setValue(cfg.screenshotDelay());
 
-    // Replay
     m_enableRecording->setChecked(cfg.replayRecordEnabled());
     m_replayDuration->setValue(cfg.replaySeconds());
     m_replaySpeed->setValue(static_cast<double>(cfg.replayPlaybackSpeed()));
 
-    // Diagnostics
     m_verboseLog->setChecked(cfg.verbose());
     m_showFps->setChecked(cfg.showFps());
     m_showWindow->setChecked(cfg.showWindow());

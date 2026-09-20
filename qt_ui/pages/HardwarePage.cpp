@@ -6,6 +6,7 @@
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QSignalBlocker>
@@ -36,7 +37,7 @@ QString zh(const char* text)
 constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET"};
 constexpr int kInputMethodCount = 3;
 
-} // namespace
+}
 
 HardwarePage::HardwarePage(QWidget* parent)
     : QWidget(parent)
@@ -57,7 +58,6 @@ HardwarePage::HardwarePage(QWidget* parent)
 
     auto* inputCard = new CardWidget(zh(u8"输入方式"), QStringLiteral("plug"));
     m_inputMethodCombo = new QComboBox;
-    // 三档走同一套驱动抽象 (mouse/mouse_driver.h, 形状移植自 AimMagic 的 FUN_140040ff0)
     m_inputMethodCombo->addItems({
         QStringLiteral("MAKCU"),
         QStringLiteral("MAKCUNEW"),
@@ -104,11 +104,44 @@ HardwarePage::HardwarePage(QWidget* parent)
         auto* panel = new QVBoxLayout(page);
         panel->setContentsMargins(0, 0, 0, 0);
         panel->setSpacing(10);
+
+        // ---- 鼠标硬件 ----
+        // 位移 / 左右中键 / 滚轮 / 物理按键读取都走这台。
+        auto* mouseTitle = new QLabel(zh(u8"鼠标"));
+        mouseTitle->setStyleSheet("font-weight:600; font-size:13px;");
+        panel->addWidget(mouseTitle);
+
         m_makcuNewPort = new QLineEdit;
+        m_makcuNewPort->setPlaceholderText(QStringLiteral("COM7"));
         panel->addWidget(FormKit::fieldRow(zh(u8"串口"), m_makcuNewPort));
         m_makcuNewBaud = new QSpinBox;
         m_makcuNewBaud->setRange(1200, 6000000);
         panel->addWidget(FormKit::fieldRow(zh(u8"波特率"), m_makcuNewBaud));
+
+        // ---- 键盘硬件(可选) ----
+        //
+        // 独立的一台硬件: 真实键盘插在它上面。键盘注入(tapKey)与自动急停的
+        // 屏蔽命令都只走这台, 因此【不接键盘硬件也不影响鼠标】——
+        // 只是键盘注入与自动急停不可用, 鼠标位移/按键/滚轮完全不受影响。
+        m_kbdUnitEnabled = new QCheckBox(zh(u8"接入键盘硬件(第二台)"));
+        m_kbdUnitEnabled->setToolTip(zh(
+            u8"勾选后键盘注入与自动急停走这一台;\n"
+            u8"不勾选则键盘注入与自动急停不可用, 鼠标功能不受影响。"));
+        panel->addWidget(m_kbdUnitEnabled);
+
+        m_kbdUnitPanel = new QWidget;
+        auto* kbdPanel = new QVBoxLayout(m_kbdUnitPanel);
+        kbdPanel->setContentsMargins(0, 0, 0, 0);
+        kbdPanel->setSpacing(10);
+
+        m_makcuNewPortKbd = new QLineEdit;
+        m_makcuNewPortKbd->setPlaceholderText(QStringLiteral("COM9"));
+        kbdPanel->addWidget(FormKit::fieldRow(zh(u8"串口"), m_makcuNewPortKbd));
+        m_makcuNewBaudKbd = new QSpinBox;
+        m_makcuNewBaudKbd->setRange(1200, 6000000);
+        kbdPanel->addWidget(FormKit::fieldRow(zh(u8"波特率"), m_makcuNewBaudKbd));
+
+        panel->addWidget(m_kbdUnitPanel);
         m_deviceStack->addWidget(page);
     }
 
@@ -129,21 +162,6 @@ HardwarePage::HardwarePage(QWidget* parent)
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
 
-    // ── 【2026-09-13 删除】「延迟估计」卡片(含它唯一的 addMapping 字段) ──────────
-    //
-    // 这张卡片曾经装过「图像与鼠标映射」那几个标定量, 后来只剩「采集回调前帧龄（估计）」
-    // 一个输入框。那个框也删掉之后, 卡片就【一个字段都不剩】了 —— 如果只删字段、留下
-    // 卡片, 界面上会出现一个只有标题的空壳(与「移动锁死瞄准」那次是同一类错误)。
-    // 所以这里连卡片和 addMapping lambda 一起删。
-    //
-    // 背景(为什么没有可填的字段了):
-    //   现役控制链(mouse/aim_pid.h)全程在【鼠标计数】域输出: 控制器算完直接把计数交给
-    //   sendRawMove, 不存在"像素 -> 计数"这一步。mouse_pixels_per_count_x/y 与"发送后
-    //   生效延迟/误差范围"这三个参数, 本来就是旧 predictive_controller 用来"扣除自身
-    //   在途指令的像素位移"的写死标定 —— 没有任何代码读取它们。
-    //   帧龄估计同样是手填的猜测值, 控制器不吃任何延迟估计。
-    //   真实的端到端延迟由 latency_probe 逐帧实测并落进延迟日志(那个保留)。
-
     loadFieldsFromConfig();
 
     connect(m_inputMethodCombo, &QComboBox::currentIndexChanged,
@@ -160,6 +178,18 @@ HardwarePage::HardwarePage(QWidget* parent)
     connect(m_makcuNewBaud, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
         ConfigManager::instance().setMakcuNewBaudrate(value);
     });
+    connect(m_makcuNewPortKbd, &QLineEdit::textChanged, this, [](const QString& value) {
+        ConfigManager::instance().setMakcuNewPortKbd(value);
+    });
+    connect(m_makcuNewBaudKbd, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
+        ConfigManager::instance().setMakcuNewBaudrateKbd(value);
+    });
+    // 勾选/取消"接入键盘硬件": 显示或隐藏下面的串口行, 并立即重连生效。
+    connect(m_kbdUnitEnabled, &QCheckBox::toggled, this, [this](bool on) {
+        m_kbdUnitPanel->setVisible(on);
+        ConfigManager::instance().setMakcuNewPortKbd(on ? m_makcuNewPortKbd->text() : QString());
+        reconnectDevice();
+    });
     connect(m_kmboxNetIp, &QLineEdit::textChanged, this, [](const QString& value) {
         ConfigManager::instance().setKmboxNetIp(value);
     });
@@ -171,7 +201,6 @@ HardwarePage::HardwarePage(QWidget* parent)
     });
     connect(m_connectBtn, &QPushButton::clicked, this, &HardwarePage::reconnectDevice);
 
-    // 切换全局配置方案后, 设备类型/串口必须跟着新方案走。
     connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
             this, &HardwarePage::loadFieldsFromConfig);
 
@@ -201,6 +230,15 @@ void HardwarePage::loadFieldsFromConfig()
     m_makcuBaud->setValue(cm.makcuBaudrate());
     m_makcuNewPort->setText(cm.makcuNewPort());
     m_makcuNewBaud->setValue(cm.makcuNewBaudrate());
+    m_makcuNewPortKbd->setText(cm.makcuNewPortKbd());
+    m_makcuNewBaudKbd->setValue(cm.makcuNewBaudrateKbd());
+    // 有端口即视为"接了键盘硬件"。空端口表示没有第二台 -> 不勾选, 面板隐藏。
+    {
+        const bool on = !cm.makcuNewPortKbd().isEmpty();
+        QSignalBlocker block(m_kbdUnitEnabled);   // 加载时不触发重连
+        m_kbdUnitEnabled->setChecked(on);
+        m_kbdUnitPanel->setVisible(on);
+    }
     m_kmboxNetIp->setText(cm.kmboxNetIp());
     m_kmboxNetPort->setText(cm.kmboxNetPort());
     m_kmboxNetUuid->setText(cm.kmboxNetUuid());
@@ -224,6 +262,8 @@ void HardwarePage::reconnectDevice()
         config.makcu_baudrate = cm.makcuBaudrate();
         config.makcu_new_port = cm.makcuNewPort().toStdString();
         config.makcu_new_baudrate = cm.makcuNewBaudrate();
+        config.makcu_new_port_kbd = cm.makcuNewPortKbd().toStdString();
+        config.makcu_new_baudrate_kbd = cm.makcuNewBaudrateKbd();
         config.kmbox_net_ip = cm.kmboxNetIp().toStdString();
         config.kmbox_net_port = cm.kmboxNetPort().toStdString();
         config.kmbox_net_uuid = cm.kmboxNetUuid().toStdString();
@@ -238,6 +278,7 @@ void HardwarePage::reconnectDevice()
 
 extern MakcuConnection* makcuSerial;
 extern MakcuNewConnection* makcuNewSerial;
+extern MakcuNewConnection* makcuNewSerialKbd;
 extern KmboxNetConnection* kmboxNetSerial;
 
 void HardwarePage::refreshStatus()
@@ -257,10 +298,22 @@ void HardwarePage::refreshStatus()
         connected = pointerExists && makcuSerial->isOpen();
         break;
     case 1:
+    {
         deviceName = QStringLiteral("MAKCUNEW");
         pointerExists = (makcuNewSerial != nullptr);
         connected = pointerExists && makcuNewSerial->isOpen();
+        // 键盘硬件(第二台)是【可选】的: 接了就报"鼠标+键盘", 没接就只报"鼠标"。
+        // 不接键盘硬件时键盘注入与自动急停不可用, 但鼠标功能完全不受影响 ——
+        // 状态文字要说清这一点, 否则用户会以为设备坏了。
+        const bool wantKbd = !ConfigManager::instance().makcuNewPortKbd().isEmpty();
+        if (connected && makcuNewSerialKbd != nullptr && makcuNewSerialKbd->isOpen())
+            deviceName += zh(u8"(鼠标 + 键盘)");
+        else if (connected && wantKbd)
+            deviceName += zh(u8"(仅鼠标) — 键盘那台未连上, 键盘注入与自动急停不可用");
+        else if (connected && !wantKbd)
+            deviceName += zh(u8"(仅鼠标) — 未接键盘硬件");
         break;
+    }
     case 2:
         deviceName = QStringLiteral("KMBOXNET");
         pointerExists = (kmboxNetSerial != nullptr);

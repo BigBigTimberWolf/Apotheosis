@@ -120,7 +120,6 @@ QWidget* fieldRow(const QString& label, QWidget* control) {
     QWidget* row = makeRow(h);
     h->addWidget(makeLabel(label));
     if (control->sizePolicy().horizontalPolicy() == QSizePolicy::Fixed) {
-        // 固定尺寸控件（例如开关）保持在标签之后，不拉伸控件，也不改变原有间距。
         h->addWidget(control);
         h->addStretch();
     } else {

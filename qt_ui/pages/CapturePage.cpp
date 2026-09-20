@@ -22,8 +22,6 @@
 
 namespace {
 
-// 把图标字体的字形画成 QIcon —— 和侧边栏同一套画法, 保证观感一致。
-// 图标字体没加载成功时返回空 QIcon, 调用方回退成文字。
 QIcon iconFromGlyph(const QString& name, int px, const QString& color) {
     if (!IconFont::available())
         return QIcon();
@@ -41,25 +39,7 @@ QIcon iconFromGlyph(const QString& name, int px, const QString& color) {
     return QIcon(pm);
 }
 
-}  // namespace
-
-// ────────────────────────────────────────────────────────────────────────────
-// 采集设置页 —— 只有一种采集方式: 采集卡
-// ────────────────────────────────────────────────────────────────────────────
-//
-// 【三级联动的全部意义】: 下拉里只出现设备真实支持的组合。
-//
-// 例如某张卡的 NV12 只到 1080p60, 而 MJPG 能到 1080p240:
-//   选 NV12 -> 分辨率有 1080p, 但帧率下拉里【不会有 240】
-//   选 MJPG -> 帧率下拉里才出现 240
-//
-// 这和"让用户手填宽/高/fps, 对不上就静默降级"是本质区别: 后者会让用户以为
-// 自己跑在 1080p240, 实际可能跑在 720p60, 而手上只有"手感不对"这一条线索。
-//
-// 【全程无回退】:
-//   - 上次选的卡没插 -> 不选任何卡 + 提示, 绝不自动换一张
-//   - 配置里的组合失效 -> 提示 + 让用户重选, 绝不"吸附"到别的模式
-//   - 采集时协商失败 -> 采集线程直接报错退出, 绝不换模式继续跑
+}
 
 CapturePage::CapturePage(QWidget* parent)
     : QWidget(parent) {
@@ -86,11 +66,6 @@ CapturePage::CapturePage(QWidget* parent)
     onLoadConfig();
 }
 
-
-// ────────────────────────────────────────────────────────────────────────────
-// 采集卡
-// ────────────────────────────────────────────────────────────────────────────
-
 void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_cardCard = new CardWidget(
         QStringLiteral("采集卡"),
@@ -102,13 +77,11 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_cardCard->contentLayout()->addWidget(m_error);
     m_error->hide();
 
-    // ── 设备 (行尾跟一个圆形"重新探测"按钮) ──
     m_devCombo = new QComboBox;
     m_devCombo->setToolTip(tr(
         "系统实际枚举到的视频采集卡。\n"
         "只有一张卡也请显式选择 —— 你选的那张不在时程序不会自动换一张。"));
 
-    // 重新探测是个低频动作, 不值得占一整行 —— 收成一个小圆钮挂在设备行尾。
     m_refreshBtn = new QPushButton;
     m_refreshBtn->setCursor(Qt::PointingHandCursor);
     m_refreshBtn->setFixedSize(28, 28);
@@ -141,7 +114,6 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_devCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CapturePage::onDeviceChanged);
 
-    // ── 像素格式 ──
     m_fmtCombo = new QComboBox;
     m_fmtCombo->setToolTip(tr(
         "当前采集卡真实支持的像素格式, 按延迟从低到高排列。\n"
@@ -152,7 +124,6 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_fmtCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CapturePage::onFormatChanged);
 
-    // ── 分辨率 ──
     m_resCombo = new QComboBox;
     m_resCombo->setToolTip(tr(
         "当前格式下设备真实支持的分辨率。换成别的格式, 这里的可选项会跟着变。"));
@@ -161,7 +132,6 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_resCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CapturePage::onResolutionChanged);
 
-    // ── 帧率 ──
     m_fpsCombo = new QComboBox;
     m_fpsCombo->setToolTip(tr(
         "当前 格式 + 分辨率 下设备真实支持的帧率。\n"
@@ -171,7 +141,6 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_fpsCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CapturePage::onFpsChanged);
 
-    // ── GPU 解码 ──
     m_gpuDecode = new ToggleSwitch;
     m_gpuDecode->setToolTip(tr(
         "MJPG 用 nvJPEG 在 GPU 上解码, 原始格式用 NPP / CUDA kernel 转换,\n"
@@ -181,14 +150,12 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_gpuDecode, &ToggleSwitch::toggled,
             this, [](bool on) { ConfigManager::instance().setCaptureGpuDecode(on); });
 
-    // ── 设备真实能力 (只读) ──
     m_capSummary = new QLabel;
     m_capSummary->setWordWrap(true);
     m_capSummary->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_cardCard->contentLayout()->addWidget(
         FormKit::fieldRow(QStringLiteral("设备能力"), m_capSummary));
 
-    // ── 推荐配置 (只读) ──
     m_recommend = new QLabel;
     m_recommend->setWordWrap(true);
     m_recommend->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -213,7 +180,6 @@ void CapturePage::showError(const QString& text) {
 void CapturePage::clearError() { showError(QString()); }
 
 void CapturePage::refreshDevices() {
-    // 用户点"刷新"时同样只是重新探测, 不是重新选择 —— 期间也不回写配置。
     const bool prevRestoring = m_restoring;
     m_restoring = true;
 
@@ -223,7 +189,6 @@ void CapturePage::refreshDevices() {
         ~RestoreGuard() { flag = prev; }
     } restoreGuard{ m_restoring, prevRestoring };
 
-    // 按【名字】记住用户的选择 —— index 会随插拔顺序变化, 名字不会。
     QString want = m_devCombo->currentIndex() >= 0
         ? m_devCombo->currentData().toString()
         : ConfigManager::instance().captureDevice();
@@ -248,8 +213,6 @@ void CapturePage::refreshDevices() {
         return;
     }
 
-    // 还原用户的选择。找不到就【不选任何卡】并把话说清楚 —— 绝不自动
-    // 切到另一张卡上, 否则用户会对着另一张卡的画面调半天参数。
     const int idx = m_devCombo->findData(want);
     if (want.isEmpty()) {
         m_devCombo->setCurrentIndex(-1);
@@ -271,7 +234,6 @@ void CapturePage::onDeviceChanged(int) {
     rebuildFormatCombo();
 }
 
-// 第一级: 该设备真实支持的像素格式, 未压缩在前。
 void CapturePage::rebuildFormatCombo() {
     const MFDeviceInfo* dev = currentDevice();
 
@@ -290,8 +252,6 @@ void CapturePage::rebuildFormatCombo() {
     for (const auto& f : mfcap::Formats(*dev))
         m_fmtCombo->addItem(QString::fromStdString(f));
 
-    // 还原配置里的格式。该格式在这张卡上不存在时保持未选中 —— 让用户在
-    // 可见的选项里自己挑, 而不是替他决定。
     const QString want = ConfigManager::instance().captureFormat();
     const int fi = m_fmtCombo->findText(want);
     m_fmtCombo->setCurrentIndex(fi);
@@ -309,8 +269,6 @@ void CapturePage::rebuildFormatCombo() {
 
 void CapturePage::onFormatChanged(int) { rebuildResolutionCombo(); }
 
-// 第二级: 该格式下设备真实支持的分辨率。
-// 换成别的格式后, 这里会重新构建 —— 这就是联动的核心。
 void CapturePage::rebuildResolutionCombo() {
     const MFDeviceInfo* dev = currentDevice();
     const QString fmt = m_fmtCombo->currentIndex() >= 0 ? m_fmtCombo->currentText()
@@ -340,15 +298,13 @@ void CapturePage::rebuildResolutionCombo() {
     }
     m_resCombo->setCurrentIndex(ri);
     if (ri < 0 && m_resCombo->count() > 0)
-        m_resCombo->setCurrentIndex(0);   // 换格式后旧分辨率必然失效, 落到最大档
+        m_resCombo->setCurrentIndex(0);
 
     rebuildFpsCombo();
 }
 
 void CapturePage::onResolutionChanged(int) { rebuildFpsCombo(); }
 
-// 第三级: 该 格式+分辨率 下设备真实支持的帧率。
-// 用户在 NV12 下选 1080p 时, 这里【不会】出现 240 —— 如果这块卡只支持到 60。
 void CapturePage::rebuildFpsCombo() {
     const MFDeviceInfo* dev = currentDevice();
     const QString fmt = m_fmtCombo->currentIndex() >= 0 ? m_fmtCombo->currentText()
@@ -372,10 +328,9 @@ void CapturePage::rebuildFpsCombo() {
     const int want = ConfigManager::instance().captureFps();
     int fi = m_fpsCombo->findData(want);
     if (fi < 0 && m_fpsCombo->count() > 0)
-        fi = m_fpsCombo->count() - 1;   // 取该组合下最高帧率
+        fi = m_fpsCombo->count() - 1;
     m_fpsCombo->setCurrentIndex(fi);
 
-    // 只有三级都选定之后, 这个组合才是"可提交"的。
     if (fi >= 0)
         applySelectionToConfig();
 
@@ -386,9 +341,7 @@ void CapturePage::onFpsChanged(int) {
     applySelectionToConfig();
 }
 
-// 把当前三级下拉的选择写回配置。任何一级没选中就不写, 由 UI 的提示承担。
 void CapturePage::applySelectionToConfig() {
-    // 还原过程中不回写 —— 否则会把中间态当成用户选择写进配置。
     if (m_restoring) return;
 
     const MFDeviceInfo* dev = currentDevice();
@@ -401,8 +354,6 @@ void CapturePage::applySelectionToConfig() {
     const QPoint res = m_resCombo->currentData().toPoint();
     const int fps = m_fpsCombo->currentData().toInt();
 
-    // 提交前再校验一次: 只有设备真的支持这个组合才写进配置。
-    // 采集侧同样会严格校验一次, 两层都不放行任何"差不多"的组合。
     if (!mfcap::Validate(*dev, fmt.toStdString(), res.x(), res.y(), fps)) {
         showError(QStringLiteral(
             "内部错误: 选中的组合 %1 %2×%3@%4fps 未通过设备能力校验。")
@@ -428,12 +379,8 @@ void CapturePage::updateCapabilitySummary() {
         return;
     }
 
-    // 完整能力表, 原样展示。H264 之类本程序不吃的格式也会列出来并标注,
-    // 这样用户看到"我的卡明明支持 4K"时不会以为程序探测错了。
     m_capSummary->setText(QString::fromStdString(mfcap::Describe(*dev)));
 
-    // 推荐配置 + 理由。推荐用模型输入尺寸作为目标分辨率 —— 裁切跟着模型走,
-    // 所以采集尺寸越接近模型输入越好。
     const auto& cfg = ConfigManager::instance();
     const int side = cfg.detectionResolution();
 
@@ -445,21 +392,11 @@ void CapturePage::updateCapabilitySummary() {
         m_recommend->setText(QStringLiteral("该设备没有可用于采集的组合。"));
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// 载入配置
-// ────────────────────────────────────────────────────────────────────────────
-
 void CapturePage::onLoadConfig() {
     auto& cfg = ConfigManager::instance();
 
-    // 检测尺寸与圆形遮罩已不是界面选项: 尺寸跟随模型输入边长, 遮罩常开。
     m_gpuDecode->setChecked(cfg.captureGpuDecode());
 
-    // 探测 + 还原三级选择。refreshDevices 内部会按名字找回配置里的设备,
-    // 找不到就明确报错 —— 不会退到第 0 张卡。
-    //
-    // 整段还原期间禁止回写配置: 逐级重建会让三级下拉短暂处在"未选中"状态,
-    // 那时落盘等于用替身模式覆盖用户真正的选择。
     m_restoring = true;
     refreshDevices();
     m_restoring = false;

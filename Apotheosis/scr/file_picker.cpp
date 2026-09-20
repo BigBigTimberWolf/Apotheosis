@@ -18,8 +18,6 @@ namespace file_picker
 {
 namespace
 {
-// RAII guard to pair CoInitializeEx with CoUninitialize. Initialization is
-// per-thread so we only pay the cost when a picker is actually opened.
 class ComApartment
 {
 public:
@@ -43,7 +41,7 @@ private:
     HRESULT hr_ = S_OK;
     bool owns_ = false;
 };
-} // namespace
+}
 
 std::optional<std::string> open_file(const std::wstring& title,
                                      const std::vector<FilterSpec>& filters,
@@ -119,9 +117,6 @@ std::optional<std::string> import_onnx_into_models_dir(const std::string& source
 
     const fs::path dst = models_dir / src.filename();
 
-    // If the source already lives in the models directory, skip the copy and
-    // just return its filename — avoids the "source and destination are the
-    // same" error from fs::copy.
     if (fs::equivalent(src, dst, ec))
     {
         return WideToUtf8(src.filename().wstring());
@@ -138,4 +133,4 @@ std::optional<std::string> import_onnx_into_models_dir(const std::string& source
     return WideToUtf8(dst.filename().wstring());
 }
 
-} // namespace file_picker
+}

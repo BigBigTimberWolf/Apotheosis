@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QDoubleSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -81,6 +82,9 @@ TargetPage::TargetPage(QWidget* parent)
     card->contentLayout()->addWidget(m_tableWidget);
 
     layout->addWidget(card);
+
+    buildStabilizerCard(layout);
+
     layout->addStretch();
 
     m_pollTimer = new QTimer(this);
@@ -88,8 +92,6 @@ TargetPage::TargetPage(QWidget* parent)
     connect(m_pollTimer, &QTimer::timeout, this, &TargetPage::refreshFromRuntime);
     m_pollTimer->start();
 
-    // 轮询本来就会自己发现变化; 这里额外挂一次是为了切换方案后立刻重建表格,
-    // 不用等下一个 500ms 周期。
     connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
             this, &TargetPage::refreshFromRuntime);
 
@@ -236,3 +238,115 @@ void TargetPage::rebuildTable()
         m_tableLayout->addWidget(row);
     }
 }
+
+void TargetPage::buildStabilizerCard(QVBoxLayout* layout)
+{
+    auto* card = new CardWidget(
+        QString::fromUtf8(u8"全局选靶与目标稳定器"),
+        QStringLiteral("shield"));
+    auto* cl = card->contentLayout();
+
+    auto* hint = new QLabel(QString::fromUtf8(
+        u8"★ 此处为【全局视觉感知层配置】，对所有按键与方案全局生效：\n"
+        u8"• 选靶滞回：多个敌人出现在视野时，防止准星在两个目标之间左右高频抽搐。\n"
+        u8"• 目标稳定器：识别前后帧是否为同一敌人、剔除模型畸形框、识别突变瞬移（Snap）。\n"
+        u8"• 修改后立即全局热生效，无需重启程序。"));
+    hint->setWordWrap(true);
+    hint->setStyleSheet("color:#71717A; font-size:12px; margin-bottom: 8px;");
+    cl->addWidget(hint);
+
+    struct Item {
+        const char* label;
+        double lo, hi, step, def;
+        const char* tip;
+        std::function<double()> getter;
+        std::function<void(double)> setter;
+    };
+
+    auto& cm = ConfigManager::instance();
+
+    const Item items[] = {
+        { "选靶滞回倍数", 1.0, 10.0, 0.05, 1.3,
+          "已锁定目标时，新候选必须比它『近这么多倍』才会换目标。\n"
+          "★ 1.0 = 没有滞回（每帧都选最近的）。\n"
+          "★ 不加滞回时，两个目标交替成为『最近』会让滤波器每帧复位 ——\n"
+          "  滤波等于白做。所以它不是一个手感旋钮，是滤波能否生效的前提。",
+          [&cm]() { return cm.targetHysteresisRatio(); },
+          [&cm](double v) { cm.setTargetHysteresisRatio(v); }
+        },
+        { "选靶距离上限 (0=不限)", 0.0, 5000.0, 5.0, 0.0,
+          "距准星超过这个距离（检测像素）的候选不参与选靶。\n"
+          "★ 0 = 不限制。默认 0，因为距离门控目前由 FOV 椭圆承担，\n"
+          "  这里再设一道是重复的。",
+          [&cm]() { return cm.targetMaxDistancePx(); },
+          [&cm](double v) { cm.setTargetMaxDistancePx(v); }
+        },
+        { "稳定器·认目标中心系数", 0.001, 10.0, 0.05, 0.5,
+          "『这一帧的框和上一帧是同一个目标吗』的判据：\n"
+          "中心距离 < 上一帧框对角线 × 该系数 就算同一个目标。\n"
+          "调大 = 更容易认成同一个（目标跳一下也接着跟）；\n"
+          "调小 = 更容易判成换目标（会触发滤波复位）。",
+          [&cm]() { return cm.targetMatchCenterRatio(); },
+          [&cm](double v) { cm.setTargetMatchCenterRatio(v); }
+        },
+        { "稳定器·面积容差倍数", 1.0, 100.0, 0.1, 2.0,
+          "面积比超出 [1/该值, 该值] 就判为换目标。\n"
+          "目标跑远/跑近时框面积本来就会变，这个容差就是留给它的。\n"
+          "★ 不能小于 1（那是个自相矛盾的区间）。",
+          [&cm]() { return cm.targetAreaRatioTol(); },
+          [&cm](double v) { cm.setTargetAreaRatioTol(v); }
+        },
+        { "稳定器·突变系数 (Snap)", 0.001, 100.0, 0.05, 1.15,
+          "本帧位移超过『上一帧框对角线 × 该系数』就判为瞬移（Snap）。\n"
+          "瞬移会触发滤波与 PID 的硬重置。\n"
+          "调小 = 更敏感（真的换目标时反应快，但抖动也可能误判）；\n"
+          "调大 = 更宽容（可能把真换目标当成目标在快速移动）。",
+          [&cm]() { return cm.targetKSnapMult(); },
+          [&cm](double v) { cm.setTargetKSnapMult(v); }
+        },
+        { "稳定器·最小宽高比", 0.001, 100.0, 0.05, 0.2,
+          "宽高比低于它就当作离谱误检丢掉（太细太长）。\n"
+          "★ 会自动与最大值排序，保证 min ≤ max。",
+          [&cm]() { return cm.targetMinAspect(); },
+          [&cm](double v) { cm.setTargetMinAspect(v); }
+        },
+        { "稳定器·最大宽高比", 0.001, 100.0, 0.05, 5.0,
+          "宽高比高于它就当作离谱误检丢掉（太扁太宽）。",
+          [&cm]() { return cm.targetMaxAspect(); },
+          [&cm](double v) { cm.setTargetMaxAspect(v); }
+        },
+    };
+
+    for (const auto& it : items)
+    {
+        auto* row = new QWidget;
+        auto* hl = new QHBoxLayout(row);
+        hl->setContentsMargins(0, 4, 0, 4);
+
+        auto* lbl = new QLabel(QString::fromUtf8(it.label));
+        lbl->setToolTip(QString::fromUtf8(it.tip));
+        lbl->setStyleSheet("color:#D4D4D8; font-size:13px;");
+
+        auto* spin = new QDoubleSpinBox;
+        spin->setRange(it.lo, it.hi);
+        spin->setSingleStep(it.step);
+        spin->setDecimals(3);
+        spin->setValue(it.getter());
+        spin->setToolTip(QString::fromUtf8(it.tip));
+        spin->setFixedWidth(110);
+
+        hl->addWidget(lbl);
+        hl->addStretch();
+        hl->addWidget(spin);
+        cl->addWidget(row);
+
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [it](double v) {
+                    it.setter(v);
+                    ConfigBridge::instance().markDirty();
+                });
+    }
+
+    layout->addWidget(card);
+}
+

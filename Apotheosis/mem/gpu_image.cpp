@@ -26,7 +26,6 @@ bool GpuImage::create(int rows, int cols, int channels)
     const size_t step = static_cast<size_t>(cols) * static_cast<size_t>(channels);
     const size_t total = step * static_cast<size_t>(rows);
 
-    // If we already own a buffer big enough and our shape matches, reuse it.
     if (storage_ && storage_.use_count() == 1
         && storage_->capacity >= total
         && rows_ == rows && cols_ == cols && channels_ == channels)
@@ -111,10 +110,6 @@ void GpuImage::download(cv::Mat& dst, cudaStream_t stream) const
     if (dst.rows != rows_ || dst.cols != cols_ || dst.type() != cvType)
         dst.create(rows_, cols_, cvType);
 
-    // If a producer recorded this frame's completion on its own (non-default,
-    // non-blocking) stream, the D2H copy below must wait for it: a legacy
-    // default-stream copy does NOT synchronize against non-blocking streams, so
-    // without this it could read pixels the producer hasn't finished writing.
     if (ready_event_)
     {
         if (stream)

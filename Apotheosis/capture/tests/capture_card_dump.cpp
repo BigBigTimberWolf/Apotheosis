@@ -1,30 +1,3 @@
-// =============================================================================
-// 采集卡现场诊断 —— 回答"为什么采不到画面"
-// =============================================================================
-//
-// 纯 Media Foundation, 不依赖 CUDA / OpenCV / TensorRT / Qt, 因此任何一台装了
-// Windows SDK 的机器都能单独编译运行 (build/diag/build_probe.bat):
-//
-//   cl /std:c++20 /utf-8 /EHsc /O2 capture_card_dump.cpp ^
-//      /link mf.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib
-//
-//   capture_card_dump.exe [设备名] [格式] [宽] [高] [帧率]
-//   默认: VC-009PRO NV12 1920 1080 120
-//
-// 它做三件事:
-//   [A] 列出本机所有采集设备 (friendly name —— 配置里存的就是它)
-//   [B] 列出目标设备【真实宣称】的 格式/分辨率/帧率 组合
-//   [C] 完全按主程序的方式走一遍: 建 reader(禁用 converter) -> 严格协商 ->
-//       读一帧。每一步失败都打印真实 HRESULT 和可操作的原因。
-//
-// 为什么需要它: 主程序里设备协商发生在采集线程内部, 失败只写一行 stderr; 而
-// 采集线程退出后 captureThread 仍持有非空 capturer, 于是表现为"界面正常但永远
-// 没有画面"。现场光看界面无法区分: 设备不支持 / 被别的程序独占 / 无 HDMI 信号 /
-// 分辨率刷新率超出带宽。这个工具把每一层都摊开。
-//
-// 注意: 一个 IMFMediaSource 同时只能挂一个 source reader, 所以本工具自始至终
-// 只用【一个】reader 走完全程 —— 与主程序 MFCapture::ReceiveThread 一致。
-// =============================================================================
 
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
@@ -84,7 +57,6 @@ const char* SubtypeName(REFGUID sub)
     return "OTHER";
 }
 
-// 只解释我们在采集路径上真会撞到的几个错误码, 其余原样输出。
 std::string ExplainHr(HRESULT hr)
 {
     switch (static_cast<unsigned long>(hr))
@@ -127,7 +99,6 @@ double ReadFps(IMFMediaType* t)
     return 0.0;
 }
 
-// 与 MFCapture 一致: 从 0 枚举原生媒体类型直到 MF_E_NO_MORE_TYPES。
 std::vector<Cap> EnumerateCaps(IMFSourceReader* reader)
 {
     std::vector<Cap> caps;
@@ -248,9 +219,6 @@ std::vector<Device> EnumerateDevices()
     return out;
 }
 
-// 严格协商 —— 与 MFCapture::SelectExactMediaType 同一套判定:
-// 格式 / 分辨率 / 帧率(±1 容差) 三处必须同时命中, 任何一处不符都直接失败,
-// 不做任何替换。
 bool Negotiate(IMFSourceReader* reader,
                const std::vector<Cap>& caps,
                const std::string& wantFormat,
@@ -348,7 +316,6 @@ bool Negotiate(IMFSourceReader* reader,
     return true;
 }
 
-// 协商成功后确认设备真的报了帧几何 (主程序会在这里再挡一次)。
 bool CheckGeometry(IMFSourceReader* reader, std::string& outError)
 {
     ComPtr<IMFMediaType> current;
@@ -371,10 +338,6 @@ bool CheckGeometry(IMFSourceReader* reader, std::string& outError)
     return true;
 }
 
-// 协商成功后持续拉流, 统计真实到达的帧率。
-//
-// 只读"一帧"是不够的: 有些故障是首帧能出来、随后就停 (带宽不足 / 信号丢失),
-// 所以这里跑满整段窗口再给数字 —— 它同时验证了"能出画面"和"能持续出画面"。
 bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outError)
 {
     const DWORD start = GetTickCount();
@@ -430,7 +393,6 @@ bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outErro
         return false;
     }
 
-    // 优先用设备时间戳算真实帧率; 时间戳不可用时退回到墙钟。
     double fps = 0.0;
     if (lastTs > firstTs && frames > 1)
     {
@@ -447,7 +409,7 @@ bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outErro
     return true;
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv)
 {
@@ -474,7 +436,6 @@ int main(int argc, char** argv)
     ComPtr<IMFMediaSource>  source;
     ComPtr<IMFSourceReader> reader;
 
-    // ---------------------------------------------------------------- [A] 枚举
     printf("[A] 本机视频采集设备\n");
     const auto devices = EnumerateDevices();
     if (devices.empty())
@@ -507,7 +468,6 @@ int main(int argc, char** argv)
         return 4;
     }
 
-    // -------------------------------------------------- [B] 激活 + 建 reader
     printf("[B] 激活设备并建立 reader (与主程序一致: 禁用 converter)\n");
 
     const HRESULT actHr = target->activate->ActivateObject(IID_PPV_ARGS(&source));
@@ -534,8 +494,6 @@ int main(int argc, char** argv)
     {
         PrintHr("MFCreateSourceReaderFromMediaSource (禁用 converter)", readerHr);
 
-        // 回退对照: 允许 converter 时能否建起来 —— 用来区分"设备本身打不开"和
-        // "只是不接受禁用 converter"这两种完全不同的故障。
         ComPtr<IMFSourceReader> loose;
         const HRESULT looseHr =
             MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &loose);
@@ -550,7 +508,6 @@ int main(int argc, char** argv)
         return 6;
     }
 
-    // ------------------------------------------------------------ [C] 能力表
     printf("      [ ok ] reader 已建立\n\n");
     printf("[C] \"%s\" 真实宣称的能力\n", target->friendly.c_str());
 
@@ -561,7 +518,6 @@ int main(int argc, char** argv)
         PrintCaps(caps);
     printf("\n");
 
-    // ------------------------------------------------------ [D] 协商 + 读帧
     printf("[D] 用主程序的方式严格协商 + 试读一帧\n");
 
     std::string why;

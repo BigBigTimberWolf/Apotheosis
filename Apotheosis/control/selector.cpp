@@ -17,9 +17,6 @@ std::vector<size_t> filterAimCandidates(const std::vector<Candidate>& candidates
             continue;
         if (buckets.bucketOf(candidates[i].classId) != Bucket::Aim)
             continue;
-        // ★★ 逐类别最低置信度（准入）。<= 0 表示该类不限。
-        //   ★ 这里是【额外收紧】, 不替代 AI 页的全局阈值 —— 全局阈值在下游
-        //     仍然生效, 所以两者是"都要过"的关系, 这里不做 max 合并。
         const double need = cfg.minConfOf(candidates[i].classId);
         if (need > 0.0 && candidates[i].confidence < need)
             continue;
@@ -30,14 +27,13 @@ std::vector<size_t> filterAimCandidates(const std::vector<Candidate>& candidates
 
 namespace {
 
-// 候选中心到准星的距离。
 double distanceTo(const Candidate& c, const Vec2& cross)
 {
     const Vec2 d = c.box.center() - cross;
     return d.norm();
 }
 
-} // namespace
+}
 
 TargetSelection selectTarget(const std::vector<Candidate>& candidates,
                              const std::vector<size_t>& aimIndices,
@@ -47,7 +43,6 @@ TargetSelection selectTarget(const std::vector<Candidate>& candidates,
 {
     TargetSelection result;
 
-    // ── 1. 找出"最近"的候选（同时受 maxDistancePx 粗筛） ────────────────
     bool haveNearest = false;
     size_t nearestIdx = 0;
     double nearestDist = 0.0;
@@ -68,21 +63,14 @@ TargetSelection selectTarget(const std::vector<Candidate>& candidates,
 
     if (!haveNearest)
     {
-        // 本帧没有可瞄目标 —— 锁定失效，下游必须复位滤波状态。
         state.reset();
         result.found = false;
         return result;
     }
 
-    // ── 2. 滞回：上一帧锁定的目标还在，且没有明显更近的就保持 ────────────
     size_t chosenIdx = nearestIdx;
     if (state.locked)
     {
-        // 在候选里找"和锁定框是同一个目标"的那个。
-        // ★ 判据用中心距离 + 尺寸相似度，与 ② 稳定器的"认目标"同源。
-        //   这里先用一个宽松的判定：中心距离小于锁定框对角线的一半，
-        //   且尺寸比在 [0.5, 2.0] 内。
-        //   ★ 阈值本身待实测（方案 §7 第 6 条），此处是占位实现。
         bool lockedStillPresent = false;
         size_t lockedIdx = 0;
         double lockedDistToCross = 0.0;
@@ -108,16 +96,13 @@ TargetSelection selectTarget(const std::vector<Candidate>& candidates,
 
         if (lockedStillPresent)
         {
-            // 切换条件是"新目标明显更近"。k=1 就是纯最近（无滞回）。
             if (nearestDist * cfg.hysteresisRatio < lockedDistToCross)
-                chosenIdx = nearestIdx;      // 明显更近 ⇒ 切换
+                chosenIdx = nearestIdx;
             else
-                chosenIdx = lockedIdx;       // 否则保持锁定 ⇒ 这就是滞回
+                chosenIdx = lockedIdx;
         }
-        // lockedStillPresent == false ⇒ 锁定目标已经没了，走最近的那个。
     }
 
-    // ── 3. 落定 ─────────────────────────────────────────────────────────
     const Candidate& chosen = candidates[chosenIdx];
     result.found = true;
     result.index = chosenIdx;
@@ -134,4 +119,4 @@ TargetSelection selectTarget(const std::vector<Candidate>& candidates,
     return result;
 }
 
-} // namespace control
+}

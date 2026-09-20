@@ -56,6 +56,6 @@ private:
 
 AuthState& state();
 
-} // namespace auth
+}
 
 #endif // AUTH_STATE_H

@@ -68,17 +68,6 @@ bool GetSubType(IMFMediaType* type, GUID* subtype)
     return type && subtype && SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, subtype));
 }
 
-// 严格协商: 只接受【完全一致】的 (格式, 分辨率, 帧率)。这里没有任何回退。
-//
-// 失败一律返回 false 并给出可操作的错误信息, 由调用方终止采集并报错。
-//
-// 为什么不做回退 —— 静默换 mode 的代价全部由用户承担, 而且用户无从得知:
-//   * 选 NV12 被换成 MJPG  -> 白多一次编解码往返, 延迟变差
-//   * 选 1080p 被换成 720p -> 检测精度下降, 表现成"准星跟不上"
-//   * 选 240fps 被锁 30fps -> 控制环频率掉到 1/8, 手感直接崩
-// 这三件都比"开不起来 + 明确告诉你设备到底支持什么"糟糕得多。
-//
-// out_error 里会列出设备【真实支持】的组合, 用户照着改下拉即可。
 bool SelectExactMediaType(IMFSourceReader* reader,
                           GUID wantSubtype,
                           int wantW, int wantH, int wantFps,
@@ -118,21 +107,10 @@ bool SelectExactMediaType(IMFSourceReader* reader,
         double fps = 0.0;
     };
 
-    // 全量枚举原生媒体类型, 一边分类一边攒"报错素材"。
-    std::vector<TypeInfo>            sameFormat;      // 同 subtype
-    std::vector<TypeInfo>            sameRes;         // 同 subtype + 同尺寸
-    std::vector<std::string>         otherFormats;    // 设备还提供哪些格式
-    std::vector<std::pair<int,int>>  allResolutions;  // 该格式下有哪些分辨率
-    // 命中项用【下标】记录, 绝不用指向循环局部变量的指针。
-    //
-    // 这里踩过一个必然踩中的坑: 早先写成 `exact = &info` (循环内的局部变量),
-    // 紧接着 `sameRes.push_back(std::move(info))` 把 ComPtr 移走, info.type
-    // 当场变成空; 循环结束后再解引用它, 等于把 nullptr 交给
-    // SetCurrentMediaType —— 恒定返回 E_INVALIDARG(0x80070057)。
-    //
-    // 表现就是"设备明明宣称支持这个格式/分辨率/帧率, 却永远切不过去", 而且
-    // 对任何配置都失败, 于是采集卡路径完全出不了画面。
-    // 用下标还顺带躲开了 sameRes 扩容导致 &back() 失效的问题。
+    std::vector<TypeInfo>            sameFormat;
+    std::vector<TypeInfo>            sameRes;
+    std::vector<std::string>         otherFormats;
+    std::vector<std::pair<int,int>>  allResolutions;
     constexpr size_t kNoExactMatch = static_cast<size_t>(-1);
     size_t exactIndex = kNoExactMatch;
 
@@ -181,24 +159,18 @@ bool SelectExactMediaType(IMFSourceReader* reader,
 
         const bool sameResolution = (info.w == wantW && info.h == wantH);
 
-        // 29.97 / 59.94 这类非整数帧率按 ±1 容差匹配, 这是设备侧的表示差异,
-        // 不是"换了个模式"。
         if (sameResolution
             && std::abs(info.fps - static_cast<double>(wantFps)) <= 1.0
             && exactIndex == kNoExactMatch)
         {
-            exactIndex = sameRes.size();   // 记录即将 push 的位置
+            exactIndex = sameRes.size();
         }
 
-        // sameFormat 收一份拷贝(ComPtr 拷贝只是 AddRef), 保证它始终持有有效的
-        // 媒体类型; sameRes 拿走原件。早先对 sameFormat 也用 std::move, 拿到的
-        // 是被搬空的 type —— 只是碰巧它当时只被用来判空, 现在不再依赖这个巧合。
         sameFormat.push_back(info);
         if (sameResolution)
             sameRes.push_back(std::move(info));
     }
 
-    // 循环结束后才解析下标: 此时 sameRes 已定型, 元素地址稳定。
     const TypeInfo* exact =
         (exactIndex == kNoExactMatch) ? nullptr : &sameRes[exactIndex];
 
@@ -217,7 +189,6 @@ bool SelectExactMediaType(IMFSourceReader* reader,
         return os.str();
     };
 
-    // ---- 逐级诊断: 每一级都给出"设备实际有什么", 而不是含糊地失败 ----
     if (sameFormat.empty())
     {
         std::ostringstream os;
@@ -261,9 +232,6 @@ bool SelectExactMediaType(IMFSourceReader* reader,
         MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, exact->type.Get());
     if (FAILED(setHr))
     {
-        // 带上真实 HRESULT: 这个失败在"设备本身支持该模式"时几乎总是并发占用
-        // (另一个程序/本进程另一路采集正持有这张卡)或设备被重置, 光看
-        // "SetCurrentMediaType failed" 分不出来。
         char hrText[32];
         std::snprintf(hrText, sizeof(hrText), "0x%08lX", static_cast<unsigned long>(setHr));
         std::ostringstream os;
@@ -318,8 +286,6 @@ bool QueryCurrentFrameGeometry(IMFSourceReader* reader, int& width, int& height,
     return true;
 }
 
-// Device timestamps use 100ns units. Read QPC and FILETIME candidates at the
-// callback boundary; DeviceFrameAge validates the epoch and sample freshness.
 double QpcNow100ns()
 {
     LARGE_INTEGER counter{}, freq{};
@@ -332,9 +298,6 @@ double QpcNow100ns()
 double FileTimeNow100ns()
 {
     FILETIME ft{};
-    // GetSystemTimePreciseAsFileTime 是 Win8+ 的 API。真要走这条分支说明驱动把
-    // 时间戳填成了系统时间纪元, 此时精度只是次要问题; 老 SDK 头文件下退回毫秒级
-    // 的 GetSystemTimeAsFileTime, 保证能编过而不是整条测量编不出来。
 #if defined(_WIN32_WINNT) && (_WIN32_WINNT >= 0x0602)
     GetSystemTimePreciseAsFileTime(&ft);
 #else
@@ -345,8 +308,6 @@ double FileTimeNow100ns()
     u.HighPart = ft.dwHighDateTime;
     return static_cast<double>(u.QuadPart);
 }
-// The reader owns this COM callback. It carries samples/timestamps only, so a
-// late callback after cancellation cannot access a destroyed MFCapture.
 struct SampleResult
 {
     HRESULT status = S_OK;
@@ -401,7 +362,7 @@ public:
 private:
     std::atomic<ULONG> refs_{1};
 };
-} // namespace
+}
 
 MFCapture::Format MFCapture::ParseFormat(const std::string& s)
 {
@@ -441,7 +402,7 @@ MFCapture::MFCapture(int src_width,
     , gpu_decode_(gpu_decode)
 {
     source_fps_start_ = std::chrono::steady_clock::now();
-    target_fps_.store(capture_fps_);   // 初始采集帧率上限(0 = 不限速)
+    target_fps_.store(capture_fps_);
     receive_thread_ = std::thread(&MFCapture::ReceiveThread, this);
 }
 
@@ -451,8 +412,6 @@ MFCapture::~MFCapture()
     if (receive_thread_.joinable())
         receive_thread_.join();
 
-    // The MJPG path doesn't sync per frame, so the last frame's async work may
-    // still be on the stream. Drain before freeing buffers / events / decoder.
     if (gpu_stream_)
         cudaStreamSynchronize(gpu_stream_);
 
@@ -496,8 +455,6 @@ std::vector<MFDeviceInfo> MFCapture::EnumerateDevices()
 
                 MFDeviceInfo info;
                 info.index = static_cast<int>(i);
-                // friendly_name 是设备自报的原始名, 用于配置持久化 ——
-                // index 会随插拔顺序变化, 名字不会。
                 info.friendly_name = label;
                 std::ostringstream display;
                 display << u8"设备 #" << i;
@@ -516,18 +473,6 @@ std::vector<MFDeviceInfo> MFCapture::EnumerateDevices()
     return devices;
 }
 
-
-// =============================================================================
-// 采集卡能力探测
-// =============================================================================
-//
-// 只做一件事: 把设备【真实支持】的 (像素格式, 分辨率, 帧率) 全集问出来。
-// 不做任何"猜测/补齐/升级" —— 设备支持什么就是什么。
-//
-// 手段是 Media Foundation 的 IMFSourceReader::GetNativeMediaType: 从 0 开始
-// 一直枚举到 MF_E_NO_MORE_TYPES, 每一条原生媒体类型就是设备宣称的一种能力。
-// 这比"设一个 mode 然后看能不能打开"可靠得多 —— 后者会把"能打开但实际
-// 每帧都超时"的 mode 也算作支持。
 namespace
 {
 
@@ -535,11 +480,9 @@ struct KnownFormat
 {
     const GUID* guid;
     const char* name;
-    bool        supported;   // 本程序是否真的能解码
+    bool        supported;
 };
 
-// 设备可能报出来的像素格式。supported=false 的也列出来 —— 诚实反映设备能力,
-// 但 UI 默认不展示 (本程序吃不下, 展示了只会误导)。
 const KnownFormat kKnownFormats[] = {
     { &MFVideoFormat_NV12,   "NV12",  true  },
     { &MFVideoFormat_MJPG,   "MJPG",  true  },
@@ -570,21 +513,19 @@ std::string FormatNameFromSubtype(REFGUID subtype, bool& supported)
             return k.name;
         }
     }
-    // 未知格式: 原样打印 GUID, 不编造名字。
     supported = false;
     wchar_t buf[64]{};
     StringFromGUID2(subtype, buf, 64);
     return WideToUtf8(buf);
 }
 
-// 设备常报 29.97 / 59.94 这类非整数帧率, 统一四舍五入到整数再做匹配。
 int RoundFps(UINT32 num, UINT32 den)
 {
     if (den == 0) return 0;
     return static_cast<int>(std::lround(static_cast<double>(num) / den));
 }
 
-} // namespace
+}
 
 bool MFCapture::ProbeCapabilities(MFDeviceInfo& dev)
 {
@@ -615,9 +556,6 @@ bool MFCapture::ProbeCapabilities(MFDeviceInfo& dev)
                     if (SUCCEEDED(MFCreateSourceReaderFromMediaSource(
                             source.Get(), nullptr, &reader)))
                     {
-                        // 关键: 不 SetCurrentMediaType。我们要的是【原生】能力表,
-                        // 一旦设了 current type, 部分驱动会把 GetNativeMediaType
-                        // 的返回收窄到与 current 兼容的子集, 表就不全了。
                         for (DWORD i = 0; ; ++i)
                         {
                             ComPtr<IMFMediaType> mt;
@@ -640,8 +578,6 @@ bool MFCapture::ProbeCapabilities(MFDeviceInfo& dev)
                             UINT32 num = 0, den = 0;
                             if (FAILED(MFGetAttributeRatio(mt.Get(), MF_MT_FRAME_RATE, &num, &den)))
                             {
-                                // 少数驱动只给 FRAME_RATE_RANGE_MAX。取不到就跳过这条,
-                                // 不编造帧率 —— 编造的帧率正是"帧率下降"的根源。
                                 if (FAILED(MFGetAttributeRatio(
                                         mt.Get(), MF_MT_FRAME_RATE_RANGE_MAX, &num, &den)))
                                     continue;
@@ -652,7 +588,6 @@ bool MFCapture::ProbeCapabilities(MFDeviceInfo& dev)
                             bool supported = false;
                             const std::string fname = FormatNameFromSubtype(sub, supported);
 
-                            // 合并到 (format, width, height) 桶里, 帧率去重。
                             MFCapability* slot = nullptr;
                             for (auto& c : dev.caps)
                             {
@@ -705,15 +640,12 @@ bool MFCapture::ProbeCapabilities(MFDeviceInfo& dev)
     return ok;
 }
 
-// =============================================================================
-// capture_card 门面实现 (薄封装, 声明见 capture_card_probe.h)
-// =============================================================================
 namespace capture_card
 {
 
 std::vector<MFDeviceInfo> ProbeAll()
 {
-    return MFCapture::EnumerateDevicesWithCaps(/*probe_index=*/-1);
+    return MFCapture::EnumerateDevicesWithCaps( -1);
 }
 
 std::vector<MFDeviceInfo> ProbeOne(int device_index)
@@ -729,10 +661,10 @@ const MFDeviceInfo* FindByName(const std::vector<MFDeviceInfo>& devs,
     for (const auto& d : devs)
         if (d.friendly_name == friendly_name)
             return &d;
-    return nullptr;   // 刻意不回退到 devs[0]: 上次选的卡没插就该报错, 不该偷偷换一张
+    return nullptr;
 }
 
-} // namespace capture_card
+}
 
 std::vector<MFDeviceInfo> MFCapture::EnumerateDevicesWithCaps(int probe_index)
 {
@@ -745,7 +677,6 @@ std::vector<MFDeviceInfo> MFCapture::EnumerateDevicesWithCaps(int probe_index)
     }
     return devices;
 }
-
 
 cv::Mat MFCapture::GetNextFrameCpu()
 {
@@ -815,7 +746,7 @@ void MFCapture::ReceiveThread()
     callback.Attach(new SampleCallback());
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
-    double negotiatedFps = 0.0;  // declared before any goto so cleanup stays in scope
+    double negotiatedFps = 0.0;
 
     ComPtr<IMFAttributes> deviceAttrs = CreateVideoDeviceAttributes();
     if (!deviceAttrs || FAILED(MFEnumDeviceSources(deviceAttrs.Get(), &activates, &count)) || count == 0)
@@ -824,8 +755,6 @@ void MFCapture::ReceiveThread()
         goto cleanup;
     }
 
-    // 设备索引越界【不静默换设备】。换了之后用户以为在用 A 卡, 实际采的是 B 卡,
-    // EDID / 分辨率 / 帧率全部错位, 比直接报错难查得多。
     if (device_index_ >= static_cast<int>(count))
     {
         std::cerr << "[MFCapture] Device index " << device_index_
@@ -842,8 +771,6 @@ void MFCapture::ReceiveThread()
     }
 
     {
-        // Request low latency from both the source and reader. Attribute
-        // readback confirms only that the store accepted it, not driver behavior.
         bool sourceAccepts = false;
         ComPtr<IMFMediaSourceEx> sourceEx;
         if (SUCCEEDED(source->QueryInterface(IID_PPV_ARGS(&sourceEx))) && sourceEx)
@@ -862,9 +789,6 @@ void MFCapture::ReceiveThread()
     }
 
     {
-        // 禁用 MF 内置 converter, 要求设备直送原生帧格式。这是【唯一】路径 ——
-        // 启用 converter 意味着 source reader 会在 CPU 上把帧偷偷转一手,
-        // 帧率 / 带宽 / 延迟全部不可控, 正是要杜绝的那类"看不见的回退"。
         reader.Reset();
         ComPtr<IMFAttributes> readerAttrs;
         MFCreateAttributes(&readerAttrs, 4);
@@ -878,7 +802,6 @@ void MFCapture::ReceiveThread()
         {
             readerAttrs->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
             readerAttrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
-            // Keep native formats and request low-latency delivery.
             readerAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
         }
         if (FAILED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttrs.Get(), &reader)))
@@ -888,8 +811,6 @@ void MFCapture::ReceiveThread()
             goto cleanup;
         }
 
-        // 严格协商: 只接受与配置【完全一致】的 格式 / 分辨率 / 帧率。
-        // 任何一处对不上都直接失败, 不做任何替换。
         double negotiatedOut = 0.0;
         std::string why;
         const bool ok = SelectExactMediaType(reader.Get(), SubtypeFor(format_),
@@ -915,9 +836,6 @@ void MFCapture::ReceiveThread()
     {
         if (!EnsureGpuContext())
             goto cleanup;
-        // Allocate steady-state raw-path storage before streaming. cudaMalloc
-        // may synchronize the device, so letting it occur while 240Hz samples
-        // are arriving creates visible frame-time spikes.
         for (auto& slot : out_pool_)
             if (!slot.create(out_side_, out_side_, 3))
                 goto cleanup;
@@ -944,7 +862,6 @@ void MFCapture::ReceiveThread()
                           << std::endl;
                 open_error_ = "MJPG selected but nvJPEG GPU decoder is unavailable";
                 goto cleanup;
-                // 旧的 CPU 解码回退已按"采集卡路径不允许回退"的要求移除。
             }
         }
     }
@@ -962,12 +879,10 @@ void MFCapture::ReceiveThread()
     source_fps_smoothed_ = 0.0;
     source_fps_start_ = std::chrono::steady_clock::now();
     is_open_.store(true);
-    StartDecodeWorkers();   // 仅 crop_enabled 的 MJPG-GPU 模式内部生效
+    StartDecodeWorkers();
     StartProcessWorker();
     while (!should_stop_.load())
     {
-        // Async ReadSample returns immediately. Waiting for a sample is
-        // cancellable even if an unplugged/stalled device never calls back.
         const HRESULT requested = reader->ReadSample(
             MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
         if (FAILED(requested))
@@ -1020,14 +935,7 @@ void MFCapture::ReceiveThread()
 
         if (data && currentLen > 0)
         {
-            // Count device delivery immediately after ReadSample/Lock.  Decode,
-            // color conversion and queue pressure must not masquerade as a
-            // lower camera/source frame rate in diagnostics.
             TickFps();
-            // Apply the requested processing cap once, before every CPU/GPU
-            // decode path.  The device is still drained at full speed and the
-            // source counter above remains truthful, but frames above the cap
-            // consume no conversion/decode work.
             if (ShouldDispatchFrame())
             {
                 if (format_ == Format::Mjpg && gpu_decode_
@@ -1046,7 +954,7 @@ cleanup:
     callback->slot.close();
     if (reader) reader->Flush(MF_SOURCE_READER_ALL_STREAMS);
     StopProcessWorker();
-    StopDecodeWorkers();    // 幂等:未启动时直接返回
+    StopDecodeWorkers();
     is_open_.store(false);
     if (activates)
     {
@@ -1188,10 +1096,6 @@ void MFCapture::EnqueueProcessJob(const uint8_t* data, size_t size, int64_t capt
 
 void MFCapture::ProcessWorkerLoop()
 {
-    // Keep several source byte buffers alive until their asynchronous H2D copy
-    // has passed on gpu_stream_. Waiting only when a ring slot is reused gives
-    // CUDA multiple frames of runway without risking use-after-free of pageable
-    // IMFSample copies.
     static constexpr size_t HOST_RING = 8;
     std::array<ProcessJob, HOST_RING> hostRing;
     std::array<cudaEvent_t, HOST_RING> hostDone{};
@@ -1266,8 +1170,6 @@ void MFCapture::ProcessWorkerLoop()
             }
             else
             {
-                // Event creation failure is rare; preserve correctness even if
-                // this degraded path loses overlap.
                 cudaStreamSynchronize(gpu_stream_);
                 hostRing[rawSlot].bytes.clear();
             }
@@ -1280,8 +1182,6 @@ void MFCapture::ProcessWorkerLoop()
         }
     }
 
-    // ProcessJob owns the host bytes used by asynchronous H2D copies. Drain the
-    // stream before the last local job is destroyed during shutdown.
     if (gpu_stream_)
         cudaStreamSynchronize(gpu_stream_);
     for (auto& event : hostDone)
@@ -1336,9 +1236,6 @@ void MFCapture::EnqueueGpu(GpuImage&& frame)
     frame_cv_.notify_one();
 }
 
-// 消费线程在队列取空时调用:阻塞到下一帧入队(被 Enqueue* 的 notify 唤醒)或
-// 超时。这样消费精确贴着产帧节奏走,而不是睡满一个固定节拍——后者会和产帧时钟
-// 相位漂移而踏空,在队列容量 1 下丢帧。返回 true 表示队列里已有帧,可立即重试。
 bool MFCapture::WaitFrame(int timeoutMs)
 {
     std::unique_lock<std::mutex> lock(frame_mutex_);
@@ -1350,8 +1247,6 @@ bool MFCapture::WaitFrame(int timeoutMs)
 
 void MFCapture::StartDecodeWorkers()
 {
-    // 仅 crop_enabled 的 MJPG-GPU 模式才用并行 ROI 解码;其余路径保持 ReceiveThread
-    // 直接 Push(单线程,不受影响)。
     if (!(format_ == Format::Mjpg && gpu_decode_ && crop_enabled_))
         return;
     workers_stop_.store(false);
@@ -1384,11 +1279,11 @@ void MFCapture::EnqueueJpegJob(const uint8_t* data, size_t size, int64_t capture
     DecodeJob job;
     job.capture_ns = capture_ns;
     job.jpeg.assign(data, data + size);
-    job.seq = ++job_seq_;   // ReceiveThread 单线程,普通递增即可
+    job.seq = ++job_seq_;
     {
         std::lock_guard<std::mutex> lock(job_mutex_);
         while (static_cast<int>(job_queue_.size()) >= MAX_JOB_QUEUE)
-            job_queue_.pop();   // 丢最旧、保最新
+            job_queue_.pop();
         job_queue_.push(std::move(job));
     }
     job_cv_.notify_one();
@@ -1399,18 +1294,15 @@ void MFCapture::SetTargetFps(int fps)
     target_fps_.store(std::max(0, fps));
 }
 
-// 按 target_fps_ 节流:命中目标时刻返回 true(放行去解码),否则 false(丢弃,不解码)。
-// 用"下一个目标时刻"递进而非"距上次",让放行节奏贴近目标帧率;落后过多则重锚定,
-// 避免卡顿/暂停后 burst 补帧。仅 ReceiveThread 单线程调用,next_dispatch_ 无需加锁。
 bool MFCapture::ShouldDispatchFrame()
 {
     const int fps = target_fps_.load();
     if (fps <= 0)
-        return true;   // 0 = 不限速,全部放行
+        return true;
     const int sourceFps = negotiated_fps_.load();
     const int tolerance = std::max(2, fps / 100);
     if (sourceFps > 0 && sourceFps <= fps + tolerance)
-        return true;   // 240Hz 源请求 240 时绝不能再用第二个 240Hz 时钟抽帧
+        return true;
     const auto now = std::chrono::steady_clock::now();
     const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double, std::milli>(1000.0 / fps));
@@ -1423,7 +1315,7 @@ bool MFCapture::ShouldDispatchFrame()
     {
         next_dispatch_ += interval;
         if (next_dispatch_ < now)
-            next_dispatch_ = now + interval;   // 落后过多(卡顿/暂停),重锚定
+            next_dispatch_ = now + interval;
         return true;
     }
     return false;
@@ -1431,9 +1323,6 @@ bool MFCapture::ShouldDispatchFrame()
 
 void MFCapture::DecodeWorkerLoop()
 {
-    // 每个 worker 自带独立 nvjpeg 解码器、CUDA 流、输出环 + 完成事件:nvjpegJpegState
-    // 非线程安全必须 per-thread;输出环让消费者持有某帧时 create() 仍能复用别的 slot
-    // 的设备缓冲(GpuImage 引用计数)。
     capture::GpuJpegDecoder decoder;
     if (!decoder.init())
     {
@@ -1456,7 +1345,7 @@ void MFCapture::DecodeWorkerLoop()
             std::unique_lock<std::mutex> lock(job_mutex_);
             job_cv_.wait(lock, [this] { return !job_queue_.empty() || workers_stop_.load(); });
             if (workers_stop_.load())
-                break;   // 停止:残留 job 由 StopDecodeWorkers 清空,不再处理
+                break;
             job = std::move(job_queue_.front());
             job_queue_.pop();
         }
@@ -1464,9 +1353,8 @@ void MFCapture::DecodeWorkerLoop()
         const size_t slot = ringIdx;
         ringIdx = (ringIdx + 1) % RING;
         GpuImage& dst = outRing[slot];
-        // ROI 中心 out_side_ 解码(与原单线程路径一致,FOV 不变)。
         if (!decoder.decodeCropped(job.jpeg.data(), job.jpeg.size(), out_side_, out_side_, dst, stream))
-            continue;   // ROI 解码失败(罕见),丢弃该帧
+            continue;
 
         auto event = evRing.record(stream);
         if (!event && cudaStreamSynchronize(stream) != cudaSuccess) continue;
@@ -1485,7 +1373,6 @@ bool MFCapture::EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq, int64_t captur
         return false;
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        // 序号守卫:乱序到达的旧帧直接丢弃,避免覆盖队列里更新的帧。
         if (seq <= enqueued_seq_.load(std::memory_order_relaxed))
             return false;
         enqueued_seq_.store(seq, std::memory_order_relaxed);
@@ -1503,7 +1390,7 @@ void MFCapture::ResolveRoi(int width, int height, int& left, int& top, int& roiW
     if (crop_enabled_ && width >= out_side_ && height >= out_side_)
     {
         roiW = roiH = out_side_;
-        left = ((width - out_side_) / 2) & ~1;   // even origin keeps NV12/YUY2 chroma aligned
+        left = ((width - out_side_) / 2) & ~1;
         top  = ((height - out_side_) / 2) & ~1;
     }
     else
@@ -1530,8 +1417,6 @@ GpuImage MFCapture::ResizeToOut(const GpuImage& src)
     GpuImage& slot = nextOutSlot();
     if (!slot.create(out_side_, out_side_, 3))
         return GpuImage();
-    // Same-size bilinear (pixel-center sampling) is an identity copy, so this
-    // doubles as the "copy a scratch/view into an owned ring slot" primitive.
     launch_resize_bgr_u8_bilinear(src.data(), src.step(), src.cols(), src.rows(),
                                   slot.data(), slot.step(), out_side_, out_side_, gpu_stream_);
     return slot;
@@ -1556,12 +1441,6 @@ cv::Mat MFCapture::FinalizeCpu(cv::Mat bgr)
     return out;
 }
 
-// ---------------- GPU decode paths ----------------
-// Raw formats: upload ONLY the centered ROI (crop-before-upload) so the per-
-// frame PCIe transfer is bounded by out_side — critical on a Gen1-capped card.
-// NPP converts the ROI to BGR straight into an output slot. Completion events
-// let conversion overlap the next device read without exposing partial frames.
-
 bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stride)
 {
     if (!gpu_stream_ || !data || width <= 0 || height <= 0)
@@ -1572,7 +1451,6 @@ bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stri
     int left, top, roiW, roiH;
     ResolveRoi(width, height, left, top, roiW, roiH);
 
-    // Upload only the ROI of the Y and UV planes.
     if (!scratch_a_.upload(data + static_cast<size_t>(top) * stride + left,
                            roiH, roiW, 1, stride, gpu_stream_))
         return false;
@@ -1581,7 +1459,7 @@ bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stri
                            roiH / 2, roiW, 1, stride, gpu_stream_))
         return false;
 
-    const Npp8u* pSrc[2] = { scratch_a_.data(), scratch_b_.data() };  // both step == roiW
+    const Npp8u* pSrc[2] = { scratch_a_.data(), scratch_b_.data() };
     NppiSize roi = { roiW, roiH };
     const bool direct = crop_enabled_ && roiW == out_side_ && roiH == out_side_;
     GpuImage& dst = direct ? nextOutSlot() : scratch_full_;
@@ -1672,11 +1550,6 @@ bool MFCapture::PushMjpgGpu(const uint8_t* data, size_t size)
     if (!gpu_decoder_ || !gpu_stream_ || !data || size == 0)
         return false;
 
-    // Stage the JPEG into pinned host memory so nvJPEG's host->device copy is
-    // efficient. A single buffer is safe here even without a per-frame sync:
-    // decodeCropped's host (parse + entropy) phase consumes these bytes
-    // synchronously before it returns; only the decoder's INTERNAL scratch is
-    // read asynchronously, and that is ring-buffered inside GpuJpegDecoder.
     if (pinned_jpeg_capacity_ < size)
     {
         if (pinned_jpeg_buffer_)
@@ -1697,8 +1570,6 @@ bool MFCapture::PushMjpgGpu(const uint8_t* data, size_t size)
     }
 
     GpuImage out;
-    // ROI decode straight into an output slot — only the centered out_side
-    // region is reconstructed on the GPU.
     if (crop_enabled_)
     {
         GpuImage& slot = nextOutSlot();
@@ -1708,8 +1579,6 @@ bool MFCapture::PushMjpgGpu(const uint8_t* data, size_t size)
 
     if (out.empty())
     {
-        // Fallback / no-crop: full-frame decode into scratch, then crop-or-resize
-        // into an output slot.
         if (!gpu_decoder_->decode(decodeSrc, size, scratch_full_, gpu_stream_))
             return false;
         if (crop_enabled_ && scratch_full_.cols() >= out_side_ && scratch_full_.rows() >= out_side_)
@@ -1727,23 +1596,12 @@ bool MFCapture::PushMjpgGpu(const uint8_t* data, size_t size)
     if (out.empty())
         return false;
 
-    // No per-frame sync: record this frame's completion on gpu_stream_ and hand
-    // the event to the consumer (the detector waits on it from its own stream,
-    // and download() waits via cudaEventSynchronize). This lets the next frame's
-    // host-side entropy decode overlap this frame's GPU reconstruction. Fall
-    // back to a sync if the event is missing so a consumer never reads an
-    // incomplete frame.
     auto event = out_events_.record(gpu_stream_);
     if (!event && cudaStreamSynchronize(gpu_stream_) != cudaSuccess) return false;
     out.setReadyEvent(std::move(event));
     EnqueueGpu(std::move(out));
     return true;
 }
-
-// ---------------- CPU decode paths ----------------
-// Color-convert (or imdecode) the full frame, then center-crop / resize to the
-// square output. For raw formats crop-after-convert is pixel-identical to
-// crop-before-convert; there is no PCIe transfer to save on the CPU path.
 
 bool MFCapture::PushNv12Cpu(const uint8_t* data, int width, int height, int stride)
 {

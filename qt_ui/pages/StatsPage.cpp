@@ -14,8 +14,6 @@
 
 #include <cmath>
 
-// ── FpsGraphWidget ──
-
 FpsGraphWidget::FpsGraphWidget(QWidget* parent)
     : QWidget(parent) {
     setMinimumHeight(200);
@@ -43,8 +41,6 @@ void FpsGraphWidget::paintEvent(QPaintEvent*) {
     const int margin = 40;
     const int graphW = w - margin * 2;
     const int graphH = h - margin * 2;
-
-    // Transparent background — the card behind us provides the white surface.
 
     double maxVal = 1.0;
     for (auto v : m_data) {
@@ -78,7 +74,6 @@ void FpsGraphWidget::paintEvent(QPaintEvent*) {
         return QPointF(x, y);
     };
 
-    // Filled area under the curve (accent, faint).
     QPainterPath area;
     area.moveTo(pointAt(0).x(), margin + graphH);
     for (int i = 0; i < count; ++i) {
@@ -91,7 +86,6 @@ void FpsGraphWidget::paintEvent(QPaintEvent*) {
     fill.setAlpha(28);
     p.fillPath(area, fill);
 
-    // Line on top (accent).
     QPen linePen(kAccent, 2);
     linePen.setJoinStyle(Qt::RoundJoin);
     p.setPen(linePen);
@@ -115,8 +109,6 @@ void FpsGraphWidget::paintEvent(QPaintEvent*) {
     }
 }
 
-// ── StatsPage ──
-
 StatsPage::StatsPage(QWidget* parent)
     : QWidget(parent) {
     auto* outerLayout = new QVBoxLayout(this);
@@ -133,7 +125,6 @@ StatsPage::StatsPage(QWidget* parent)
     layout->setSpacing(14);
     scroll->setWidget(content);
 
-    // ── Card 1: 实时性能 (metric grid) ──
     auto* perfCard = new CardWidget(QString::fromUtf8(u8"实时性能"), QStringLiteral("gauge"));
 
     auto* metricGrid = new QGridLayout;
@@ -160,9 +151,6 @@ StatsPage::StatsPage(QWidget* parent)
         return cell;
     };
 
-    // "采集 FPS" = 消费循环每秒迭代数(captureFps);"产帧 FPS" = receive 线程
-    // 每秒真正解码+入队的帧数(captureSourceFps,wire+NVDEC 的真实速度)。两个
-    // 数字分开看能立刻判断瓶颈在采集线程还是产帧侧。
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"采集 FPS"), m_fpsValue),         0, 0);
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"产帧 FPS"), m_sourceFpsValue),   0, 1);
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"采集延迟"), m_captureLatency),   1, 0);
@@ -174,17 +162,11 @@ StatsPage::StatsPage(QWidget* parent)
     perfCard->contentLayout()->addLayout(metricGrid);
     layout->addWidget(perfCard);
 
-    // ── Card 2: 性能图表 ──
     auto* graphCard = new CardWidget(QString::fromUtf8(u8"性能图表"), QStringLiteral("chart-line"));
     m_graph = new FpsGraphWidget;
     graphCard->contentLayout()->addWidget(m_graph);
     layout->addWidget(graphCard);
 
-    // ── Card 3: 采集诊断 (collapsible) ──
-    // 采集卡路径的延迟分段(原先这里是 eth_capture 的网络接收诊断 —— 网络后端已
-    // 删除, 五项恒为 0, 只会把排查延迟的人带偏)。
-    //
-    // 设备帧龄与回调后的软件耗时分开显示, 不据此单独判断卡芯片快慢。
     auto* rxCard = new CardWidget(QString::fromUtf8(u8"采集诊断 (采集卡)"), QStringLiteral("activity"));
     rxCard->setCollapsible(true);
 
@@ -223,7 +205,6 @@ StatsPage::StatsPage(QWidget* parent)
     });
     mouseTimer->start();
 
-    // ── Card 4: 系统资源 (collapsible) ──
     auto* sysCard = new CardWidget(QString::fromUtf8(u8"系统资源"), QStringLiteral("cpu"));
     sysCard->setCollapsible(true);
 
@@ -252,8 +233,6 @@ void StatsPage::setSourceFps(double fps) {
         m_sourceFpsValue->setText(QStringLiteral("--"));
 }
 
-// 延迟数值统一格式化: 负数 = 尚无数据(探针还没结算过一帧), 显示 "--"。
-// 不能用 0 当"没有数据": 0 ms 是一个合法测量值, 混在一起会让人以为链路变快了。
 static QString fmtLatencyMs(double ms) {
     if (ms < 0.0) return QStringLiteral("--");
     return QStringLiteral("%1 ms").arg(ms, 0, 'f', 1);
@@ -284,8 +263,6 @@ void StatsPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs
     auto setMs = [](QLabel* lbl, double ms) {
         if (lbl) lbl->setText(fmtLatencyMs(ms));
     };
-    // 设备帧龄用微秒精度: 对接侧正常时它经常只有零点几毫秒, 取整到 1 位小数会看
-    // 不出差别, 而"有没有排队"正是靠这个小数区分的。
     if (m_diagDeviceAge) {
         m_diagDeviceAge->setText(deviceAgeUs < 0
             ? QStringLiteral("--")

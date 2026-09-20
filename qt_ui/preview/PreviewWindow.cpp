@@ -46,7 +46,7 @@ const QVector<GroupDef>& groups() {
     return kGroups;
 }
 
-}  // namespace
+}
 
 PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(QString::fromUtf8(u8"Apotheosis — UI 预览"));
@@ -84,13 +84,12 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(m_top, &TopNavBar::primaryChanged, this, &PreviewWindow::onPrimaryChanged);
     connect(m_side, &SideNav::currentChanged, this, &PreviewWindow::onSecondaryChanged);
-    connect(m_top, &TopNavBar::saveClicked, this, [] { /* 预览中保存为空操作 */ });
+    connect(m_top, &TopNavBar::saveClicked, this, [] {   });
     connect(m_overview, &OverviewPage::startStopRequested, this, &PreviewWindow::toggleRunning);
 
     m_top->setCurrentPrimary(0);
     onPrimaryChanged(0);
 
-    // Pre-seed the chart so it looks populated the moment the window opens.
     for (int i = 0; i < 64; ++i)
         tickMock();
 
@@ -204,7 +203,6 @@ void PreviewWindow::tickMock() {
         m_overview->setInferenceLatency(infer);
         m_overview->setTotalLatency(total);
         m_overview->setDetectionCount(boxes, boxes > 6 ? boxes - 6 : 0);
-        // 采集链路分段(假数据, 只为看版式): 设备帧龄 / 采集→取帧 / 推理 / 发布→消费 / 全链路。
         m_overview->setCaptureChainDiagnostics(1200, 0.4, 4.2, 0.9, total);
 
         const QString uptime = QStringLiteral("%1:%2:%3")

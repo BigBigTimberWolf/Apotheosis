@@ -383,7 +383,6 @@ std::vector<std::string> getOnnxFiles()
     return GetModelFilesByExt({ ".onnx", ".oliver" });
 }
 
-
 std::vector<std::string>::difference_type getModelIndex(const std::vector<std::string>& engine_models)
 {
     auto it = std::find(engine_models.begin(), engine_models.end(), config.ai_model);
@@ -394,7 +393,7 @@ std::vector<std::string>::difference_type getModelIndex(const std::vector<std::s
     }
     else
     {
-        return -1; // not found
+        return -1;
     }
 }
 
@@ -711,5 +710,3 @@ void welcome_message()
               << "HOME -> Toggle overlay (settings)\n"
               << "Configure aim hotkeys from the overlay's \"Aim Hotkeys\" tab." << std::endl;
 }
-
-

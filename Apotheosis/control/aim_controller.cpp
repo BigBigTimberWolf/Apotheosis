@@ -15,9 +15,6 @@ AimController::~AimController() = default;
 
 void AimController::setFilter(std::unique_ptr<IFilter> filter)
 {
-    // ★★ 这里是"二选一"的落点：赋值即替换，**不存在"两个同时生效"的状态**。
-    //   传 nullptr 恢复默认 α-β。这正是 §3.5.1 禁止串联的实现形态 ——
-    //   不是靠运行时检查，而是靠"类型上就只有一个成员"。
     filter_ = filter ? std::move(filter) : std::make_unique<AlphaBetaFilter>();
     if (filter_)
         filter_->reset();
@@ -27,11 +24,13 @@ void AimController::reset()
 {
     selectorState_.reset();
     stabilizerState_.reset();
+    predictorState_.reset();
     if (filter_)
         filter_->reset();
     pid_.reset();
     hasLastBox_ = false;
     lastBox_ = Box{};
+    lastSentCounts_ = Counts{ 0, 0 };
 }
 
 ControlOutput AimController::update(const ControlInput& in)
@@ -39,14 +38,12 @@ ControlOutput AimController::update(const ControlInput& in)
     ControlOutput out;
     out.cross = in.cross;
 
-    // ── dt 门禁 ────────────────────────────────────────────────────────
     if (!(in.dtSec > 0.0))
     {
         out.idleReason = ControlOutput::IdleReason::BadDt;
         return out;
     }
 
-    // ── 新鲜度门禁（二值，§3.3） ────────────────────────────────────────
     if (cfg_.requireFreshDetection && !in.detectionFresh)
     {
         out.idleReason = ControlOutput::IdleReason::StaleDetection;
@@ -58,14 +55,13 @@ ControlOutput AimController::update(const ControlInput& in)
         return out;
     }
 
-    // ── ① 筛选 + 选靶 ──────────────────────────────────────────────────
     const std::vector<size_t> aimIdx = filterAimCandidates(in.candidates, cfg_.buckets,
                                                            cfg_.selector);
     if (aimIdx.empty())
     {
-        // 没有可瞄目标 ⇒ 锁定失效，下游必须复位（§3.3 第 3 条）。
         selectorState_.reset();
         stabilizerState_.reset();
+        predictorState_.reset();
         if (filter_) filter_->reset();
         pid_.reset();
         hasLastBox_ = false;
@@ -81,7 +77,6 @@ ControlOutput AimController::update(const ControlInput& in)
         return out;
     }
 
-    // ── ② 稳定器（认目标 + 剔除异常框，★ 不滤波） ──────────────────────
     Candidate chosen;
     chosen.box = sel.box;
     chosen.classId = sel.classId;
@@ -91,22 +86,18 @@ ControlOutput AimController::update(const ControlInput& in)
     if (!stab.accepted)
     {
         out.idleReason = ControlOutput::IdleReason::RejectedByStabilizer;
-        // ★ 本帧不出力，但【不】复位滤波器 —— 一个误检不该把已经稳定的估计丢掉。
         return out;
     }
 
-    // ★★★ 突变 ⇒ 硬重置下游滤波状态（§3.2.1）。
-    //   不重置的话，换目标时会出现"从旧位置滑到新位置"的过渡，
-    //   而控制器会把这段过渡当成"目标在高速移动"，表现为换目标时冲一下。
-    //   ★ 这条与卡尔曼无关 —— 无论开不开卡尔曼都需要。
     if (stab.verdict == StabilizerVerdict::Snap || stab.verdict == StabilizerVerdict::NoHistory)
     {
         if (filter_) filter_->reset();
         pid_.reset();
+        // 目标跳变/新目标：清空预测状态，否则上一个目标遗留的延迟缓存
+        // 会污染新目标的第一次预测。
+        predictorState_.reset();
     }
 
-    // ── ③ 滤波（唯一一处） ─────────────────────────────────────────────
-    // ★ 平滑对象是稳定后框的【中心点】（2 个数），不是四个角/宽高。
     const Vec2 obsCenter = stab.box.center();
     filter_->observe(obsCenter, in.dtSec);
     const Vec2 filteredCenter = filter_->position();
@@ -114,13 +105,6 @@ ControlOutput AimController::update(const ControlInput& in)
     hasLastBox_ = true;
     lastBox_ = stab.box;
 
-    // ── ④ 瞄点 ────────────────────────────────────────────────────────
-    // ★ 用【滤波后的中心点】+【稳定器的框尺寸】—— 滤波只有中心点被平滑。
-    //
-    // ★★ 逐类别覆盖：同一热键同时瞄 head / body 时，两者该瞄的框内位置不同
-    //    （头要贴框顶，身体要居中）。查得到就用该类的范围，查不到退回热键级。
-    //    ★ 用 sel.classId（选靶层的判定结果），不是别的来源 —— 瞄点必须
-    //      跟着"这一拍实际锁的是哪一类"走。
     AimPointConfig aimCfg = cfg_.aimPoint;
     for (const ClassAimPoint& cap : cfg_.classAimPoints)
     {
@@ -131,25 +115,39 @@ ControlOutput AimController::update(const ControlInput& in)
             break;
         }
     }
-    out.anchor = computeAnchor(filteredCenter, stab.box, aimCfg, in.frameIndex);
 
-    // ── ④b 目标框与身份（供自动扳机算命中区 / 判转火）──────────────────
-    // ★ 用【稳定后的框】而不是原始 sel.box —— 命中区应当跟着控制实际用的
-    //   那个框走, 否则误检的漂移会让扳机跟着抽。
+    // 在途补偿：按目标速度把瞄准点往前推一段，抵消整条链路的延迟。
+    // ★ 关键物理修正：画面上看到的目标移动并不等于目标的真实速度！
+    // 因为准星在追着目标走，准星每追上一拍，画面里的目标相对位移就被抵消掉了一拍。
+    // 目标真实速度 = 画面观测速度 + k * 鼠标自身下发速率 (把自身运动补偿回去)
+    Vec2 trueVelocity = filter_->velocity();
+    if (cfg_.pid.kPxPerCount > 0.0 && in.dtSec > 0.0)
+    {
+        // out.counts 尚未计算，使用上一拍下发的 countsRate
+        const double mouseRateX = static_cast<double>(lastSentCounts_.x) / in.dtSec;
+        const double mouseRateY = static_cast<double>(lastSentCounts_.y) / in.dtSec;
+        trueVelocity.x += cfg_.pid.kPxPerCount * mouseRateX;
+        trueVelocity.y += cfg_.pid.kPxPerCount * mouseRateY;
+    }
+
+    out.predictor = predictAnchor(filteredCenter, trueVelocity, stab.box,
+                                  cfg_.predictor, predictorState_);
+
+    out.anchor = computeAnchor(out.predictor.predictedCenter, stab.box, aimCfg,
+                               in.frameIndex);
+
     out.targetBox = stab.box;
     out.hasTarget = true;
-    // 身份: 稳定器每帧要么延续同一个目标(Common), 要么判为换目标(Snap/NoHistory)。
-    // ★ 只有"换目标"才推进编号 —— 扳机的转火冷却就挂在这个变化上。
     if (stab.verdict == StabilizerVerdict::Snap || stab.verdict == StabilizerVerdict::NoHistory)
         ++targetIdCounter_;
     out.targetId = targetIdCounter_;
 
-    // ── ⑤⑥ PID + 量化 ────────────────────────────────────────────────
     out.error = out.anchor - out.cross;
     out.counts = pid_.update(out.anchor, out.cross, in.dtSec);
+    lastSentCounts_ = out.counts;
     out.engaged = true;
     out.idleReason = ControlOutput::IdleReason::None;
     return out;
 }
 
-} // namespace control
+}

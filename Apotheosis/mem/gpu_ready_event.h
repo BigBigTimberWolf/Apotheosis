@@ -11,8 +11,6 @@ struct GpuReadyEvent
     ~GpuReadyEvent() { if (handle) cudaEventDestroy(handle); }
 };
 
-// Reuse only events no consumer still holds. A frame delayed across a capture
-// restart keeps its completion event alive, just like its pixel storage.
 template<size_t N>
 class GpuReadyEventPool
 {

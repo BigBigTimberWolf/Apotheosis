@@ -65,6 +65,7 @@ add_logic_test(control_wiring_test "${CMAKE_CURRENT_LIST_DIR}/control_wiring_tes
     "${APP_SOURCE_ROOT}/control/alpha_beta_filter.cpp"
     "${APP_SOURCE_ROOT}/control/anchor.cpp"
     "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
+    "${APP_SOURCE_ROOT}/control/predictor.cpp"
     "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
 
 add_logic_test(control_layer_test "${CMAKE_CURRENT_LIST_DIR}/control_layer_test.cpp"
@@ -74,6 +75,25 @@ add_logic_test(control_layer_test "${CMAKE_CURRENT_LIST_DIR}/control_layer_test.
     "${APP_SOURCE_ROOT}/control/alpha_beta_filter.cpp"
     "${APP_SOURCE_ROOT}/control/anchor.cpp"
     "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
+    "${APP_SOURCE_ROOT}/control/predictor.cpp"
+    "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
+
+# ── 在途补偿(预测提前量)回归 ─────────────────────────────────────────────────
+#
+# ★ 2026-09-17 那轮删掉的 inflight_comp_test 钉的是【已被删除】的提前量模块。
+#   这一轮按现架构重建: 预测独立成 control/predictor.cpp, 挂在滤波之后、
+#   瞄点之前, 三个参数(提前时间/速度上限/距离上限)全部走配置。
+#
+# ★★ 最重要的一条不变量: lead_ms = 0 时逐帧输出必须与【未加该功能】完全一致。
+#    这是"能一键退回"的保证 —— 用户不填就一点变化都没有。
+add_logic_test(predictor_test "${CMAKE_CURRENT_LIST_DIR}/predictor_test.cpp"
+    "${APP_SOURCE_ROOT}/control/types.cpp"
+    "${APP_SOURCE_ROOT}/control/selector.cpp"
+    "${APP_SOURCE_ROOT}/control/stabilizer.cpp"
+    "${APP_SOURCE_ROOT}/control/alpha_beta_filter.cpp"
+    "${APP_SOURCE_ROOT}/control/anchor.cpp"
+    "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
+    "${APP_SOURCE_ROOT}/control/predictor.cpp"
     "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
 
 # ── ★★ 自动扳机 + 轨迹曲线回归 (2026-09-17 恢复) ─────────────────────────────

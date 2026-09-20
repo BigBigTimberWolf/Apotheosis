@@ -53,7 +53,7 @@ QWidget* makeDiagRow(const QString& caption, QLabel*& valueOut) {
     return row;
 }
 
-}  // namespace
+}
 
 OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
@@ -70,7 +70,6 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     col->setSpacing(13);
     scroll->setWidget(content);
 
-    // ── Hero ──
     auto* hero = makeCard();
     hero->setProperty("role", "hero");
     auto* heroRow = new QHBoxLayout(hero);
@@ -105,7 +104,6 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
 
     col->addWidget(hero);
 
-    // ── KPI row ──
     auto* kpiRow = new QHBoxLayout;
     kpiRow->setContentsMargins(0, 0, 0, 0);
     kpiRow->setSpacing(12);
@@ -123,7 +121,6 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     kpiRow->addWidget(m_mTargets);
     col->addLayout(kpiRow);
 
-    // ── Chart + diagnostics ──
     auto* lowerRow = new QHBoxLayout;
     lowerRow->setContentsMargins(0, 0, 0, 0);
     lowerRow->setSpacing(13);
@@ -157,8 +154,6 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     auto* diagCol = new QVBoxLayout(diagCard);
     diagCol->setContentsMargins(16, 15, 16, 15);
     diagCol->setSpacing(2);
-    // 采集链路分段。这里原来是 eth_capture 的网络接收诊断(发包速率/丢包/内核丢),
-    // 而网络后端已经删除, 五项恒为 0 —— 改成采集卡路径上真正测得到的几段。
     auto* diagTitle = new QLabel(QString::fromUtf8(u8"采集链路"));
     diagTitle->setProperty("class", "heading");
     auto* diagSub = new QLabel(QString::fromUtf8(u8"分段耗时 (ms) · 设备帧龄取决于驱动时间戳"));
@@ -188,8 +183,6 @@ void OverviewPage::setSourceFps(double fps) {
     m_mFps->setSub(QString::fromUtf8(u8"源 %1 帧").arg(fps, 0, 'f', 0), QStringLiteral("#16A34A"));
 }
 
-// 延迟显示: 负数 = 探针还没出数(尚未跑满一帧), 显示 "--"。0 是合法测量值,
-// 不能拿来当"没有数据", 否则"链路真的很快"和"根本没测"看起来一样。
 static QString ovFmtMs(double ms, int precision = 1) {
     if (ms < 0.0) return QStringLiteral("--");
     return QStringLiteral("%1 ms").arg(ms, 0, 'f', precision);
@@ -212,8 +205,6 @@ void OverviewPage::setDetectionCount(int boxes, int locked) {
 
 void OverviewPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs, double inferMs,
                                               double publishToAimMs, double endToEndMs) {
-    // 设备帧龄用两位数: 对接侧正常时它常常只有零点几毫秒, 一位小数看不出"有没有
-    // 排队", 而这一点正是判断"卡本身慢还是对接方式慢"的关键。
     if (m_diagDeviceAge) {
         m_diagDeviceAge->setText(deviceAgeUs < 0
             ? QStringLiteral("--")

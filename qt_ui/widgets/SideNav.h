@@ -7,8 +7,6 @@ class QButtonGroup;
 class QVBoxLayout;
 class QLabel;
 
-// 二级导航侧边栏:展示当前主分组下的子页面列表(图标 + 名称),选中项高亮。
-// 顶部主导航负责一级,本侧边栏负责二级。
 class SideNav : public QWidget {
     Q_OBJECT
 

@@ -35,16 +35,9 @@ constexpr const char* kWindowName = "Detection Preview";
 std::thread g_thread;
 std::atomic<bool> g_run{ false };
 
-// Eyedropper ("取色") plumbing. The OpenCV mouse callback runs on THIS preview
-// thread (HighGUI dispatches it from cv::pollKey below), so the cursor state is
-// only ever touched here and needs no locking against the render loop. The
-// clean frame, however, is what the callback samples: we stash a copy of each
-// shown frame BEFORE overlays are drawn so a pick never reads the boxes / ROI
-// lines painted on top. The arm flag and the picked result cross to the Qt
-// thread via crosshair/color_picker (its own synchronisation).
 std::mutex g_clean_mutex;
-cv::Mat    g_clean_frame;          // last frame shown, sans overlays
-int        g_pick_cursor_x = -1;   // preview-thread only
+cv::Mat    g_clean_frame;
+int        g_pick_cursor_x = -1;
 int        g_pick_cursor_y = -1;
 bool       g_pick_cursor_inside = false;
 
@@ -78,8 +71,6 @@ void destroy_window_safe()
     try { cv::destroyWindow(kWindowName); } catch (...) {}
 }
 
-// Snapshot of the bits the preview needs from config in one short critical
-// section, so we don't hold configMutex while doing OpenCV drawing.
 struct PreviewConfigSnapshot
 {
     bool   show_window = false;
@@ -90,10 +81,8 @@ struct PreviewConfigSnapshot
     int    crosshair_close_radius = 0;
     std::vector<crosshair::CrosshairColorBand> crosshair_colors;
     bool   any_color_enabled = false;
-    // 当前热键是否勾选了准星找色。用来区分"没命中"和"压根没开/没色带"。
     bool   crosshair_hotkey_enabled = false;
 
-    // Active (or fallback #0) hotkey FOV state.
     int    fov_base_x = 0;
     int    fov_base_y = 0;
     bool   dynamic_fov_enabled = false;
@@ -148,7 +137,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 {
     if (canvas.empty()) return;
 
-    // 1. Detection boxes and class labels.
     std::vector<cv::Rect> boxes;
     std::vector<int> classes;
     int version = 0;
@@ -159,7 +147,7 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         version = detectionBuffer.version;
     }
 
-    const cv::Scalar boxColor = bgr(110, 220, 80);  // greenish
+    const cv::Scalar boxColor = bgr(110, 220, 80);
     const cv::Scalar textFg   = bgr(250, 245, 240);
     const cv::Scalar textBg   = bgr(0, 0, 0);
 
@@ -178,28 +166,16 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                           textFg, textBg);
     }
 
-
-    // 2. FOV ellipse (base only).
-    //    ★ 2026-09-17: "dynamic gate" 那条椭圆已删 —— 它画的是
-    //    g_dynamic_fov_radius_x/y, 而那两个量的唯一生产者(mouse_thread_loop)
-    //    已随瞄准控制链删除。留着就是一个永远不画出来的分支。
     if (cfg.fov_base_x > 0 && cfg.fov_base_y > 0)
     {
         const cv::Point center(canvas.cols / 2, canvas.rows / 2);
         const cv::Size baseAxes(std::max(1, cfg.fov_base_x / 2),
                                 std::max(1, cfg.fov_base_y / 2));
 
-        const cv::Scalar baseCol = bgr(60, 200, 255); // amber
+        const cv::Scalar baseCol = bgr(60, 200, 255);
         cv::ellipse(canvas, center, baseAxes, 0, 0, 360, baseCol, 1, cv::LINE_AA);
     }
 
-    // 3. Crosshair colour-find ROI rectangle.
-    // Bottom-edge midpoint anchored at the frame centre (square sits above
-    // the centre line). Must match the runtime ROI in
-    // crosshair/crosshair_runtime.cpp::process_gpu_frame
-    // (roi_y = rows/2 - roi_h + 10) — that is the window the live finder
-    // actually searches; a frame drawn from any other formula would lie to
-    // whoever is tuning the ROI.
     if (cfg.crosshair_rect_w > 0 && cfg.crosshair_rect_h > 0)
     {
         const int rw = std::max(4, cfg.crosshair_rect_w);
@@ -211,15 +187,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
             cv::rectangle(canvas, clipped, bgr(255, 190, 0), 1, cv::LINE_AA);
     }
 
-    // 4. 运行期准星找色结果 —— 直接读 crosshair_runtime 发布的那份 pivot。
-    //
-    // 这里必须显示运行期快照, 不能在本线程里另跑一次 CPU 检测器: 实战走的是
-    // GPU 路径 (cpu_path_active() 恒为 false), 而 CPU 检测器的 ROI
-    // (crosshair_detector.cpp dynamic_center_roi, cy - 0.6*h) 和接受窗口都跟
-    // 运行期不一样, 画出来的命中点会"看着生效、实际无效"。判断压枪有没有参考
-    // 点, 只看这一行。
-    // 注: 预览画布用 Hershey 字体, 渲染不了中文, 所以这一行保持英文 —— 与上方
-    // "Infer FPS | Lat" 一栏的既有约定一致; 中文文案在 Qt/ImGui 面板里。
     {
         const auto snap = crosshair_runtime::read();
         const auto ref  = crosshair_runtime::read_static_ref();
@@ -227,7 +194,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
             ? std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - ref.ts).count()
             : -1;
-        // 参考点只在新鲜时展示: 松开瞄准热键后它会停在上次的值, 画出来会误导。
         const bool ref_fresh = ref_age_ms >= 0 && ref_age_ms <= 250;
         const long long age_ms = snap.valid
             ? std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -249,8 +215,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         }
         else if (snap.valid)
         {
-            // 原始命中点 + 真正进控制环的静态参考点一起显示: 参考点乱跳就是
-            // 控制环被灌了抖动, 参考点稳而命中点跳说明限速/惯性在起作用。
             std::snprintf(line, sizeof(line),
                           "Xhair: HIT (%d,%d) age=%lldms%s | %s",
                           static_cast<int>(std::lround(snap.x)),
@@ -276,7 +240,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
             cv::circle(canvas, p, 6, col, 1, cv::LINE_AA);
         }
 
-        // 静态参考点 = 找色对瞄准环的唯一输出, 用方块表示。
         if (ref_fresh)
         {
             const cv::Point r(static_cast<int>(std::lround(ref.x)),
@@ -285,14 +248,10 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                           bgr(255, 120, 240), 1, cv::LINE_AA);
         }
 
-        // 画面几何中心 = 找色关闭/参考点回收后回落的位置。两个标记重合就说明
-        // 找色当前没有提供任何有效参考(等于没压枪), 分开才是真的在跟随准星。
         cv::drawMarker(canvas, cv::Point(canvas.cols / 2, canvas.rows / 2),
                        bgr(0, 200, 255), cv::MARKER_TILTED_CROSS, 10, 1, cv::LINE_AA);
     }
 
-
-    // 5. Optional top-left status banner with inference FPS + latency.
     if (!cfg.show_fps)
         return;
     const auto timing = runtime::latency::snapshot();
@@ -327,11 +286,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                   displayed_fps, infer_ms);
     draw_text_with_bg(canvas, buf, cv::Point(6, 16), bgr(245, 245, 245), bgr(0, 0, 0));
 
-    // 端到端延迟分解面板。
-    //
-    // E2E pairs the sample callback timestamp with this command's completed
-    // driver send. No send sample means unavailable, not a zero-latency write.
-    // It does not acknowledge physical HID execution or the display response.
     int y = 34;
     for (const auto& line : runtime::latency::formatLinesAscii(true))
     {
@@ -341,12 +295,7 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     }
 }
 
-// Mouse callback for the preview window. HighGUI runs this on the preview
-// thread during cv::pollKey. Tracks the cursor (to draw the sample marker) and,
-// when the eyedropper is armed, turns a left click into an HSV sample taken
-// from the stashed clean frame. Right click cancels. WINDOW_NORMAL already maps
-// (x, y) into image-pixel space, so no manual de-scaling is needed.
-void on_mouse(int event, int x, int y, int /*flags*/, void* /*userdata*/)
+void on_mouse(int event, int x, int y, int  , void*  )
 {
     if (event == cv::EVENT_MOUSEMOVE)
     {
@@ -375,13 +324,9 @@ void on_mouse(int event, int x, int y, int /*flags*/, void* /*userdata*/)
         int h = 0, s = 0, v = 0;
         if (crosshair::SampleRegionHSV(clean, x, y, crosshair::PickHalf(), h, s, v))
             crosshair::SubmitPickedColor(h, s, v);
-        // If sampling failed (no frame yet) stay armed so the next click retries.
     }
 }
 
-// Draw the eyedropper marker: a translucent disc + crisp ring at the cursor and
-// the exact 5x5 sample footprint, plus a one-line hint. No-op unless armed.
-// ASCII only — OpenCV putText can't render CJK (the Chinese UI lives in Qt).
 void draw_pick_overlay(cv::Mat& canvas)
 {
     if (canvas.empty() || canvas.type() != CV_8UC3) return;
@@ -397,8 +342,6 @@ void draw_pick_overlay(cv::Mat& canvas)
     const int half = crosshair::PickHalf();
     const int ringR = half + 4;
 
-    // Translucent cyan disc so the spot under the cursor is obvious without
-    // hiding the pixels being sampled.
     cv::Rect rr(cx - ringR, cy - ringR, 2 * ringR + 1, 2 * ringR + 1);
     rr &= cv::Rect(0, 0, canvas.cols, canvas.rows);
     if (rr.area() > 0)
@@ -412,7 +355,6 @@ void draw_pick_overlay(cv::Mat& canvas)
     cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 0, 0), 2, cv::LINE_AA);
     cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 220, 255), 1, cv::LINE_AA);
 
-    // Exact sample footprint selected by the active picker.
     cv::Rect foot(cx - half, cy - half, 2 * half + 1, 2 * half + 1);
     foot &= cv::Rect(0, 0, canvas.cols, canvas.rows);
     if (foot.area() > 0)
@@ -491,8 +433,6 @@ void preview_loop()
             continue;
         }
 
-        // Toggle is on. If the window isn't currently visible (either never
-        // opened, or the user just clicked the OS X to close it), recreate it.
         const bool visible_now = window_open && window_visible();
         if (!visible_now)
         {
@@ -500,8 +440,6 @@ void preview_loop()
             try {
                 cv::namedWindow(kWindowName, cv::WINDOW_NORMAL | cv::WINDOW_KEEPRATIO);
                 cv::setWindowProperty(kWindowName, cv::WND_PROP_TOPMOST, 0);
-                // (Re)attach the eyedropper callback: it's lost whenever the
-                // window is destroyed/recreated (e.g. user closed the OS X).
                 cv::setMouseCallback(kWindowName, on_mouse, nullptr);
                 g_pick_cursor_inside = false;
                 window_open = true;
@@ -564,8 +502,6 @@ void preview_loop()
 
         if (frameCopy.empty())
         {
-            // No frame yet — show a small placeholder so the OS window keeps
-            // its handle and `getWindowProperty` reports visible.
             const int dr = std::max(64, cfg.detection_resolution);
             cv::Mat placeholder(dr, dr, CV_8UC3, cv::Scalar(20, 20, 20));
             draw_text_with_bg(placeholder, "Waiting for capture...",
@@ -575,8 +511,6 @@ void preview_loop()
         }
         else
         {
-            // Stash a clean copy for the eyedropper BEFORE overlays are drawn,
-            // so a colour pick samples the real frame, not the boxes/ROI lines.
             {
                 std::lock_guard<std::mutex> lk(g_clean_mutex);
                 frameCopy.copyTo(g_clean_frame);
@@ -586,8 +520,6 @@ void preview_loop()
             cv::imshow(kWindowName, frameCopy);
         }
 
-        // pollKey pumps the OpenCV window's event loop. 1ms is enough to
-        // process drag / resize / close events without blocking the loop.
         cv::pollKey();
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
@@ -595,7 +527,7 @@ void preview_loop()
     if (window_open)
         destroy_window_safe();
 }
-} // namespace
+}
 
 void PreviewWindow_Start()
 {

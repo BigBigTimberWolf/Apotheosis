@@ -2,6 +2,7 @@
 
 #include <QWidget>
 
+class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
@@ -21,7 +22,6 @@ private slots:
     void onInputMethodChanged(int index);
     void refreshStatus();
     void reconnectDevice();
-    // 切换全局配置方案后按新值重读一遍控件。
     void loadFieldsFromConfig();
 
 private:
@@ -36,12 +36,14 @@ private:
     QSpinBox* m_makcuBaud{};
     QLineEdit* m_makcuNewPort{};
     QSpinBox* m_makcuNewBaud{};
+    // 键盘硬件(第二台, 可选)。不勾选时键盘注入与自动急停不可用, 鼠标不受影响。
+    QCheckBox* m_kbdUnitEnabled{};
+    QWidget* m_kbdUnitPanel{};
+    QLineEdit* m_makcuNewPortKbd{};
+    QSpinBox* m_makcuNewBaudKbd{};
 
-    // KMBox Net (以太网 UDP, 2026-09-15 恢复)
     QLineEdit* m_kmboxNetIp{};
     QLineEdit* m_kmboxNetPort{};
     QLineEdit* m_kmboxNetUuid{};
 
-    // 【2026-09-13 删除】m_captureAgeOffset (采集回调前帧龄估计) 与
-    // m_crosshairSmooth (准星找色平滑强度) 两个控件, 连同它们的界面卡片一起移除。
 };

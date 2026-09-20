@@ -19,8 +19,6 @@ struct PendingMove
     int64_t aim_ns = 0;
 };
 
-// 调用方用自己的互斥量保护 replace/take/clear/hasPending。
-// generation 是原子值，worker 解锁后仍可判断已取出的旧批次是否被抢占。
 class LatestMoveSlot
 {
 public:
@@ -65,6 +63,6 @@ private:
     std::atomic<std::uint64_t> generation_{ 0 };
 };
 
-} // namespace mouse_async
+}
 
 #endif // MOUSE_LATEST_MOVE_SLOT_H

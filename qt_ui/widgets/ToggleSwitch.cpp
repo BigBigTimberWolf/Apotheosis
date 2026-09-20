@@ -9,8 +9,6 @@ ToggleSwitch::ToggleSwitch(QWidget* parent)
     setCheckable(true);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
-    // fieldRow 会把普通输入控件横向拉伸；开关必须保持自身尺寸，否则轨道会
-    // 被拉成一整条灰色长条，看起来像参数区背后的阴影。
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     setFixedSize(sizeHint());
 
@@ -38,9 +36,6 @@ QSize ToggleSwitch::sizeHint() const {
 
 void ToggleSwitch::checkStateSet() {
     QAbstractButton::checkStateSet();
-    // 配置批量加载会 blockSignals()。此时 toggled 信号（包括本控件用于
-    // 更新动画位置的内部连接）不会发出，必须直接同步视觉位置，否则
-    // checked=false 仍会画成开启状态。
     if (signalsBlocked()) {
         if (m_animation) {
             m_animation->stop();

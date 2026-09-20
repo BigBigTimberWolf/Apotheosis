@@ -30,17 +30,11 @@ public:
     virtual bool initialize(const std::string& model_path) = 0;
 
     virtual void processFrame(const cv::Mat& frame, runtime::FrameContext context = runtime::FrameContext{}) = 0;
-    // Zero-copy GPU entry used by the nvJPEG capture path. Default no-op so
-    // backends without a GPU path (DirectML today) fall through to the CPU
-    // processFrame call at the call site.
-    virtual void processFrameGpu(GpuImage /*frame*/, runtime::FrameContext /*context*/ = runtime::FrameContext{}) {}
+    virtual void processFrameGpu(GpuImage  , runtime::FrameContext   = runtime::FrameContext{}) {}
     virtual void inferenceThread() = 0;
 
     virtual int numberOfClasses() const = 0;
 
-    // Class names discovered from the model metadata. May be empty when the
-    // model shipped without names — callers should fall back to synthetic
-    // "class_<id>" labels in that case.
     virtual std::vector<std::string> classNames() const = 0;
 
     virtual std::chrono::duration<double, std::milli> lastPreprocessTime() const = 0;

@@ -1,28 +1,5 @@
 #pragma once
 
-// =============================================================================
-// 端到端延迟探针 (End-to-end latency probe)
-// =============================================================================
-//
-// 时间边界 (均使用 steady_clock, 随具体帧传递):
-//   T0: Media Foundation OnReadSample 回调入口, 早于样本拷贝/解码/转色。
-//       markCapture(source_ns) 在后端交帧时接收原始戳, 不重打起点。
-//   T1: detector 真正从输入槽取出该帧 (markDetectorConsume)。
-//   T2: 该帧推理完成、发布检测结果。
-//   T3: 控制环消费该结果。T4: 该帧对应的驱动发送调用完成。
-//   capture_wait=T1-T0: 回调交接、样本拷贝、解码、转色、掩码、输入槽等待。
-//   inference=T2-T1: 预处理、推理、后处理与 NMS。
-//   total=T3-T0; e2e=T4-T0。统计不代表显示画面响应或硬件执行完成。
-//
-// 设备侧帧龄单列: 驱动 DeviceTimestamp 到 OnReadSample 回调的时间。
-// 只有驱动提供可解释的时钟时才显示; 缺失、无效或过期均为 -1。
-// 该字段与 total/E2E 的样本和 EMA 窗口不同, 不能简单相加当作逐帧真值。
-// 当前探针不覆盖设备打戳之前的 HDMI 流水线, 也不覆盖鼠标硬件/游戏响应。
-// 小设备帧龄不能单独证明卡芯片很快或驱动完全没有开销。
-//
-// 统计由原子量和互斥量保护; 日志线程负责格式化/落盘。实际开销需实机测量。
-// =============================================================================
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -54,10 +31,6 @@ inline double nsToMs(int64_t ns)
     return static_cast<double>(ns) / 1.0e6;
 }
 
-// -----------------------------------------------------------------------------
-// 帧的采集时刻。采集线程写, detector / aim loop 读。latest-only 语义与
-// capture.cpp 的 frameQueue (容量 1) 一致。
-// -----------------------------------------------------------------------------
 struct CaptureStamp
 {
     std::atomic<int64_t>  ns{0};
@@ -70,7 +43,6 @@ inline CaptureStamp& captureStamp()
     return s;
 }
 
-// 后端交帧时传入原始回调戳; 无原始戳的调用方退回当前时刻。
 inline int64_t markCapture(int64_t source_ns = 0)
 {
     const int64_t ns = source_ns > 0 ? source_ns : nowNs();
@@ -90,9 +62,6 @@ inline uint64_t loadCaptureSeq()
     return captureStamp().seq.load(std::memory_order_relaxed);
 }
 
-// -----------------------------------------------------------------------------
-// 设备侧帧龄独立于回调后的 T0..T4。-1 表示缺失/无效/过期。
-// -----------------------------------------------------------------------------
 inline std::atomic<int>& deviceFrameAgeUs()
 {
     static std::atomic<int> v{ -1 };
@@ -118,16 +87,12 @@ inline int loadDeviceFrameAgeUs()
     return deviceFrameAgeUs().load(std::memory_order_relaxed);
 }
 
-// -----------------------------------------------------------------------------
-// 跨线程的一次性交接量 (detector -> aim loop)
-// -----------------------------------------------------------------------------
 inline std::atomic<int64_t>& submitNs()
 {
     static std::atomic<int64_t> v{0};
     return v;
 }
 
-// 单线程自测的兼容槽。生产检测器必须使用随帧携带的 SubmitStamp。
 inline std::atomic<int64_t>& submittedCaptureNs()
 {
     static std::atomic<int64_t> v{0};
@@ -139,24 +104,13 @@ inline int64_t takeSubmittedCaptureNs()
     return submittedCaptureNs().load(std::memory_order_acquire);
 }
 
-// 采集时刻与取帧时刻成对携带。
-//
-// ★ 必须在 detector【取走该帧的那一次临界区里】读出, 并把结果按槽保存下来。
-//
-// 旧实现在【发布时】才去读那两个"只存最新"的全局量。而发布发生在取走下一帧
-// 之后(双缓冲下必然如此), 所以读到的恒定是【下一帧】的采集戳 —— total 于是
-// 系统性地少算整整一个帧间隔(120fps = 8.33ms), 而且越是开双缓冲错得越稳定。
-// 按帧、按槽携带即可彻底解耦: 每个 slot 记住自己那一帧的 T0/T1, 发布时取自己那份。
 struct SubmitStamp
 {
-    int64_t capture_ns = 0;   // T0 采集时刻
-    int64_t submit_ns  = 0;   // T1 detector 取帧时刻
+    int64_t capture_ns = 0;
+    int64_t submit_ns  = 0;
     uint64_t sequence = 0;
 };
 
-// -----------------------------------------------------------------------------
-// 阶段统计
-// -----------------------------------------------------------------------------
 struct Stage
 {
     double   last_ms = 0.0;
@@ -167,7 +121,6 @@ struct Stage
     void push(double ms)
     {
         last_ms = ms;
-        // 指数滑动平均: 前 10 帧用算术平均预热, 之后 0.9/0.1 平滑。
         ema_ms = (n < 10) ? (ema_ms * n + ms) / (n + 1)
                           : (ema_ms * 0.9 + ms * 0.1);
         if (ms > max_ms || n == 0) max_ms = ms;
@@ -183,22 +136,22 @@ struct Stage
 
 enum StageId
 {
-    kCaptureWait = 0,   // T0 -> T1  采集产出 -> detector 取帧
-    kInference,         // T1 -> T2  预处理 + 推理 + NMS
-    kPublishToAim,      // T2 -> T3  发布 -> 控制环消费
-    kAimToMove,         // T3 -> T4  控制环 -> 位移写出
-    kTotal,             // T0 -> T3  ★ 采集 -> aim loop 消费
-    kEndToEnd,          // T0 -> T4  采集 -> 位移写出 (下界)
+    kCaptureWait = 0,
+    kInference,
+    kPublishToAim,
+    kAimToMove,
+    kTotal,
+    kEndToEnd,
     kStageCount
 };
 
 struct Counters
 {
-    uint64_t frames_consumed   = 0;  // aim loop 结算过的完整帧
-    uint64_t detections_seen    = 0;  // aim loop 看到的新检测批数(含未消费的)
-    uint64_t capture_frames    = 0;  // 采集产出帧数
-    uint64_t dropped_capture   = 0;  // 采集产出但 detector 没跟上的帧数
-    uint64_t stale_consumes    = 0;  // aim loop 拿到没有采集戳的旧数据
+    uint64_t frames_consumed   = 0;
+    uint64_t detections_seen    = 0;
+    uint64_t capture_frames    = 0;
+    uint64_t dropped_capture   = 0;
+    uint64_t stale_consumes    = 0;
 };
 
 struct Shared
@@ -209,7 +162,6 @@ struct Shared
     uint64_t   last_capture_seq_seen = 0;
     int64_t    last_capture_ns_seen  = 0;
 
-    // 采集帧率 (由相邻两次 markCapture 的间隔推算)
     double     capture_interval_ms   = 0.0;
     int64_t    prev_capture_ns       = 0;
 
@@ -218,7 +170,6 @@ struct Shared
     int64_t    reset_ns              = 0;
     bool       enabled               = true;
 
-    // 推理线程同步/调度遥测 (见 Snapshot 里的同名说明)
     double     sync_wait_ms          = -1.0;
     bool       sync_spun             = false;
     uint64_t   sync_fallbacks        = 0;
@@ -230,10 +181,6 @@ inline Shared& shared()
     return s;
 }
 
-// -----------------------------------------------------------------------------
-// 采集侧: 由 markCapture() 顺带维护采集节奏, 供 overlap/丢帧统计使用。
-// 放在这里而不是 markCapture 里, 是为了让采集热路径只剩两个原子写。
-// -----------------------------------------------------------------------------
 inline void noteCaptureForStats(int64_t ns)
 {
     auto& sh = shared();
@@ -250,13 +197,8 @@ inline void noteCaptureForStats(int64_t ns)
     sh.counters.capture_frames++;
 }
 
-// -----------------------------------------------------------------------------
-// detector 侧: 取到帧。返回该帧的采集戳 (由调用方保存并随检测结果发布)。
-// -----------------------------------------------------------------------------
 inline SubmitStamp markSubmitStamp()
 {
-    // Called by the capture producer. Counters are updated only when inference
-    // actually removes the frame from its latest-only input slot.
     return {loadCaptureNs(), 0, loadCaptureSeq()};
 }
 
@@ -275,7 +217,6 @@ inline void markDetectorConsume(SubmitStamp& stamp)
     sh.last_capture_ns_seen = stamp.capture_ns;
 }
 
-// Single-thread compatibility entry used by the standalone probe tests.
 inline int64_t markSubmit()
 {
     auto stamp = markSubmitStamp();
@@ -283,14 +224,6 @@ inline int64_t markSubmit()
     return stamp.capture_ns;
 }
 
-// -----------------------------------------------------------------------------
-// detector 侧: 推理完成、即将发布检测结果。
-//
-// submit_ns: 本次发布所依据那一帧的 T1(取帧时刻)。TrtDetector 必须把该帧在
-// 取走时记下的 T1 传进来 —— 不能让它自己去读全局槽, 那个槽此时可能已经是
-// 下一帧的(见 SubmitStamp 注释)。传 -1 表示"沿用旧的全局槽语义", 仅供单线程
-// 自测使用。
-// -----------------------------------------------------------------------------
 inline void markInferenceDone(int64_t submit_ns = -1)
 {
     const int64_t sub = (submit_ns >= 0)
@@ -302,12 +235,6 @@ inline void markInferenceDone(int64_t submit_ns = -1)
     sh.stages[kInference].push(nsToMs(nowNs() - sub));
 }
 
-// -----------------------------------------------------------------------------
-// aim loop 侧: 看到了一批新检测(不论是否被消费)。
-//
-// 用来把"瞄准键没按下所以没消费"和"采集/推理真的停更了"区分开 —— 旧日志
-// 两种情况都只打印同一句"采集或推理已停更", 会把人往错的方向引。
-// -----------------------------------------------------------------------------
 inline void noteDetectionSeen()
 {
     auto& sh = shared();
@@ -315,10 +242,6 @@ inline void noteDetectionSeen()
     sh.counters.detections_seen++;
 }
 
-// -----------------------------------------------------------------------------
-// T3: return the actual consume instant so the move command can carry it.
-// A frame with no movement contributes to total, but not to send latency/E2E.
-// -----------------------------------------------------------------------------
 inline int64_t markAimConsume(int64_t frame_capture_ns, int64_t publish_ns)
 {
     auto& sh = shared();
@@ -335,22 +258,17 @@ inline int64_t markAimConsume(int64_t frame_capture_ns, int64_t publish_ns)
     return now;
 }
 
-// T4: called only when this command's driver send has completed successfully.
-// This does not acknowledge physical mouse execution or display response.
 inline void markMoveSent(int64_t frame_capture_ns, int64_t aim_ns, int64_t sent_ns = 0)
 {
     if (!sent_ns) sent_ns = nowNs();
     if (frame_capture_ns <= 0 || aim_ns < frame_capture_ns || sent_ns < aim_ns) return;
     auto& sh = shared();
     std::lock_guard<std::mutex> lk(sh.mu);
-    if (frame_capture_ns < sh.reset_ns) return; // a late command from an old session
+    if (frame_capture_ns < sh.reset_ns) return;
     sh.stages[kAimToMove].push(nsToMs(sent_ns - aim_ns));
     sh.stages[kEndToEnd].push(nsToMs(sent_ns - frame_capture_ns));
 }
 
-// -----------------------------------------------------------------------------
-// 快照 (给 overlay / 遥测读取)
-// -----------------------------------------------------------------------------
 struct Snapshot
 {
     bool     enabled             = true;
@@ -365,12 +283,6 @@ struct Snapshot
     Stage    stages[kStageCount];
     double   engine_inference_ms = -1.0;
 
-    // ── 推理线程同步/调度遥测 (对应原神的 host_wait_spin / mmcss) ───────────
-    // sync_wait_ms  : 最近一次等待 GPU 事件实际花掉的时间。它包含在 total 里,
-    //                 是"推理之外"最容易被忽略的一段。
-    // sync_spun     : 该次等待走的是自旋还是回退到阻塞同步。
-    // sync_fallbacks: 自旋超时回退的次数累计。持续增长说明 GPU 侧真的卡住了
-    //                 (掉卡/上下文丢失/别的进程占满), 是排查方向的分界线。
     double   sync_wait_ms        = -1.0;
     bool     sync_spun           = false;
     uint64_t sync_fallbacks      = 0;
@@ -384,7 +296,6 @@ inline void noteEngineInferenceMs(double ms)
     sh.engine_update_ns = nowNs();
 }
 
-// 推理线程每次等待 GPU 事件后调用。
 inline void noteSyncWait(double ms, bool spun, uint64_t fallbacks)
 {
     auto& sh = shared();
@@ -420,9 +331,35 @@ inline Snapshot snapshot()
     return out;
 }
 
-inline void reset()
+// 在途补偿用的"自动累加延迟"（毫秒）：
+//   采集等待(kCaptureWait) + 推理(kInference) + 发布到瞄准(kPublishToAim)
+//   + 瞄准到下发(kAimToMove)
+//
+// 全部取【平滑后的平均值】(EMA)，不取瞬时值 —— 瞬时值会让提前量每帧乱跳。
+// 只累加已经产生过样本的段；一段样本都没有时返回 -1，表示"本拍没测到"，
+// 由预测器决定是沿用上一帧还是本拍不预测（不会拿 0 或负数去顶）。
+inline double autoLeadLatencyMs()
 {
     auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    if (!sh.enabled)
+        return -1.0;
+
+    double sum = 0.0;
+    bool any = false;
+    for (int id : { kCaptureWait, kInference, kPublishToAim, kAimToMove })
+    {
+        if (sh.stages[id].n > 0)
+        {
+            sum += sh.stages[id].ema_ms;
+            any = true;
+        }
+    }
+    return any ? sum : -1.0;
+}
+
+inline void reset()
+{    auto& sh = shared();
     std::lock_guard<std::mutex> lk(sh.mu);
     for (int i = 0; i < kStageCount; ++i)
         sh.stages[i].reset();
@@ -451,9 +388,6 @@ inline bool enabled()
     return sh.enabled;
 }
 
-// -----------------------------------------------------------------------------
-// 文本报告 —— overlay 直接画, 也可原样贴日志。
-// -----------------------------------------------------------------------------
 inline std::string formatLines(bool detail)
 {
     const Snapshot s = snapshot();
@@ -491,7 +425,6 @@ inline std::string formatLines(bool detail)
             add(u8"  全链路      %5.1f ms", s.stages[kEndToEnd].last_ms);
         else
             addLine(u8"  全链路      -- (暂无成功发送样本)");
-        // 独立诊断值; 不计入上述 T0..T4, 也不是卡芯片延迟。
         if (s.device_frame_age_us >= 0)
             add(u8"  设备侧帧龄  %5.1f ms  (驱动/MF 内部)", s.device_frame_age_us / 1000.0);
         else
@@ -511,10 +444,6 @@ inline std::string formatLines(bool detail)
     return out;
 }
 
-// -----------------------------------------------------------------------------
-// ASCII 版: OpenCV 的 putText 无法渲染 CJK, preview overlay 必须用这个。
-// 每行一条, 交给调用方逐行绘制。
-// -----------------------------------------------------------------------------
 inline std::vector<std::string> formatLinesAscii(bool detail)
 {
     const Snapshot s = snapshot();
@@ -562,29 +491,13 @@ inline std::vector<std::string> formatLinesAscii(bool detail)
     return out;
 }
 
-
-// =============================================================================
-// 落盘日志
-// =============================================================================
-//
-// 周期性把阶段统计写成一行 (默认 1Hz), 并单独记录超阈值的尖峰、丢帧与陈旧
-// 消费事件。目的是让"跑一局之后回看"成为可能 —— overlay 只能看到瞬时值,
-// 而台阶式的延迟劣化 (某个阶段偶尔飙一下) 恰恰是毁手感的主因, 必须落盘才抓得到。
-//
-// 行格式 (空格分隔, 便于 awk / python 解析):
-//   <时间> | E2E=x avg=x pk=x | cap2det=x infer=x pub2aim=x aim2mv=x total=x
-//          | src=x fps frames=n dropped=n stale=n
-//
-// 所有耗时为毫秒。total = T3-T0 (决定准星落后 v*total); e2e = T4-T0。
-// 不含采集卡内部 HDMI->USB 延迟 (典型 20-60ms), 因此是【下界】。
-
 struct FileLogConfig
 {
-    std::string directory   = "logs";     // 相对工作目录
-    std::string basename    = "latency";  // 实际文件 latency_YYYY-mm-dd_HHMMSS.log
-    int         interval_ms = 1000;       // 周期摘要间隔
-    double      spike_ms    = 25.0;       // total 峰值超过该值 -> 记一行; <=0 关闭
-    bool        flush_each  = true;       // 每行 fflush, 崩溃时也保得住
+    std::string directory   = "logs";
+    std::string basename    = "latency";
+    int         interval_ms = 1000;
+    double      spike_ms    = 25.0;
+    bool        flush_each  = true;
 };
 
 namespace detail
@@ -595,20 +508,17 @@ struct FileLogState
     std::mutex        mu;
     std::thread       worker;
     std::atomic<bool> running{false};
-    std::string       path;   // 当前日志文件绝对路径
-    std::string       error;  // 启动失败原因 (供 UI 显示)
+    std::string       path;
+    std::string       error;
     FileLogConfig     cfg;
 };
 
-// 故意不析构: 避免静态销毁顺序问题 (与 crosshair_runtime 同款做法)。
 inline FileLogState& fileLogState()
 {
     static FileLogState* s = new FileLogState();
     return *s;
 }
 
-// C++20 下 path::u8string() 返回 std::u8string (char8_t), 需要显式转回 char。
-// MSVC 与 clang/gcc 行为一致, 所以统一走这个helper。
 inline std::string pathToUtf8(const std::filesystem::path& p)
 {
     const auto u8 = p.u8string();
@@ -648,15 +558,11 @@ inline std::string summaryLine()
         s.stages[kCaptureWait].ema_ms, s.stages[kInference].ema_ms,
         s.stages[kPublishToAim].ema_ms, s.stages[kAimToMove].ema_ms,
         s.stages[kTotal].ema_ms,
-        // devq = 设备侧帧龄(驱动/MF 在把帧交给我们之前花掉的时间)。-1 = 该驱动
-        // 不提供 sample 时间戳; 它是"卡本身慢"与"对接方式慢"的分界线。
         s.device_frame_age_us >= 0 ? s.device_frame_age_us / 1000.0 : -1.0,
         s.capture_fps, static_cast<unsigned long long>(s.frames_consumed),
         static_cast<unsigned long long>(s.detections_seen),
         static_cast<unsigned long long>(s.dropped_capture),
         static_cast<unsigned long long>(s.stale_consumes),
-        // sync = 等待 GPU 事件花掉的时间; 后缀 spin/block 标明走的是哪条路径,
-        // fb = 自旋超时回退到阻塞同步的累计次数(持续增长 = GPU 侧真的卡住了)。
         s.sync_wait_ms,
         s.sync_spun ? "spin" : "block",
         static_cast<unsigned long long>(s.sync_fallbacks));
@@ -693,12 +599,6 @@ inline void logWorker(FileLogConfig cfg)
 
         const Snapshot s = snapshot();
 
-        // ---- 事件: 丢帧 / 陈旧消费 (一发生就记, 与周期无关) ----
-        //
-        // ★ 2026-09-13 修: 原来这里是 `s.dropped_capture - last_dropped`, 两个都是
-        //   uint64_t。只要计数器在会话中途被重置过(dropped_capture 变小), 这个减法
-        //   就【下溢】, 日志里会打出 +18446744073709547723 这种读不懂的数(实测日志
-        //   末尾就有)。现在改成"只在变大时报增量, 变小视为重置并重新同步"。
         if (s.dropped_capture > last_dropped)
         {
             char buf[200];
@@ -710,9 +610,7 @@ inline void logWorker(FileLogConfig cfg)
                           static_cast<unsigned long long>(s.capture_frames));
             logLine(buf);
         }
-        // 无论是否上报, 都同步到当前值 —— 计数器被重置时这一步把基准拉回, 不会下溢。
         last_dropped = s.dropped_capture;
-        // 同样的下溢防护(stale_consumes 也是 uint64_t, 同样可能被重置)。
         if (s.stale_consumes > last_stale)
         {
             char buf[200];
@@ -725,7 +623,6 @@ inline void logWorker(FileLogConfig cfg)
         }
         last_stale = s.stale_consumes;
 
-        // ---- 事件: 尖峰 ----
         if (cfg.spike_ms > 0.0 && s.stages[kTotal].max_ms > last_max[kTotal] &&
             s.stages[kTotal].max_ms >= cfg.spike_ms)
         {
@@ -739,7 +636,6 @@ inline void logWorker(FileLogConfig cfg)
             logLine(buf);
         }
 
-        // ---- 周期摘要 ----
         if (elapsed >= cfg.interval_ms)
         {
             elapsed = 0;
@@ -750,10 +646,6 @@ inline void logWorker(FileLogConfig cfg)
             }
             else if (s.frames_consumed > 0)
             {
-                // 区分两种完全不同的"没消费":
-                //   seen 还在涨 -> 检测一直在产, 只是瞄准键没按下;
-                //   seen 也不涨 -> 采集或推理确实停更了。
-                // 旧版两种情况都只写"采集或推理已停更", 会误导排查方向。
                 char buf[224];
                 const uint64_t seen_delta = s.detections_seen - last_seen;
                 std::snprintf(
@@ -775,10 +667,8 @@ inline void logWorker(FileLogConfig cfg)
     logLine("=== latency log stop ===");
 }
 
-} // namespace detail
+}
 
-// 启动落盘。成功返回 true, 路径见 fileLogPath()。
-// 失败 (无写权限等) 返回 false, 原因见 fileLogError(), 不影响主流程。
 inline bool startFileLog(const FileLogConfig& cfg = FileLogConfig{})
 {
     auto& st = detail::fileLogState();
@@ -789,10 +679,10 @@ inline bool startFileLog(const FileLogConfig& cfg = FileLogConfig{})
     std::error_code ec;
     std::filesystem::create_directories(cfg.directory, ec);
 
-    std::string stamp = detail::timestampNow();   // 2026-09-10 14:44:01.123
+    std::string stamp = detail::timestampNow();
     for (char& c : stamp)
         if (c == ' ' || c == ':') c = '-';
-    if (stamp.size() > 19) stamp.resize(19);      // 去掉 .123
+    if (stamp.size() > 19) stamp.resize(19);
 
     std::filesystem::path p = std::filesystem::path(cfg.directory)
                             / (cfg.basename + "_" + stamp + ".log");
@@ -859,5 +749,5 @@ inline std::string fileLogError()
     return st.error;
 }
 
-} // namespace latency
-} // namespace runtime
+}
+}

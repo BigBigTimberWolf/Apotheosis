@@ -88,14 +88,6 @@ void launch_resize_bgr_u8_bilinear(
         dst, static_cast<int>(dstStep), dstW, dstH);
 }
 
-// ---- NV12 -> BGR8 -----------------------------------------------------------
-// One thread per output pixel. U/V plane is 4:2:0 downsampled + interleaved
-// (NVDEC NV12 layout): UV row i = floor(y/2), UV col j = (x/2)*2 (U) and +1 (V).
-// BT.601 full-range JFIF:
-//   R = Y + 1.402   * (V - 128)
-//   G = Y - 0.34414 * (U - 128) - 0.71414 * (V - 128)
-//   B = Y + 1.772   * (U - 128)
-// Q10 fixed point: x1024 integer math, shift back to byte, clamp.
 static __device__ __forceinline__ unsigned char clamp_byte(int v) {
     return (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
 }
@@ -144,11 +136,6 @@ void launch_nv12_to_bgr_u8(
         width, height);
 }
 
-// ---- YUV444 planar -> BGR8 -------------------------------------------------
-// NVDEC 4:4:4 surface layout: Y / U / V three independent full-resolution
-// planes, each at `stride` pitch. 1 thread per output pixel.
-// BT.601 full-range JFIF (same coefficients as NV12 kernel, but full-res chroma
-// -> no subsampling step). Q10 fixed point.
 static __global__ void yuv444_to_bgr_u8_kernel(
     const unsigned char* __restrict__ y_p,
     const unsigned char* __restrict__ u_p,
@@ -195,8 +182,6 @@ void launch_yuv444_to_bgr_u8(
         width, height);
 }
 
-// ---- In-place 圆形掩码 ------------------------------------------------------
-// 半径平方比较代替 sqrt;一个线程一个像素,圆外置 0,圆内不动。
 static __global__ void circle_mask_bgr_u8_kernel(
     unsigned char* __restrict__ img, int step,
     int width, int height,
@@ -231,7 +216,6 @@ void launch_circle_mask_bgr_u8(
         img, (int)step, width, height, cx, cy, r2);
 }
 
-// ---- Crosshair HSV ROI reduction ------------------------------------------
 static __device__ __forceinline__ bool hsv_band_match_bgr(
     const unsigned char* p, const GpuHsvBand* bands, int band_count)
 {
@@ -284,7 +268,6 @@ static __global__ void crosshair_hsv_reduce_bgr_u8_kernel(
     const unsigned char* p = img + static_cast<size_t>(y) * step + x * 3;
     if (!hsv_band_match_bgr(p, bands, band_count)) return;
 
-    // Approximate a 3x3 elliptical OPEN without a temporary mask.
     int support = 1;
     const int nx[4] = { -1, 1, 0, 0 };
     const int ny[4] = { 0, 0, -1, 1 };
@@ -299,11 +282,6 @@ static __global__ void crosshair_hsv_reduce_bgr_u8_kernel(
     }
     if (support < 3) return;
 
-    // Rank compact local clusters before proximity. Density is capped so a
-    // large same-colour scene object cannot beat a proper reticle merely by
-    // occupying more pixels; after the cap, the cluster nearest the expected
-    // static centre wins. The ROI is at most 256x256, so its index fits in the
-    // low 16 bits of the atomic key.
     constexpr int kLocalRadius = 5;
     int local_count = 0;
     for (int yy = max(roi_y, y - kLocalRadius);
@@ -321,28 +299,11 @@ static __global__ void crosshair_hsv_reduce_bgr_u8_kernel(
     const int centre_dy = y - height / 2;
     const int distance2 = centre_dx * centre_dx + centre_dy * centre_dy;
     const int roi_distance2 = max(1, roi_w * roi_w + roi_h * roi_h);
-    // 距离压到 0..1023(原来 0..4095)。分辨率降 4 倍只是为了给密度腾出高位。
     const unsigned int scaled_distance = static_cast<unsigned int>(fminf(
         1023.0f, static_cast<float>(distance2) * 1023.0f
             / static_cast<float>(roi_distance2)));
     const unsigned int proximity = 1023u - scaled_distance;
 
-    // ── 排序主键修正 (2026-09-12) ────────────────────────────────────────────
-    // 原来: quality = (min(local_count,15) << 12) | proximity
-    //   proximity(离画面中心多近) 独占 12 位 = 主键, 密度只占 4 位。
-    //   后果: 只要 ROI 里存在【比真准星更靠近画面中心】的同色像素, 它就赢 ——
-    //   而 ROI 有 71x71 = 5041 px, 血迹 / UI / 技能特效都进得来。准星一旦因为
-    //   开镜或后坐力抬枪偏离中心, 那个假目标就顶掉它, 质心(第二趟 kernel)
-    //   于是照着假目标算。
-    //
-    // 现在: 密度当主键(6 位, 上限从 15 提到 63), proximity 退成同位次的
-    //   决胜项(10 位)。语义变成"先找最像准星的那一簇, 同簇里再挑离中心最近的
-    //   那个像素" —— 后者本来就是用来在准星自身范围内定位的, 这才是它该有的
-    //   角色。上限从 15 提到 63 也是必要的: 真准星的局部密度远高于 15, 原来
-    //   那一项是饱和的, 等于没参与排序。
-    //
-    // 位宽核算: local_count <= 121 (11x11 全中), min(.,63) -> 6 位;
-    //           proximity <= 1023 -> 10 位; 合计 16 位, 与 key 的高 16 位对齐。
     const unsigned int quality =
         (static_cast<unsigned int>(min(local_count, 63)) << 10) | proximity;
     const unsigned int index = static_cast<unsigned int>(ly * roi_w + lx);

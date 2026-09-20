@@ -26,8 +26,6 @@
 
 namespace {
 
-// FormKit::sliderRowD 里 slider 的值域是 round((v - min)/step), 所以还原时
-// 必须用同一个映射; 而且 spin 的信号被屏蔽后 slider 不会跟着走, 得手工同步。
 void setSliderValue(QDoubleSpinBox* spin, QSlider* slider,
                     double value, double min, double step) {
     const QSignalBlocker blockSpin(spin);
@@ -38,7 +36,7 @@ void setSliderValue(QDoubleSpinBox* spin, QSlider* slider,
     slider->setValue(static_cast<int>(std::lround((value - min) / step)));
 }
 
-}  // namespace
+}
 
 AiModelPage::AiModelPage(QWidget* parent)
     : QWidget(parent) {
@@ -58,11 +56,9 @@ AiModelPage::AiModelPage(QWidget* parent)
     layout->setSpacing(14);
     scroll->setWidget(content);
 
-    // ── Card 1: 模型 ──
     auto* modelCard = new CardWidget(QStringLiteral("模型"),
                                      QStringLiteral("brain"));
 
-    // Model file combo - list available models from models/ directory
     m_modelCombo = new QComboBox;
     {
         QDir modelsDir(QStringLiteral("models"));
@@ -86,12 +82,10 @@ AiModelPage::AiModelPage(QWidget* parent)
     auto* modelComboRow = FormKit::fieldRow(QStringLiteral("模型文件"), m_modelCombo);
     modelCard->contentLayout()->addWidget(modelComboRow);
 
-    // Fixed input size info label (read-only, next to model combo)
     m_fixedInputLabel = new QLabel;
     m_fixedInputLabel->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
     modelCard->contentLayout()->addWidget(m_fixedInputLabel);
 
-    // Browse button row
     auto* browseWidget = new QWidget;
     auto* browseRow = new QHBoxLayout(browseWidget);
     browseRow->setContentsMargins(0, 0, 0, 0);
@@ -121,10 +115,6 @@ AiModelPage::AiModelPage(QWidget* parent)
         }
     });
 
-    // ── Card 2: 推理后端 ──
-    // ★ 2026-09-17: DirectML 后端整条移除, 所以这里不再有"后端下拉框"和
-    //   "DML 设备 ID" —— TensorRT 是唯一后端。卡片保留, 因为下面的状态标签
-    //   仍然要显示 TensorRT 的可用性(它是有用的诊断信息)。
     auto* backendCard = new CardWidget(QStringLiteral("推理后端"),
                                        QStringLiteral("cpu"));
 
@@ -135,7 +125,6 @@ AiModelPage::AiModelPage(QWidget* parent)
     backendCard->contentLayout()->addWidget(
         FormKit::fieldRow(QStringLiteral("后端"), backendLabel));
 
-    // Backend status label (TRT availability info)
     m_backendStatusLabel = new QLabel;
     m_backendStatusLabel->setStyleSheet(QStringLiteral("color: #c0a040; font-size: 11px;"));
     m_backendStatusLabel->setWordWrap(true);
@@ -144,7 +133,6 @@ AiModelPage::AiModelPage(QWidget* parent)
 
     layout->addWidget(backendCard);
 
-    // ── Card 3: 检测参数 ──
     auto* detCard = new CardWidget(QStringLiteral("检测参数"),
                                    QStringLiteral("adjustments-horizontal"));
 
@@ -166,10 +154,6 @@ AiModelPage::AiModelPage(QWidget* parent)
     m_nmsSlider->setToolTip(m_nmsSpin->toolTip());
     detCard->contentLayout()->addWidget(nmsRow);
 
-    // ★ 2026-09-17: "最大检测数" 固定为 kFixedMaxDetections (=20), 不再可调。
-    //   原来是 1~100 的滑块, 但那会让人误以为"调大能检出更多" —— 模型是
-    //   end2end 形态, 每帧成品框本来就少, 多出来的框在下游全被丢弃。
-    //   这里改成只读展示, 说明为什么不可调。
     auto* maxDetLabel = new QLabel(QString::number(kFixedMaxDetections));
     maxDetLabel->setToolTip(
         tr("单帧最多保留的检测框数量, 固定为 %1 不可修改。\n"
@@ -181,7 +165,6 @@ AiModelPage::AiModelPage(QWidget* parent)
 
     layout->addWidget(detCard);
 
-    // Connect detection parameter changes to config
     connect(m_confSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [&cfg](double val) {
         cfg.setConfidenceThreshold(static_cast<float>(val));
@@ -193,7 +176,6 @@ AiModelPage::AiModelPage(QWidget* parent)
         emit cfg.configChanged();
     });
 
-    // ── Card 4: 小目标增强 ──
     auto* smallCard = new CardWidget(QStringLiteral("小目标增强"),
                                      QStringLiteral("target"));
 
@@ -220,7 +202,6 @@ AiModelPage::AiModelPage(QWidget* parent)
         m_smallTargetAreaSlider->setToolTip(m_smallTargetAreaSpin->toolTip());
     smallCard->contentLayout()->addWidget(m_smallTargetAreaRow);
 
-    // Disable small target sliders when toggle is off
     bool stEnabled = cfg.smallTargetEnabled();
     m_smallTargetConfRow->setEnabled(stEnabled);
     m_smallTargetAreaRow->setEnabled(stEnabled);
@@ -245,31 +226,24 @@ AiModelPage::AiModelPage(QWidget* parent)
     updateModelInfo();
     updateBackendStatus();
 
-    // 切换配置方案后, 本页所有控件都要按新方案重读。
     connect(&cfg, &ConfigManager::configLoaded, this, &AiModelPage::reloadFromConfig);
 }
 
 void AiModelPage::reloadFromConfig() {
     auto& cfg = ConfigManager::instance();
 
-    // 整段还原期间屏蔽控件信号: 否则 setValue/setChecked 会走回写路径, 把
-    // 中间态当成用户改动塞进新方案。
     const QSignalBlocker blockCombo(m_modelCombo);
     const QSignalBlocker blockStToggle(m_smallTargetEnabled);
 
     const QString model = cfg.aiModel();
     int modelIdx = m_modelCombo->findText(model);
     if (modelIdx < 0 && !model.isEmpty()) {
-        // 方案里的模型不在 models/ 列表里 (被删了/拷走了): 补一项让用户看见真实值,
-        // 而不是让下拉悄悄留在上一个方案的文件名上。
         m_modelCombo->addItem(model);
         modelIdx = m_modelCombo->findText(model);
     }
     if (modelIdx >= 0)
         m_modelCombo->setCurrentIndex(modelIdx);
 
-    // ★ 2026-09-17: 后端恒为 TRT(下拉框与 DML 设备 ID 已随 DirectML 后端删除),
-    //   "最大检测数" 固定为 kFixedMaxDetections —— 两者都不再需要还原控件状态。
     setSliderValue(m_confSpin, m_confSlider, cfg.confidenceThreshold(), 0.01, 0.01);
     setSliderValue(m_nmsSpin, m_nmsSlider, cfg.nmsThreshold(), 0.00, 0.01);
 
@@ -286,9 +260,6 @@ void AiModelPage::reloadFromConfig() {
     updateBackendStatus();
 }
 
-// ★ 2026-09-17: onBackendChanged 已删除 —— DirectML 后端整条移除后没有"后端"可选,
-//   TensorRT 是唯一后端, 所以不存在"切换后端"这个动作。
-
 void AiModelPage::onSmallTargetToggled(bool enabled) {
     auto& cfg = ConfigManager::instance();
     m_smallTargetConfRow->setEnabled(enabled);
@@ -302,7 +273,6 @@ void AiModelPage::browseModel() {
         this, QStringLiteral("选择模型文件"), QStringLiteral("models"),
         QStringLiteral("模型文件 (*.onnx *.engine *.oliver);;所有文件 (*)"));
     if (!path.isEmpty()) {
-        // Import: copy to models/ directory if not already there
         QFileInfo fi(path);
         QDir modelsDir(QStringLiteral("models"));
         if (!modelsDir.exists())
@@ -315,7 +285,6 @@ void AiModelPage::browseModel() {
             QFile::copy(path, destPath);
         }
 
-        // Add to combo if not already present
         int idx = m_modelCombo->findText(destName);
         if (idx < 0) {
             m_modelCombo->addItem(destName);
@@ -362,9 +331,6 @@ void AiModelPage::updateModelInfo() {
 }
 
 void AiModelPage::updateBackendStatus() {
-    // ★ 2026-09-17: 后端只剩 TensorRT, 所以这里不再有分支。
-    //   顺带把"必须是 end2end [1,N,6] 模型"这条硬要求写在界面上 ——
-    //   加载非 end2end 模型现在会直接报错退出。
     m_backendStatusLabel->setText(QStringLiteral(
         "TensorRT 引擎固定使用 FP16 I/O；ONNX 首次启动时自动构建并缓存引擎。\n"
         "只支持 end2end 形态的模型(输出 [1,N,6]，即 NMS/解码已烘进图内)。"));

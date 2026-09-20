@@ -169,6 +169,7 @@ set(APP_SOURCES
     "${SRC_DIR}/control/alpha_beta_filter.cpp"
     "${SRC_DIR}/control/anchor.cpp"
     "${SRC_DIR}/control/pid_controller.cpp"
+    "${SRC_DIR}/control/predictor.cpp"
     "${SRC_DIR}/control/aim_controller.cpp"
     "${SRC_DIR}/runtime/aim_loop.cpp"
     # aim_loop_config.cpp 是【纯映射】, 不依赖 OpenCV/Windows ⇒ 逻辑测试也编它。
@@ -225,6 +226,8 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/TargetPage.h"
     "${QT_UI_DIR}/widgets/CardWidget.cpp"
     "${QT_UI_DIR}/widgets/CardWidget.h"
+    "${QT_UI_DIR}/widgets/CurveCanvas.cpp"
+    "${QT_UI_DIR}/widgets/CurveCanvas.h"
     "${QT_UI_DIR}/widgets/FormKit.cpp"
     "${QT_UI_DIR}/widgets/FormKit.h"
     "${QT_UI_DIR}/widgets/IconFont.cpp"

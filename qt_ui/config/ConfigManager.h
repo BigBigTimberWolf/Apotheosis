@@ -15,17 +15,11 @@ public:
     bool save();
     QString configPath() const;
 
-    // 生效配置被整体替换 (切换/新建配置方案) 之后调用: 让所有连了
-    // configLoaded 的页面把控件按新值重读一遍。
-    // 只发信号, 不改任何值 —— 值由 ConfigBridge::syncFromRuntime() 负责。
     void notifyRuntimeReloaded();
 
-    // ── Capture: 只有「采集卡」一种方式 ──
-    // 所有参数都来自设备真实能力探测, UI 用 格式/分辨率/帧率 三级联动下拉让
-    // 用户从中选。这里只是 Qt 侧的内存缓存, 真正落盘由 Config::saveConfig() 完成。
-    QString captureDevice() const;      // 设备 friendly name (不是 index)
+    QString captureDevice() const;
     void setCaptureDevice(const QString& v);
-    QString captureFormat() const;      // NV12 | MJPG | YUY2 | RGB32
+    QString captureFormat() const;
     void setCaptureFormat(const QString& v);
     int captureWidth() const;
     void setCaptureWidth(int v);
@@ -39,7 +33,6 @@ public:
     void setDetectionResolution(int v);
     bool circleMask() const;
     void setCircleMask(bool v);
-    // Hardware
     QString inputMethod() const;
     void setInputMethod(const QString& v);
     int makcuBaudrate() const;
@@ -50,16 +43,17 @@ public:
     void setMakcuNewBaudrate(int v);
     QString makcuNewPort() const;
     void setMakcuNewPort(const QString& v);
-    // KMBox Net (以太网 UDP, 2026-09-15 恢复)
+    // 第二台 MAKCUNEW(键盘那台): 自动急停的屏蔽命令从它发出
+    int makcuNewBaudrateKbd() const;
+    void setMakcuNewBaudrateKbd(int v);
+    QString makcuNewPortKbd() const;
+    void setMakcuNewPortKbd(const QString& v);
     QString kmboxNetIp() const;
     void setKmboxNetIp(const QString& v);
     QString kmboxNetPort() const;
     void setKmboxNetPort(const QString& v);
     QString kmboxNetUuid() const;
     void setKmboxNetUuid(const QString& v);
-    // AI
-    // ★ 2026-09-17: DirectML 后端已整条移除 → setBackend / dmlDeviceId /
-    //   setDmlDeviceId 三个读写口删除; backend() 恒返回 "TRT"。
     QString backend() const;
     QString aiModel() const;
     void setAiModel(const QString& v);
@@ -76,8 +70,6 @@ public:
     float smallTargetAreaFrac() const;
     void setSmallTargetAreaFrac(float v);
 
-
-    // Macro
     bool macroEnabled() const;
     void setMacroEnabled(bool v);
     QString macroScriptPath() const;
@@ -85,7 +77,6 @@ public:
     bool macroPrimaryButtonEvents() const;
     void setMacroPrimaryButtonEvents(bool v);
 
-    // Crosshair
     int crosshairRectW() const;
     void setCrosshairRectW(int v);
     int crosshairRectH() const;
@@ -94,9 +85,7 @@ public:
     void setCrosshairMinPixelCount(int v);
     int crosshairCloseRadius() const;
     void setCrosshairCloseRadius(int v);
-    // 【2026-09-13 删除】crosshairSmooth() / setCrosshairSmooth() —— 准星平滑已移除。
 
-    // Crosshair color profiles
     struct ColorProfile {
         QString name;
         bool enabled = true;
@@ -107,8 +96,6 @@ public:
     QList<ColorProfile> crosshairColors() const;
     void setCrosshairColors(const QList<ColorProfile>& colors);
 
-
-    // Debug
     bool showFps() const;
     void setShowFps(bool v);
     bool verbose() const;
@@ -126,11 +113,25 @@ public:
     float replayPlaybackSpeed() const;
     void setReplayPlaybackSpeed(float v);
 
-    // Active hotkey group
+    // 全局选靶与稳定器
+    double targetHysteresisRatio() const;
+    void setTargetHysteresisRatio(double v);
+    double targetMaxDistancePx() const;
+    void setTargetMaxDistancePx(double v);
+    double targetMatchCenterRatio() const;
+    void setTargetMatchCenterRatio(double v);
+    double targetAreaRatioTol() const;
+    void setTargetAreaRatioTol(double v);
+    double targetKSnapMult() const;
+    void setTargetKSnapMult(double v);
+    double targetMinAspect() const;
+    void setTargetMinAspect(double v);
+    double targetMaxAspect() const;
+    void setTargetMaxAspect(double v);
+
     QString activeHotkeyGroup() const;
     void setActiveHotkeyGroup(const QString& v);
 
-    // Hotkey profiles
     int hotkeyCount() const;
 
     struct HotkeyData {
@@ -138,22 +139,11 @@ public:
         QString group;
         QStringList keys;
         int fovX = 106, fovY = 74;
-        // ★ 2026-09-17: 原来这里有 ~20 个瞄准链成员(trigger_* 12 个 / aim_path_* 8 个)。
-        //   它们只在这个结构体和 QSettings 之间往返, 没有任何运行时消费者, 所以随
-        //   瞄准控制链一起删除。删掉它们也意味着 QSettings 里那些键不再被读写 ——
-        //   用户旧的 QSettings 里残留的值会被忽略, 不影响任何活着的键。
-        // ── 下面这些仍然活着(检测 / 瞄点选择 / 准星找色 在用) ──
-        // 优先级排序的类别列表, 每条 "id:y_min:y_max:min_conf", 分号分隔。
         QString aimClasses;
         bool crosshairDetectEnabled = false;
         bool dynamicFovEnabled = false;
         float dynamicFovStrength = 0.60f;
 
-        // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────
-        // 与 HotkeyProfile 的 ctl_* 一一对应，由 config_bridge 双向同步。
-        // ★★ 必须逐个列出: 这个结构是界面侧的落盘载体，`aim_classes` 当初
-        //    就是因为"只在 HotkeyProfile 里有、这里没有"而断过线。
-        // ★ 默认值与 HotkeyProfile 的成员初值一致（等价历史单行为）。
         bool   ctlEnabled = false;
         double ctlKpX = 35.0, ctlKpY = 35.0;
         double ctlKiX = 0.0,  ctlKiY = 0.0;
@@ -163,6 +153,15 @@ public:
         double ctlIMax = 0.0;
         int    ctlMaxOutputCounts = 200;
         double ctlPFullScalePx = 0.0;
+        double ctlKPxPerCount = 0.0;
+        double ctlInflightBeta = 0.8;
+        double ctlInflightDeadTimeMs = 46.0;
+
+        // 在途补偿（预测提前量）。leadMs == 0 ⇒ 预测整体关闭，
+        // 另两个参数不生效（0 = 不限制）。
+        double ctlPredictLeadMs = 0.0;
+        double ctlPredictMaxVelocityPxPerSec = 0.0;
+        double ctlPredictMaxLeadRatio = 0.0;
         double ctlYOffset = 0.5;
         double ctlYOffsetMax = 0.5;
         double ctlHysteresisRatio = 1.3;

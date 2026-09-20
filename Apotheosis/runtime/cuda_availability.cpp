@@ -14,7 +14,6 @@ namespace runtime
 {
 namespace
 {
-// RAII wrapper for LoadLibraryW handles used solely for probing DLL presence.
 class ProbeLibrary
 {
 public:
@@ -56,7 +55,6 @@ CudaRuntimeStatus compute_status()
 
     if (status.cudart_loadable)
     {
-        // Delay-loaded cudart calls resolve lazily; guarded by DLL presence above.
         int runtime_version = 0;
         if (cudaRuntimeGetVersion(&runtime_version) == cudaSuccess)
         {
@@ -77,10 +75,10 @@ CudaRuntimeStatus compute_status()
 
     status.failure_reason = reasons.str();
     if (!status.failure_reason.empty() && status.failure_reason.size() >= 2)
-        status.failure_reason.resize(status.failure_reason.size() - 2); // trim trailing "; "
+        status.failure_reason.resize(status.failure_reason.size() - 2);
     return status;
 }
-} // namespace
+}
 
 const CudaRuntimeStatus& probe_cuda_runtime()
 {
@@ -94,4 +92,4 @@ bool is_tensorrt_available()
 {
     return probe_cuda_runtime().trt_ready();
 }
-} // namespace runtime
+}

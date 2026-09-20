@@ -8,8 +8,6 @@
 
 namespace runtime
 {
-// One outstanding asynchronous operation. The callback owns a reference to the
-// slot, never to its consumer. A missing callback cannot prevent cancellation.
 template<class T>
 class InterruptibleSlot
 {

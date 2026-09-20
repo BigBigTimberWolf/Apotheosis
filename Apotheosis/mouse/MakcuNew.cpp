@@ -10,10 +10,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
-// 自动为当前端口设置 Windows 注册表 / 驱动层最低 LatencyTimer = 1ms
 static void autoTuneCh343Latency(const std::string& portName)
 {
-    // 例如从 COM3 或 \\.\\COM3 提取数字 3
     int portNum = 0;
     size_t pos = portName.find("COM");
     if (pos != std::string::npos) {
@@ -37,7 +35,7 @@ static void autoTuneCh343Latency(const std::string& portName)
 namespace
 {
 constexpr size_t kMaxPayload = 244;
-constexpr unsigned int kBootBaud = 115200;   // 固件 setup() 硬编码
+constexpr unsigned int kBootBaud = 115200;
 constexpr const char* kVersionTag = "MAKCU-PASSTHROUGH";
 
 uint32_t readU32(const uint8_t* p)
@@ -65,7 +63,6 @@ MakcuNewConnection::MakcuNewConnection(const std::string& port, unsigned int bau
 
     if (!establishSession())
     {
-        // 首连失败: 不进入守护状态，由调用方决定是否重建(见 Apotheosis.cpp)。
         wantOpen_.store(false);
         stopReader();
         try { if (serial_.isOpen()) serial_.close(); } catch (...) {}
@@ -76,8 +73,6 @@ MakcuNewConnection::MakcuNewConnection(const std::string& port, unsigned int bau
     }
     else
     {
-        // 断线守护: 只要还 wantOpen 就每 ~1s 尝试恢复会话(含重订阅 0x48)。
-        // 没有它的话, 设备重插后 isOpen() 永远为 false, 扳机与位移会静默失效。
         supervisor_ = std::thread(&MakcuNewConnection::supervisorLoop, this);
     }
 }
@@ -87,7 +82,6 @@ MakcuNewConnection::~MakcuNewConnection()
     wantOpen_.store(false);
     if (open_.load())
     {
-        // 退订异步按键上报。固件不回 ACK，发完即走。
         subscribeAsync(false);
     }
     if (supervisor_.joinable()) supervisor_.join();
@@ -113,7 +107,6 @@ bool MakcuNewConnection::establishSession()
         asciiLine_.clear();
     };
 
-    // 尝试在指定波特率建立并验证一个可用会话
     const auto tryConnectAt = [&](unsigned int baud, const char* note) -> bool {
         if (!openSerial(baud)) return false;
         startReader();
@@ -123,15 +116,13 @@ bool MakcuNewConnection::establishSession()
             return false;
         }
         baudRate_ = baud;
-        open_.store(true);          // 探活通过, 会话才算真正建立
+        open_.store(true);
         initializeProtocolSession();
         std::cout << "[MakcuNew] Connected on " << port_ << " @ " << baudRate_
                   << " bps" << (note ? note : "") << std::endl;
         return true;
     };
 
-    // 固件上电一定在 115200 (main.cpp 硬编码，且不持久化)，因此先探 115200，
-    // 再决定是否需要切速。也允许设备恰好已处于目标波特率 (同一次上电内重连)。
     std::vector<unsigned int> candidates;
     if (requestedBaud != kBootBaud) candidates.push_back(kBootBaud);
     candidates.push_back(requestedBaud);
@@ -150,27 +141,19 @@ bool MakcuNewConnection::establishSession()
                 continue;
             }
 
-            // 已经处于目标波特率，直接进入会话。
             if (candidate == requestedBaud)
             {
                 baudRate_ = candidate;
-                open_.store(true);      // 探活通过, 会话才算真正建立
+                open_.store(true);
                 initializeProtocolSession();
                 std::cout << "[MakcuNew] Connected to MAKCU passthrough device on "
                           << port_ << " @ " << baudRate_ << " bps." << std::endl;
                 return true;
             }
 
-            // 当前在 115200，需要切到目标波特率。
-            // 两条路径最终都落到固件 cbSetBaud():
-            //   A) A5 5C 帧 0x42 SET_BAUD  —— 带 CRC、有长度校验，优先
-            //   B) DE AD 转义帧 0xA5 <u32> —— proto_parser.h 注明的
-            //      "Apotheosis 动态高速切波特率"硬件级路径，无 CRC
-            // 两者都不会回 ACK (sendFrame 从未接线)，只能发完即走、自行重连复验。
             std::cout << "[MakcuNew] Requesting baud switch to " << requestedBaud
                       << " bps ..." << std::endl;
 
-            // ---- 方案 A ----
             {
                 uint8_t payload[4];
                 payload[0] = static_cast<uint8_t>(requestedBaud & 0xFF);
@@ -179,13 +162,11 @@ bool MakcuNewConnection::establishSession()
                 payload[3] = static_cast<uint8_t>((requestedBaud >> 24) & 0xFF);
                 sendFrame(makcu::CMD_SET_BAUD, payload, sizeof(payload));
             }
-            // 固件内部 end() + 50ms delay + begin()，留足 250ms 余量。
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             closeSession();
 
             if (tryConnectAt(requestedBaud, " (SET_BAUD)")) return true;
 
-            // ---- 方案 B ----
             closeSession();
             if (openSerial(kBootBaud))
             {
@@ -199,7 +180,6 @@ bool MakcuNewConnection::establishSession()
                 }
             }
 
-            // 切速失败 -> 退回 115200 保证至少能用 (只是慢)。
             closeSession();
             if (tryConnectAt(kBootBaud, ""))
             {
@@ -356,15 +336,12 @@ bool MakcuNewConnection::sendFrame(
 
 void MakcuNewConnection::sendDeadBaud(unsigned int baud)
 {
-    // DE AD | LEN_LO LEN_HI | CMD | PAYLOAD[LEN-1]   (LEN 含 CMD 字节, 无 CRC)
-    // 固件 proto_parser.cpp::dispatchDead(): CMD 0xA5 + uint32 baud -> onSetBaud()
-    // 6 Mbps => DE AD 05 00 A5 80 8D 5B 00
     uint8_t frame[9];
     frame[0] = 0xDE;
     frame[1] = 0xAD;
-    frame[2] = 0x05;                             // LEN = 1 (CMD) + 4 (baud)
+    frame[2] = 0x05;
     frame[3] = 0x00;
-    frame[4] = 0xA5;                             // CMD: 切换波特率
+    frame[4] = 0xA5;
     frame[5] = static_cast<uint8_t>(baud & 0xFF);
     frame[6] = static_cast<uint8_t>((baud >> 8) & 0xFF);
     frame[7] = static_cast<uint8_t>((baud >> 16) & 0xFF);
@@ -379,14 +356,12 @@ void MakcuNewConnection::sendDeadBaud(unsigned int baud)
 
 void MakcuNewConnection::subscribeAsync(bool on)
 {
-    // 固件 0x48: onSubAsync(pl[0] != 0) 置 g_async_sub，之后主动上报 0x84。
     const uint8_t enable = on ? 1 : 0;
     sendFrame(makcu::CMD_SUB_ASYNC, &enable, 1);
 }
 
 void MakcuNewConnection::feedAsciiByte(uint8_t b)
 {
-    // 行结束符: 提交整行 (固件 km.* 回包 / 上电横幅)
     if (b == '\n')
     {
         std::lock_guard<std::mutex> lk(asciiMutex_);
@@ -400,7 +375,7 @@ void MakcuNewConnection::feedAsciiByte(uint8_t b)
         return;
     }
 
-    if (b == '\r') return;   // 固件 println 会发 \r\n
+    if (b == '\r') return;
 
     if (b >= 0x20 && b < 0x7F)
     {
@@ -409,16 +384,12 @@ void MakcuNewConnection::feedAsciiByte(uint8_t b)
         return;
     }
 
-    // 其余控制字节 (< 0x20, 已排除 CR/LF): 固件 ASCII 模式 km.buttons(1) 下
-    // 的"单字节快速按键掩码流" (< 32)。本客户端默认走 0x48 SUB_ASYNC 的
-    // 0x84 结构化帧，不会同时开启该模式，这里仅作兼容接收。
     if (b < 0x20)
     {
         applyPhysicalButtons(b);
         return;
     }
 
-    // 其余不可打印字节: 认为不是 ASCII 行，清空避免污染
     std::lock_guard<std::mutex> lk(asciiMutex_);
     asciiAccum_.clear();
 }
@@ -427,10 +398,9 @@ bool MakcuNewConnection::probeAscii(const std::string& command,
                                     const std::string& expect,
                                     unsigned int timeoutMs)
 {
-    // 固件只有 ASCII km.* 命令会回包 (Serial0.println)，用它做探活。
     std::unique_lock<std::mutex> lk(asciiMutex_);
     asciiLine_.clear();
-    asciiAccum_.clear();          // 丢弃上一条命令残留的半行
+    asciiAccum_.clear();
     const uint64_t baseSeq = asciiSeq_;
     lk.unlock();
 
@@ -470,13 +440,9 @@ bool MakcuNewConnection::probeAscii(const std::string& command,
 
 bool MakcuNewConnection::initializeProtocolSession()
 {
-    // 新会话: 清掉上一会话残留的按键影子，避免断线重连后状态串味。
     realButtons_.store(0, std::memory_order_release);
     injectedButtons_.store(0, std::memory_order_release);
 
-    // 订阅 0x84 异步按键上报(real/inj 双掩码)。固件不回 ACK，
-    // 但收到订阅后会【立刻补发一帧当前按键态】，所以这里等一小会儿，
-    // 否则上位机接入时若用户已经按着键，会一直误判为未按下。
     subscribeAsync(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     return true;
@@ -495,8 +461,6 @@ bool MakcuNewConnection::move(int x, int y)
     const int cy = std::clamp(y, -32768, 32767);
     if (cx == 0 && cy == 0) return true;
 
-    // 热路径: 11 字节定长帧，固件 protoOnMove 会走 USB 就绪直发旁路，
-    // 跳过 FreeRTOS 任务唤醒与上下文切换。
     uint8_t payload[4];
     payload[0] = static_cast<uint8_t>(cx & 0xFF);
     payload[1] = static_cast<uint8_t>((cx >> 8) & 0xFF);
@@ -507,9 +471,6 @@ bool MakcuNewConnection::move(int x, int y)
 
 void MakcuNewConnection::cancelMove()
 {
-    // 固件 0x05 MOVE_CANCEL: 清空设备侧 s_pending_dx/dy 与滚轮积压。
-    // 直通透传下上位机确实没有本地队列，但设备侧在 USB 未就绪时会攒位移，
-    // 停火时那份积压也必须丢掉，否则会继续"吐"出去。
     if (!open_.load(std::memory_order_acquire)) return;
     sendFrame(makcu::CMD_MOVE_CANCEL, nullptr, 0);
 }
@@ -538,8 +499,6 @@ void MakcuNewConnection::click(int button)
     if (!open_.load(std::memory_order_acquire)) return;
     const uint8_t bit = buttonBit(button);
     if (!bit) return;
-    // 固件 0x12 CLICK: payload = {btn_bits, down_ms_lo, down_ms_hi}
-    // 固件内定时弹起 (clickTick 每 1ms 扫描)，上位机不等回执。
     uint8_t payload[3];
     payload[0] = bit;
     payload[1] = 45;
@@ -559,9 +518,6 @@ bool MakcuNewConnection::tapKey(int hidKey, int holdMs, int mod)
     if (!open_.load(std::memory_order_acquire)) return false;
     if (hidKey <= 0 || hidKey > 0xFF) return false;
     const int hold = std::clamp(holdMs, 1, 2000);
-    // 固件 0x22 KEY_TAP: payload = {mod, key, hold_ms_lo, hold_ms_hi}
-    // key 用标准 HID usage id(与 0x21 KEY_MASK 的 keys[6] 同一码表)。
-    // 固件内定时弹起, 是自清的 —— 上位机异常也不会把键卡在按下。
     uint8_t payload[4];
     payload[0] = static_cast<uint8_t>(std::clamp(mod, 0, 0xFF));
     payload[1] = static_cast<uint8_t>(hidKey);
@@ -623,9 +579,6 @@ void MakcuNewConnection::consumeFrames()
 
         const uint8_t* p = receiveBuffer_.data() + receiveOffset_;
 
-        // 只有 0xA5 可能是帧头首字节。其余任何字节都不可能是帧的一部分，
-        // 必须【立刻】消费掉: 否则行尾 '\n' 或单字节按键掩码会永久滞留
-        // 在缓冲里，导致 km.version 探活永远收不到回包。
         if (p[0] != makcu::FRAME_MAGIC0)
         {
             feedAsciiByte(p[0]);
@@ -633,26 +586,25 @@ void MakcuNewConnection::consumeFrames()
             continue;
         }
 
-        if (avail < 2) break;                   // 等第二个字节判断 0x5C
+        if (avail < 2) break;
 
         if (p[1] != makcu::FRAME_MAGIC1)
         {
-            feedAsciiByte(p[0]);                // 孤立的 0xA5
+            feedAsciiByte(p[0]);
             ++receiveOffset_;
             continue;
         }
 
-        if (avail < 7) break;                   // 帧头还没收全
+        if (avail < 7) break;
         const size_t payloadLength = p[2];
         if (payloadLength > kMaxPayload)
         {
-            // 长度非法: 把首字节当普通数据丢掉，避免死等
             feedAsciiByte(p[0]);
             ++receiveOffset_;
             continue;
         }
         const size_t frameLength = payloadLength + 7;
-        if (avail < frameLength) break;         // 帧体还没收全
+        if (avail < frameLength) break;
 
         const uint16_t receivedCrc = static_cast<uint16_t>(
             p[frameLength - 2] | (p[frameLength - 1] << 8));
@@ -663,7 +615,7 @@ void MakcuNewConnection::consumeFrames()
             const uint8_t command = p[4];
             const uint8_t* payload = p + 5;
 
-            if (command == 0x84)                // ASYNC_BUTTON {real, inj}
+            if (command == 0x84)
             {
                 if (payloadLength >= 1)
                 {
@@ -673,7 +625,6 @@ void MakcuNewConnection::consumeFrames()
                                                std::memory_order_release);
                 }
             }
-            // 固件当前不会回 ACK/NAK/VERSION/STATS，未知帧直接忽略。
         }
         receiveOffset_ += frameLength;
     }
@@ -684,6 +635,82 @@ void MakcuNewConnection::consumeFrames()
         receiveBuffer_.erase(
             receiveBuffer_.begin(), receiveBuffer_.begin() + receiveOffset_);
         receiveOffset_ = 0;
+    }
+}
+
+// ---- 瞬时屏蔽真实输入 ----
+//
+// 走 ASCII 文本通道(与 km.version 探活同一条路), 不新增二进制帧:
+//   固件 fw_device 收到 "km.mask(N)" 后经板间 UART 转发给 fw_host,
+//   由 fw_host 在其 mask 窗口内丢弃真实键鼠输入。
+//
+// 时序注意: 屏蔽是"从固件收到那一刻起算 N 毫秒", 本函数不等任何应答 ——
+// 固件对这条命令只回一行 "km.mask(N) ok" 到板间链路, 不会回到本串口
+// (设备侧的 ASCII 应答仅对 km.version 等命令发出), 因此这里写完即认为成功,
+// 与协议"上位机必须 ACK-free"的整体约定一致。
+bool MakcuNewConnection::mask(int durationMs)
+{
+    if (!open_.load(std::memory_order_acquire)) return false;
+
+    // 钳制到固件侧的上限(见 fw_host EspUsbHost.h kMaskMaxMs = 2000)。
+    // 超上限固件会自行截到 2000, 这里先钳一次以便行为可预期。
+    if (durationMs < 0) durationMs = 0;
+    if (durationMs > 2000) durationMs = 2000;
+
+    // <=0 走解除命令, 与固件的 km.maskoff 语义一致。
+    if (durationMs == 0) return maskOff();
+
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "km.mask(%d)\r\n", durationMs);
+
+    std::lock_guard<std::mutex> lock(writeMutex_);
+    if (!portOpen_.load(std::memory_order_acquire)) return false;
+    try
+    {
+        const size_t n = std::strlen(buf);
+        return serial_.write(reinterpret_cast<const uint8_t*>(buf), n) == n;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[MakcuNew] mask write failed: " << e.what() << std::endl;
+        portOpen_.store(false);
+        open_.store(false);
+        return false;
+    }
+    catch (...)
+    {
+        std::cerr << "[MakcuNew] mask write failed: unknown exception." << std::endl;
+        portOpen_.store(false);
+        open_.store(false);
+        return false;
+    }
+}
+
+bool MakcuNewConnection::maskOff()
+{
+    if (!open_.load(std::memory_order_acquire)) return false;
+
+    static const char kOff[] = "km.maskoff\r\n";
+    std::lock_guard<std::mutex> lock(writeMutex_);
+    if (!portOpen_.load(std::memory_order_acquire)) return false;
+    try
+    {
+        const size_t n = sizeof(kOff) - 1;
+        return serial_.write(reinterpret_cast<const uint8_t*>(kOff), n) == n;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[MakcuNew] maskoff write failed: " << e.what() << std::endl;
+        portOpen_.store(false);
+        open_.store(false);
+        return false;
+    }
+    catch (...)
+    {
+        std::cerr << "[MakcuNew] maskoff write failed: unknown exception." << std::endl;
+        portOpen_.store(false);
+        open_.store(false);
+        return false;
     }
 }
 

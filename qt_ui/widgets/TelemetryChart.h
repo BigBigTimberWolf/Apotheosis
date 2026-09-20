@@ -4,8 +4,6 @@
 #include <QVector>
 #include <QWidget>
 
-// 共享实时遥测折线:面积 + 线 + 网格,带动态 min/max 视窗(让小幅波动也可见)。
-// 由原 StatsPage::FpsGraphWidget 泛化而来,概览与统计页共用。
 class TelemetryChart : public QWidget {
     Q_OBJECT
 

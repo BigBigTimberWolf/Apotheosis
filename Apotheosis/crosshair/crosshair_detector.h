@@ -9,7 +9,6 @@
 namespace crosshair
 {
 
-// Color band definition with support for both classical HSV and adaptive color saliency
 struct CrosshairColorBand
 {
     std::string name = "Red-Low";
@@ -22,30 +21,22 @@ struct CrosshairColorBand
     int v_max  = 255;
 };
 
-// Per-call detector configuration.
 struct CrosshairDetectorSettings
 {
     bool enabled = false;
 
-    // Sampling rectangle in detection-image pixels, centered on the frame.
     int rect_w = 64;
     int rect_h = 64;
 
-    // Active color bands
     std::vector<CrosshairColorBand> colors;
 
-    // Minimum count of reticle energy/pixels in the ROI required for detection
     int min_pixel_count = 4;
 
-    // Morphological closing radius (0 to 7)
     int close_radius = 1;
 };
 
 std::vector<CrosshairColorBand> default_red_bands();
 
-// Universal Robust Crosshair Detector
-// Handles arbitrary capture card compression artifacts (MJPEG, NV12, YUY2, RGB24),
-// lighting shifts, muzzle flash noise, and low quality streaming feeds.
 class CrosshairDetector
 {
 public:
@@ -53,6 +44,6 @@ public:
                                       const CrosshairDetectorSettings& settings) const;
 };
 
-} // namespace crosshair
+}
 
 #endif // CROSSHAIR_DETECTOR_H

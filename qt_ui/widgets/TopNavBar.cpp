@@ -28,7 +28,6 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
     row->setContentsMargins(18, 0, 18, 0);
     row->setSpacing(0);
 
-    // ── Brand ──
     auto* mark = new QLabel(this);
     mark->setObjectName("brandMark");
     mark->setFixedSize(29, 29);
@@ -51,7 +50,6 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
     row->addWidget(divider);
     row->addSpacing(8);
 
-    // ── Primary nav ──
     m_group = new QButtonGroup(this);
     m_group->setExclusive(true);
     m_navRow = new QHBoxLayout;
@@ -63,9 +61,6 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
 
     row->addStretch();
 
-    // ── Global actions ──
-    // 全局配置方案: 下拉 = 一键切换, 右侧 ⋯ 菜单 = 保存 / 另存为 / 重命名 / 删除。
-    // 放在最左边的全局操作位, 任何页面都能直接换方案。
     {
         auto* profileIcon = new QLabel(this);
         profileIcon->setObjectName("profileIcon");
@@ -146,9 +141,6 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
         m_saveButton->style()->polish(m_saveButton);
     });
 
-    // 方案名的临时反馈 (例如「已保存」) —— 到时把高亮撤掉。
-    // 注意: 下拉是不可编辑的, setCurrentText() 对不在列表里的文本不会生效,
-    // 所以反馈走「高亮 + 提示」而不是改文本, 下拉始终显示真实的当前方案名。
     m_profileFeedbackTimer = new QTimer(this);
     m_profileFeedbackTimer->setSingleShot(true);
     connect(m_profileFeedbackTimer, &QTimer::timeout, this, [this] {
@@ -202,8 +194,6 @@ void TopNavBar::showSaveFeedback() {
     m_saveFeedbackTimer->start(1200);
 }
 
-// ── 全局配置方案 ───────────────────────────────────────────────────────────
-
 void TopNavBar::setProfiles(const QStringList& names, const QString& active) {
     if (m_profileFeedbackTimer->isActive())
         m_profileFeedbackTimer->stop();
@@ -216,7 +206,6 @@ void TopNavBar::setProfiles(const QStringList& names, const QString& active) {
     m_profileCombo->addItems(names);
     m_profileCombo->setProperty("activeName", active);
     const int index = names.indexOf(active);
-    // 活动方案不在列表里 (文件被外部删掉等) 就留空, 由 MainWindow 负责提示。
     m_profileCombo->setCurrentIndex(index);
     m_profileCombo->setEnabled(!names.isEmpty());
 }

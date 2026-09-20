@@ -64,9 +64,10 @@ IDetector* g_detector = nullptr;
 runtime::InferenceSession* g_inference_session = nullptr;
 Config config;
 
-
 MakcuConnection* makcuSerial = nullptr;
 MakcuNewConnection* makcuNewSerial = nullptr;
+// 第二台 MAKCUNEW(键盘那台)。nullptr = 未配置, 键盘动作回落到第一台。
+MakcuNewConnection* makcuNewSerialKbd = nullptr;
 KmboxNetConnection* kmboxNetSerial = nullptr;
 
 std::atomic<bool> detection_resolution_changed(false);
@@ -75,15 +76,10 @@ std::atomic<bool> capture_fps_changed(false);
 std::atomic<bool> detector_model_changed(false);
 std::atomic<bool> input_method_changed(false);
 
-
 std::string g_iconLastError;
 
 std::atomic<bool> g_replay_playback_active(false);
 std::atomic<int>  g_replay_playback_frame(0);
-
-// 【2026-09-13 删除】「每计数像素」标定遥测的定义
-// (namespace runtime::calib 的 20 个 atomic)。前馈删除后不再有人消费 k̂,
-// 测量功能与界面按钮一并移除。声明处见 runtime/aim_telemetry.h。
 
 static int FatalExit(const std::string& message)
 {
@@ -121,34 +117,31 @@ static std::thread StartThreadGuarded(const char* name, Func func)
 
 void createInputDevices()
 {
-    // Serialize reconnects, but never hold configMutex while opening a port.
     static std::mutex reconnectMutex;
     std::lock_guard<std::mutex> reconnect(reconnectMutex);
     const auto cfg = runtime_config::read();
     std::unique_ptr<MakcuConnection> oldMakcu;
     std::unique_ptr<MakcuNewConnection> oldNew;
+    std::unique_ptr<MakcuNewConnection> oldNewKbd;
     std::unique_ptr<KmboxNetConnection> oldKmboxNet;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
-        // ★ 瞄准下发链已整条删除(2026-09-17): 这里原来会把新设备推给
-        //   globalMouseThread。现在只做"探测/持有设备", 没有任何下发消费者。
         oldMakcu.reset(makcuSerial);
         oldNew.reset(makcuNewSerial);
+        oldNewKbd.reset(makcuNewSerialKbd);
         oldKmboxNet.reset(kmboxNetSerial);
         makcuSerial = nullptr;
         makcuNewSerial = nullptr;
+        makcuNewSerialKbd = nullptr;
         kmboxNetSerial = nullptr;
     }
-    // Detached from all readers; closing outside the lock keeps status polls
-    // responsive and releases the COM port before its replacement is opened.
     oldMakcu.reset();
     oldNew.reset();
-    // ★ KMBox Net 的析构会向盒子发 unmaskAll() —— 必须让它在被换成别的后端
-    //   之前真的跑完, 否则盒子那边会留着"物理键被屏蔽"的状态, 用户退出程序后
-    //   鼠标键盘还是被挡住的。
+    oldNewKbd.reset();
     oldKmboxNet.reset();
     std::unique_ptr<MakcuConnection> nextMakcu;
     std::unique_ptr<MakcuNewConnection> nextNew;
+    std::unique_ptr<MakcuNewConnection> nextNewKbd;
     std::unique_ptr<KmboxNetConnection> nextKmboxNet;
     if (cfg->input_method == "MAKCU")
     {
@@ -159,6 +152,23 @@ void createInputDevices()
     {
         nextNew = std::make_unique<MakcuNewConnection>(cfg->makcu_new_port, cfg->makcu_new_baudrate);
         if (!nextNew->isOpen()) nextNew.reset();
+
+        // 第二台(键盘)。端口为空 = 未配置, 保持 nullptr 让驱动回落。
+        // 与第一台端口相同也视为未配置(避免对同一个串口开两次)。
+        if (!cfg->makcu_new_port_kbd.empty() &&
+            cfg->makcu_new_port_kbd != cfg->makcu_new_port)
+        {
+            nextNewKbd = std::make_unique<MakcuNewConnection>(
+                cfg->makcu_new_port_kbd, cfg->makcu_new_baudrate_kbd);
+            if (!nextNewKbd->isOpen())
+            {
+                std::cerr << "[Apotheosis] keyboard MAKCUNEW port "
+                          << cfg->makcu_new_port_kbd
+                          << " failed to open; keyboard falls back to the mouse unit."
+                          << std::endl;
+                nextNewKbd.reset();
+            }
+        }
     }
     else if (cfg->input_method == "KMBOXNET")
     {
@@ -170,14 +180,13 @@ void createInputDevices()
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
         makcuSerial = nextMakcu.release();
         makcuNewSerial = nextNew.release();
+        makcuNewSerialKbd = nextNewKbd.release();
         kmboxNetSerial = nextKmboxNet.release();
     }
 }
 
 void assignInputDevices()
 {
-    // ★ 原来是"把当前设备指针推给 globalMouseThread"。瞄准下发链已删除,
-    //   这里不再有消费者, 保留空实现是为了不动 createInputDevices() 的调用序列。
 }
 
 static void applyLightPalette(QApplication& app)
@@ -228,10 +237,9 @@ static QString loadStyleSheet()
     return {};
 }
 
-
 int main(int argc, char* argv[])
 {
-    timeBeginPeriod(1); // 锁定全局高精度时钟中断(1ms)，消除线程调度离散抖动
+    timeBeginPeriod(1);
     AppLog::InstallStdStreamCapture();
 
     SetConsoleOutputCP(CP_UTF8);
@@ -259,19 +267,12 @@ int main(int argc, char* argv[])
         return FatalExit("[Config] Error with loading config!");
     }
 
-    // 进程调度档位: 提到 HIGH_PRIORITY_CLASS。
-    // 对应原神AI 日志里的 process_priority=0x8000。放在 config 加载之后,
-    // 这样开关(use_process_boost)可被用户覆盖。失败只打日志不阻断启动。
     if (config.use_process_boost)
     {
         if (sched_boost::boostProcessPriority())
             std::cout << "[Sched] Process priority -> HIGH" << std::endl;
     }
 
-    // 端到端延迟日志落盘 (logs/latency_<时间>.log)。
-    // 工作目录已在上面切到 exe 所在目录, 所以日志就落在程序旁边。
-    // 探针每写一行都 flush, 因此即使进程被强杀也不会丢数据。
-    // 失败 (只读目录等) 不阻断启动, 只打印原因。
     {
         runtime::latency::FileLogConfig logCfg;
         logCfg.directory   = "logs";
@@ -285,8 +286,6 @@ int main(int argc, char* argv[])
                       << runtime::latency::fileLogError() << std::endl;
     }
 
-    // 主界面可匿名使用；模型加密/授权页在需要时再弹出登录框。
-    // 服务地址属于认证模块的部署常量，不再作为一个无消费者的用户配置项。
     auth::state().initialize("http://110.42.232.243:8787");
     CPUAffinityManager cpuManager;
 
@@ -316,9 +315,6 @@ int main(int argc, char* argv[])
 
         if (config.backend == "TRT" && !cudaStatus.trt_ready())
         {
-            // ★ 2026-09-17: 原来这里会静默回退到 DML。DirectML 后端已整条移除,
-            //   不能再"回退到不存在的后端"——那会让程序带着一个永远起不来的
-            //   会话配置继续跑。改为明确报错, 把原因写清楚。
             std::cerr << "[MAIN] TRT backend requested but unavailable: "
                       << cudaStatus.failure_reason
                       << ". DirectML fallback has been removed; TensorRT is the only backend."
@@ -430,10 +426,6 @@ int main(int argc, char* argv[])
             }
         }
 
-        // ★ 2026-09-17: DirectML 适配器枚举整块删除 (EnumerateDMLAdapters /
-        //   DmlAdapterInfo / config.dml_device_id)。DirectML 后端已整条移除,
-        //   这段探测的唯一用途就是给那个后端挑设备。
-
         {
             std::string preloadError;
             runtime::preload_model_metadata(std::string("models/") + config.ai_model, true, &preloadError);
@@ -463,7 +455,6 @@ int main(int argc, char* argv[])
 
         welcome_message();
 
-        // --- Qt UI (replaces ImGui overlay) ---
         QApplication app(argc, argv);
         app.setApplicationName("Apotheosis");
         app.setOrganizationName("Apotheosis");
@@ -477,25 +468,13 @@ int main(int argc, char* argv[])
         ConfigManager::instance().load("config.ini");
         ConfigBridge::instance().syncFromRuntime();
 
-        // 全局配置方案: 扫描 configs/ 并把 active.txt 里记着的方案设为生效配置。
-        // 必须在 syncFromRuntime() 之后 —— 它会把方案的值推回 Qt 侧缓存,
-        // 各页面的构造函数随后读到的是方案值而不是 config.ini 的旧值。
         ConfigProfiles::instance().initialize();
 
-        // 调参通道 (2026-09-13 新增): 让外部脚本在运行中换参数。
-        // 【默认关闭】—— 只有配置目录里存在 live_tune.enable 才真的启用,
-        // 没有这个文件时每 200ms 只做一次文件存在性检查。详见 runtime/live_tune.h。
-        // 必须放在这里(而不是更早): 它依赖 Qt 事件循环, 且要在配置方案初始化之后,
-        // 否则可能会把方案配置覆盖掉。
         live_tune::start();
 
-        // 单机自用：跳过登录对话框，直接进入主界面
         MainWindow window;
         window.resize(960, 640);
         window.show();
-
-        // ★ 调参 agent 的生产接线已随瞄准控制链一起删除(2026-09-17):
-        //   autotune 的唯一调参对象就是那条回路, 回路没了它没有可调之物。
 
         QObject::connect(&app, &QCoreApplication::aboutToQuit, [] {
             ConfigBridge::instance().flush();
@@ -513,14 +492,12 @@ int main(int argc, char* argv[])
         session.stop();
         g_inference_session = nullptr;
 
-        // ★ 瞄准下发链已整条删除(2026-09-17): 原来这里要清空下发队列、
-        //   抬左/右键、解绑设备 —— 那些都属于已经被删掉的 MouseThread。
-        //   现在只需要关掉设备本身。
         delete makcuSerial;
         makcuSerial = nullptr;
         delete makcuNewSerial;
         makcuNewSerial = nullptr;
-        // ★ 析构会 unmaskAll(), 把 KMBox Net 那边的物理键屏蔽状态清掉。
+        delete makcuNewSerialKbd;
+        makcuNewSerialKbd = nullptr;
         delete kmboxNetSerial;
         kmboxNetSerial = nullptr;
 

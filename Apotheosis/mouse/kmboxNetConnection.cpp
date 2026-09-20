@@ -142,9 +142,6 @@ void KmboxNetConnection::side1Down()
     if (!is_open_) return;
     std::lock_guard<std::mutex> lock(io_mutex_);
     button_mask_ |= 0x08;
-    // cmd_mouse_all overwrites the firmware's button byte wholesale, so
-    // we send the full mask (which includes any L/R/M still held) rather
-    // than just the X1 bit.
     kmNet_mouse_all(button_mask_, 0, 0, 0);
 }
 
@@ -183,8 +180,6 @@ void KmboxNetConnection::mouseAll(int button, int x, int y, int wheel)
 {
     if (!is_open_) return;
     std::lock_guard<std::mutex> lock(io_mutex_);
-    // External writers replace the entire button state — keep our mirror
-    // in sync so subsequent side1/side2 toggles compose correctly.
     button_mask_ = button & 0x1F;
     kmNet_mouse_all(button, x, y, wheel);
 }

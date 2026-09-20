@@ -15,10 +15,6 @@ ConfigManager& ConfigManager::instance() {
 bool ConfigManager::load(const QString& path) {
     m_path = path;
     delete m_settings;
-    // Use a sidecar file (.cache) instead of config.ini so that QSettings'
-    // auto-sync on destruction does not overwrite the SimpleIni flat file.
-    // All values are populated via ConfigBridge::syncFromRuntime(); the sidecar
-    // is only used as backing storage for the in-memory QVariant map.
     m_settings = new QSettings(m_path + ".cache", QSettings::IniFormat, this);
 
     if (!QFileInfo::exists(m_path)) {
@@ -26,7 +22,6 @@ bool ConfigManager::load(const QString& path) {
         setCaptureFps(60);
         setCircleMask(true);
 
-        // ★ 2026-09-17: setBackend 已删除(backend 恒为 TRT); maxDetections 固定 20。
         setAiModel("sunxds_0.5.6.engine");
         setConfidenceThreshold(0.10f);
         setNmsThreshold(0.50f);
@@ -47,9 +42,6 @@ bool ConfigManager::load(const QString& path) {
 }
 
 bool ConfigManager::save() {
-    // Persistence is handled exclusively by Config::saveConfig() (SimpleIni)
-    // to avoid section/key conflicts with QSettings INI format.
-    // ConfigManager acts as an in-memory cache only.
     return true;
 }
 
@@ -60,12 +52,6 @@ QString ConfigManager::configPath() const {
 void ConfigManager::notifyRuntimeReloaded() {
     emit configLoaded();
 }
-
-// --- Capture: 只有「采集卡」一种方式 ---
-//
-// 旧的 capture_method / udp_* / tcp_* / eth_* / opencv_capture_* / capture_crop /
-// capture_mf_gpu 键已全部废弃。这里不再提供它们的读写接口, 老 QSettings 里的
-// 残留值不会被读取, 也不会再被写回。
 
 QString ConfigManager::captureDevice() const {
     return m_settings->value("Capture/capture_device", "").toString();
@@ -139,8 +125,6 @@ void ConfigManager::setCircleMask(bool v) {
     emit configChanged();
 }
 
-// --- Hardware ---
-
 QString ConfigManager::inputMethod() const {
     const QString value = m_settings->value("Hardware/input_method", "MAKCU").toString();
     return value == QStringLiteral("MAKCUNEW") ? value : QStringLiteral("MAKCU");
@@ -187,6 +171,25 @@ void ConfigManager::setMakcuNewPort(const QString& v) {
     emit configChanged();
 }
 
+// 第二台(键盘)。端口默认空 = 未配置, 此时键盘动作回落到第一台。
+int ConfigManager::makcuNewBaudrateKbd() const {
+    return m_settings->value("Hardware/makcu_new_baudrate_kbd", 6000000).toInt();
+}
+
+void ConfigManager::setMakcuNewBaudrateKbd(int v) {
+    m_settings->setValue("Hardware/makcu_new_baudrate_kbd", v);
+    emit configChanged();
+}
+
+QString ConfigManager::makcuNewPortKbd() const {
+    return m_settings->value("Hardware/makcu_new_port_kbd", "").toString();
+}
+
+void ConfigManager::setMakcuNewPortKbd(const QString& v) {
+    m_settings->setValue("Hardware/makcu_new_port_kbd", v);
+    emit configChanged();
+}
+
 QString ConfigManager::kmboxNetIp() const {
     return m_settings->value("Hardware/kmbox_net_ip", "192.168.2.88").toString();
 }
@@ -214,12 +217,6 @@ void ConfigManager::setKmboxNetUuid(const QString& v) {
     emit configChanged();
 }
 
-// --- AI ---
-
-// ★ 2026-09-17: DirectML 后端已整条移除, TensorRT 是唯一后端。
-//   backend() 现在恒返回 "TRT"; setBackend / dmlDeviceId / setDmlDeviceId 已删除
-//   (原来是"可选后端"这套 UI 的读写口)。老 QSettings 里的 AI/backend 与
-//   AI/dml_device_id 键不会再被读取, 也不会再被写回。
 QString ConfigManager::backend() const {
     return QStringLiteral("TRT");
 }
@@ -251,8 +248,6 @@ void ConfigManager::setNmsThreshold(float v) {
     emit configChanged();
 }
 
-// ★ 2026-09-17: 固定为 kFixedMaxDetections (=20), 不再从 QSettings 读用户值。
-//   setter 保留只为兼容既有调用点(它现在只写常量), 不再有任何 UI 绑定到它。
 int ConfigManager::maxDetections() const {
     return kFixedMaxDetections;
 }
@@ -288,9 +283,6 @@ void ConfigManager::setSmallTargetAreaFrac(float v) {
     m_settings->setValue("AI/small_target_area_frac", static_cast<double>(v));
     emit configChanged();
 }
-
-
-// --- Debug ---
 
 bool ConfigManager::showFps() const {
     return m_settings->value("Debug/show_fps", false).toBool();
@@ -364,8 +356,6 @@ void ConfigManager::setReplayPlaybackSpeed(float v) {
     emit configChanged();
 }
 
-// --- Macro ---
-
 bool ConfigManager::macroEnabled() const {
     return m_settings->value("Macro/macro_enabled", false).toBool();
 }
@@ -392,8 +382,6 @@ void ConfigManager::setMacroPrimaryButtonEvents(bool v) {
     m_settings->setValue("Macro/macro_primary_button_events", v);
     emit configChanged();
 }
-
-// --- Crosshair ---
 
 int ConfigManager::crosshairRectW() const {
     return m_settings->value("Crosshair/crosshair_rect_w", 40).toInt();
@@ -431,9 +419,6 @@ void ConfigManager::setCrosshairCloseRadius(int v) {
     emit configChanged();
 }
 
-// 【2026-09-13 删除】crosshairSmooth() / setCrosshairSmooth() —— 准星平滑已移除,
-// 平滑统一由 PID 之前的 anchor_filter 负责。见 Apotheosis/config/config.h。
-
 QList<ConfigManager::ColorProfile> ConfigManager::crosshairColors() const {
     QList<ColorProfile> result;
     int i = 0;
@@ -464,14 +449,12 @@ QList<ConfigManager::ColorProfile> ConfigManager::crosshairColors() const {
 }
 
 void ConfigManager::setCrosshairColors(const QList<ColorProfile>& colors) {
-    // Remove old entries
     int old = 0;
     while (m_settings->contains(
         QStringLiteral("crosshair_color.%1/name").arg(old))) {
         m_settings->remove(QStringLiteral("crosshair_color.%1").arg(old));
         ++old;
     }
-    // Write new entries
     for (int i = 0; i < colors.size(); ++i) {
         auto prefix = QStringLiteral("crosshair_color.%1/").arg(i);
         const auto& c = colors[i];
@@ -487,6 +470,55 @@ void ConfigManager::setCrosshairColors(const QList<ColorProfile>& colors) {
     emit configChanged();
 }
 
+double ConfigManager::targetHysteresisRatio() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_hysteresis_ratio", 1.3).toDouble() : 1.3;
+}
+void ConfigManager::setTargetHysteresisRatio(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_hysteresis_ratio", v);
+    emit configChanged();
+}
+double ConfigManager::targetMaxDistancePx() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_max_distance_px", 0.0).toDouble() : 0.0;
+}
+void ConfigManager::setTargetMaxDistancePx(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_max_distance_px", v);
+    emit configChanged();
+}
+double ConfigManager::targetMatchCenterRatio() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_match_center_ratio", 0.5).toDouble() : 0.5;
+}
+void ConfigManager::setTargetMatchCenterRatio(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_match_center_ratio", v);
+    emit configChanged();
+}
+double ConfigManager::targetAreaRatioTol() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_area_ratio_tol", 2.0).toDouble() : 2.0;
+}
+void ConfigManager::setTargetAreaRatioTol(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_area_ratio_tol", v);
+    emit configChanged();
+}
+double ConfigManager::targetKSnapMult() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_k_snap_mult", 1.15).toDouble() : 1.15;
+}
+void ConfigManager::setTargetKSnapMult(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_k_snap_mult", v);
+    emit configChanged();
+}
+double ConfigManager::targetMinAspect() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_min_aspect", 0.2).toDouble() : 0.2;
+}
+void ConfigManager::setTargetMinAspect(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_min_aspect", v);
+    emit configChanged();
+}
+double ConfigManager::targetMaxAspect() const {
+    return m_settings ? m_settings->value("target_stabilizer/target_max_aspect", 5.0).toDouble() : 5.0;
+}
+void ConfigManager::setTargetMaxAspect(double v) {
+    if (m_settings) m_settings->setValue("target_stabilizer/target_max_aspect", v);
+    emit configChanged();
+}
 
 QString ConfigManager::activeHotkeyGroup() const {
     return m_settings ? m_settings->value("active_hotkey_group",
@@ -496,8 +528,6 @@ void ConfigManager::setActiveHotkeyGroup(const QString& v) {
     if (m_settings) m_settings->setValue("active_hotkey_group", v);
     emit configChanged();
 }
-
-// --- Hotkeys ---
 
 int ConfigManager::hotkeyCount() const {
     if (!m_settings)
@@ -518,17 +548,10 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "keys", data.keys.join(","));
     m_settings->setValue(prefix + "fovX", data.fovX);
     m_settings->setValue(prefix + "fovY", data.fovY);
-    // ★ 2026-09-17: 这里原来还写 trigger_* / aim_path_* 共 18 个键。
-    //   它们对应的 HotkeyProfile 字段已随瞄准控制链删除, 于是这些 QSettings 键
-    //   退化成【写完就没人读、且没有任何运行时消费者】的死数据(在
-    //   ConfigManager::HotkeyData 里绕一圈又回到 QSettings)。已整段删除。
     m_settings->setValue(prefix + "aim_classes",         data.aimClasses);
     m_settings->setValue(prefix + "crosshair_detect_enabled", data.crosshairDetectEnabled);
     m_settings->setValue(prefix + "dynamic_fov_enabled", data.dynamicFovEnabled);
     m_settings->setValue(prefix + "dynamic_fov_strength", static_cast<double>(data.dynamicFovStrength));
-    // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────────
-    // ★ 23 个键逐个写出。它们与 HotkeyProfile 的 ctl_* 一一对应,
-    //   由 config_bridge 双向同步 —— 漏一个的表现是"界面能改、重启就没了"。
     m_settings->setValue(prefix + "ctl_enabled", data.ctlEnabled);
     m_settings->setValue(prefix + "ctl_kp_x", static_cast<double>(data.ctlKpX));
     m_settings->setValue(prefix + "ctl_kp_y", static_cast<double>(data.ctlKpY));
@@ -541,6 +564,12 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "ctl_i_max", static_cast<double>(data.ctlIMax));
     m_settings->setValue(prefix + "ctl_max_output_counts", data.ctlMaxOutputCounts);
     m_settings->setValue(prefix + "ctl_p_full_scale_px", static_cast<double>(data.ctlPFullScalePx));
+    m_settings->setValue(prefix + "ctl_k_px_per_count", static_cast<double>(data.ctlKPxPerCount));
+    m_settings->setValue(prefix + "ctl_inflight_beta", static_cast<double>(data.ctlInflightBeta));
+    m_settings->setValue(prefix + "ctl_inflight_dead_time_ms", static_cast<double>(data.ctlInflightDeadTimeMs));
+    m_settings->setValue(prefix + "ctl_predict_lead_ms", static_cast<double>(data.ctlPredictLeadMs));
+    m_settings->setValue(prefix + "ctl_predict_max_velocity_px_s", static_cast<double>(data.ctlPredictMaxVelocityPxPerSec));
+    m_settings->setValue(prefix + "ctl_predict_max_lead_ratio", static_cast<double>(data.ctlPredictMaxLeadRatio));
     m_settings->setValue(prefix + "ctl_y_offset", static_cast<double>(data.ctlYOffset));
     m_settings->setValue(prefix + "ctl_y_offset_max", static_cast<double>(data.ctlYOffsetMax));
     m_settings->setValue(prefix + "ctl_hysteresis_ratio", static_cast<double>(data.ctlHysteresisRatio));
@@ -562,15 +591,10 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.keys = m_settings->value(prefix + "keys", "RightMouseButton").toString().split(",", Qt::SkipEmptyParts);
     data.fovX = m_settings->value(prefix + "fovX", 106).toInt();
     data.fovY = m_settings->value(prefix + "fovY", 74).toInt();
-    // ★ 2026-09-17: 这里原来还读 trigger_* / aim_path_* 共 18 个键(与上面的写出对称)。
-    //   对应的 HotkeyProfile 字段已随瞄准控制链删除, 这些成员已从 HotkeyData 移除。
     data.aimClasses      = m_settings->value(prefix + "aim_classes", QString()).toString();
     data.crosshairDetectEnabled = m_settings->value(prefix + "crosshair_detect_enabled", false).toBool();
     data.dynamicFovEnabled = m_settings->value(prefix + "dynamic_fov_enabled", false).toBool();
     data.dynamicFovStrength = m_settings->value(prefix + "dynamic_fov_strength", 0.60).toFloat();
-    // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────────
-    // ★ 与上面的写出【严格对称】。默认值刻意与 HotkeyProfile 的成员初值一致,
-    //   这样老 QSettings 里没有这些键时行为不变(等价历史单套行为)。
     data.ctlEnabled = m_settings->value(prefix + "ctl_enabled", false).toBool();
     data.ctlKpX = m_settings->value(prefix + "ctl_kp_x", 35.0).toDouble();
     data.ctlKpY = m_settings->value(prefix + "ctl_kp_y", 35.0).toDouble();
@@ -583,6 +607,14 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.ctlIMax = m_settings->value(prefix + "ctl_i_max", 0.0).toDouble();
     data.ctlMaxOutputCounts = m_settings->value(prefix + "ctl_max_output_counts", 200).toInt();
     data.ctlPFullScalePx = m_settings->value(prefix + "ctl_p_full_scale_px", 0.0).toDouble();
+    data.ctlKPxPerCount = m_settings->value(prefix + "ctl_k_px_per_count", 0.0).toDouble();
+    data.ctlInflightBeta = m_settings->value(prefix + "ctl_inflight_beta", 0.8).toDouble();
+    data.ctlInflightDeadTimeMs = m_settings->value(prefix + "ctl_inflight_dead_time_ms", 46.0).toDouble();
+    data.ctlPredictLeadMs = m_settings->value(prefix + "ctl_predict_lead_ms", 0.0).toDouble();
+    data.ctlPredictMaxVelocityPxPerSec =
+        m_settings->value(prefix + "ctl_predict_max_velocity_px_s", 0.0).toDouble();
+    data.ctlPredictMaxLeadRatio =
+        m_settings->value(prefix + "ctl_predict_max_lead_ratio", 0.0).toDouble();
     data.ctlYOffset = m_settings->value(prefix + "ctl_y_offset", 0.5).toDouble();
     data.ctlYOffsetMax = m_settings->value(prefix + "ctl_y_offset_max", 0.5).toDouble();
     data.ctlHysteresisRatio = m_settings->value(prefix + "ctl_hysteresis_ratio", 1.3).toDouble();

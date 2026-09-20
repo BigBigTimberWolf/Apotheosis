@@ -54,7 +54,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
         false, m_enabled));
     layout->addWidget(topCard);
 
-    // ── 阈值卡 ──
     auto* thCard = new CardWidget(
         QStringLiteral("\xe7\xbd\xae\xe4\xbf\xa1\xe5\xba\xa6\xe9\x97\xa8\xe6\xa7\x9b"),
         QStringLiteral("gauge"));
@@ -88,12 +87,10 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
         "\xe6\xb5\x8b\xe7\xbb\x93\xe6\x9e\x9c\xe8\xa7\xa6\xe5\x8f\x91\xe9\x87\x87"
         "\xe9\x9b\x86 (\xe9\x9a\xbe\xe4\xbe\x8b\xe6\xa0\xb7\xe6\x9c\xac)\xe3\x80\x82"));
 
-    // 任意检测触发(忽略高/低阈值):适合新场景数据启动阶段。
     thcl->addWidget(FormKit::toggleRow(
         QStringLiteral("\xe4\xbb\xbb\xe6\x84\x8f\xe6\xa3\x80\xe6\xb5\x8b\xe8\xa7\xa6\xe5\x8f\x91"
                        " (\xe5\xbf\xbd\xe7\x95\xa5\xe9\x98\x88\xe5\x80\xbc)"),
         false, m_anyDetection));
-
 
     QSlider* cdSl = nullptr;
     thcl->addWidget(FormKit::sliderRow(
@@ -103,7 +100,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
 
     layout->addWidget(thCard);
 
-    // ── 强制采集卡 ──
     auto* fkCard = new CardWidget(
         QStringLiteral("\xe5\xbc\xba\xe5\x88\xb6\xe9\x87\x87\xe9\x9b\x86"),
         QStringLiteral("hand"));
@@ -128,7 +124,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
 
     layout->addWidget(fkCard);
 
-    // ── 输出卡 ──
     auto* outCard = new CardWidget(
         QStringLiteral("\xe8\xbe\x93\xe5\x87\xba"),
         QStringLiteral("folder"));
@@ -149,7 +144,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
 
     layout->addWidget(outCard);
 
-    // ── 状态卡 ──
     auto* stCard = new CardWidget(
         QStringLiteral("\xe7\x8a\xb6\xe6\x80\x81"),
         QStringLiteral("activity"));
@@ -170,7 +164,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
     layout->addWidget(stCard);
     layout->addStretch();
 
-    // ── Wiring ──
     auto wire_save = [this](auto* w, auto sig) {
         connect(w, sig, this, &AutoCapturePage::saveToConfig);
     };
@@ -196,8 +189,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
 
     onLoadConfig();
 
-    // 切换全局配置方案后按新方案重读 (onLoadConfig 内部有 m_loading 守卫,
-    // 还原过程中不会回写)。
     connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
             this, &AutoCapturePage::onLoadConfig);
 }

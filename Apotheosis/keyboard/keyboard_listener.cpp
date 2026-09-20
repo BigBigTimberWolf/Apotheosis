@@ -26,21 +26,19 @@ extern std::atomic<bool> aiming;
 namespace
 {
 
-// Only the user-configured aim hotkey is honored at runtime. All other
-// hardcoded hotkeys (F2 exit, HOME overlay toggle, etc.) have been removed.
 bool win32_key_pressed(int vk_code)
 {
     return (GetAsyncKeyState(vk_code) & 0x8000) != 0;
 }
 
-} // namespace
+}
 
 bool isAnyKeyPressed(const std::vector<std::string>& keys)
 {
     const auto cfg = runtime_config::read();
     std::lock_guard<std::mutex> deviceLock(inputDeviceMutex);
     if (keys.empty())
-        return true; // 空键或“无 (始终活跃)”默认处于激活态
+        return true;
 
     for (const auto& key_name : keys)
     {
@@ -56,8 +54,6 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
                 if (key_name == "LeftMouseButton")        pressed = makcuSerial->shooting_active;
                 else if (key_name == "RightMouseButton")  pressed = makcuSerial->zooming_active;
                 else if (key_name == "MiddleMouseButton") pressed = makcuSerial->middle_active;
-                // Windows 命名下 X1=Mouse4=SIDE1(=前进) / X2=Mouse5=SIDE2(=后退)，
-                // 与固件 km.side1 / km.side2 一一对应。此处原先 X1/X2 是反的，已改正。
                 else if (key_name == "X1MouseButton")     pressed = makcuSerial->side1_active;
                 else if (key_name == "X2MouseButton")     pressed = makcuSerial->side2_active;
             }
@@ -66,7 +62,6 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
         {
             if (makcuNewSerial && makcuNewSerial->isOpen())
             {
-                // 与固件位定义一致: 1=L(0x01) 2=R(0x02) 3=M(0x04) 4=S1/前进(0x08) 5=S2/后退(0x10)
                 if (key_name == "LeftMouseButton")        pressed = makcuNewSerial->physicalButtonPressed(1);
                 else if (key_name == "RightMouseButton")  pressed = makcuNewSerial->physicalButtonPressed(2);
                 else if (key_name == "MiddleMouseButton") pressed = makcuNewSerial->physicalButtonPressed(3);
@@ -84,10 +79,6 @@ void keyboardListener()
 {
     while (!shouldExit)
     {
-        // Aim hotkey dispatch. Walk through configured profiles in order;
-        // the first one with any key held wins. Snapshot under configMutex
-        // so the UI can edit config.hotkeys concurrently. This is the only
-        // hotkey honored at runtime.
         int next_active = -1;
         {
             std::lock_guard<std::recursive_mutex> cfg(configMutex);
@@ -106,8 +97,6 @@ void keyboardListener()
         runtime::g_active_hotkey_index.store(next_active);
         aiming.store(next_active >= 0);
 
-        // MAKCUNEW 的 0x84 按键帧是"变化即推"的，固件侧是微秒级；
-        // 这里必须 1 ms 轮询才不会把那份实时性吃掉(原先 10 ms 是整条感知链的瓶颈)。
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }

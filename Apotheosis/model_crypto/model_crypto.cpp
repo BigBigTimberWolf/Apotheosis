@@ -245,7 +245,7 @@ bool parse_header(const std::vector<uint8_t>& encrypted,
     ciphertext_offset = off;
     return true;
 }
-} // namespace
+}
 
 void set_runtime_key(const std::vector<uint8_t>& key)
 {
@@ -541,4 +541,4 @@ bool decrypt_file(const std::string& input_path,
     return decrypt_bytes(encrypted, payload, error);
 }
 
-} // namespace oliver
+}

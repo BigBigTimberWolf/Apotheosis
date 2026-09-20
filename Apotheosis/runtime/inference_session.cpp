@@ -23,7 +23,6 @@
 #include "model_crypto/model_crypto.h"
 #include "auth/auth_state.h"
 #include "runtime/config_snapshot.h"
-// ★ 通用控制器层 (2026-09-17 第三轮重建): 会话停止时复位控制器并释放驱动通道。
 #include "runtime/aim_loop.h"
 #include "runtime/latency_probe.h"
 
@@ -108,14 +107,6 @@ void publish_model_metadata(detector::ModelMetadata md)
                       << (md.fixed_input_size ? "true" : "false") << std::endl;
         }
 
-        // 检测尺寸跟随模型: 中心裁切边长恒等于模型输入边长。
-        //
-        // 以前这是界面上一个手填的 spinbox, 现在由模型元数据决定 —— 裁切尺寸
-        // 和模型输入对不上时, 检测框与鼠标坐标会落在两个不同的空间里, 表现是
-        // 准星"指哪不打哪", 而且很难从现象反推到尺寸不匹配。
-        //
-        // 非方形模型这里取长边: 整条链路 (裁切 / 坐标换算 / 轨迹) 都按方形边长
-        // 设计, 所以取长边保证不丢内容, 同时把这件事明确说出来。
         if (md.input_width > 0 && md.input_height > 0)
         {
             if (md.input_width != md.input_height)
@@ -182,7 +173,7 @@ detector::ModelMetadata inspect_model_metadata_for_ui(const std::string& model_p
     return md;
 }
 
-} // namespace
+}
 
 bool preload_model_metadata(const std::string& model_path, bool persist_config, std::string* error)
 {
@@ -196,7 +187,6 @@ bool preload_model_metadata(const std::string& model_path, bool persist_config, 
         return false;
     }
 
-    // 单机自用：跳过 oliver 密钥/心跳检查
     detector::ModelMetadata md = inspect_model_metadata_for_ui(model_path);
     publish_model_metadata(std::move(md));
 
@@ -226,7 +216,6 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
         return false;
     }
 
-    // Reap a failed session before assigning new std::thread objects.
     stop_locked();
     if (shouldExit.load()) { last_error_ = "application is shutting down"; return false; }
     try
@@ -235,8 +224,6 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
         current_model_path_ = model_path;
         last_error_.clear();
 
-        // 单机自用：跳过 oliver 密钥/心跳检查
-        // ★ 2026-09-17: DirectML 后端整条移除, 只保留 TensorRT。
         if (backend == "TRT")
         {
             if (!is_tensorrt_available())
@@ -285,11 +272,6 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
                 g_detector->inferenceThread();
         }, &running_);
 
-        // ★ 这里原来还起一条 MouseThread(TIME_CRITICAL), 跑锁靶/瞄点/PID/扳机/下发
-        //   整条瞄准链。那条链已整条删除(2026-09-17), 会话现在只做 采集 → 推理,
-        //   检测结果由 detectionBuffer 承载, 供预览窗显示。
-
-        // 单机自用：不再启动鉴权心跳线程
         std::cout << "[Session] Started with backend=" << backend
                   << " model=" << model_path << std::endl;
         return true;
@@ -328,13 +310,6 @@ void InferenceSession::stop_locked()
 
     join_all_locked();
 
-    // ── ★★ 通用控制器层: 会话停止 ⇒ 复位控制器并释放驱动通道 ──────────────
-    // ★ 必须在 join_all_locked() 【之后】: 检测线程是控制器的调用者,
-    //   线程还在跑的时候去 reset 会与 tick() 抢状态。
-    // ★ 复位清掉积分/余量/滤波状态 —— 不清的话下次 start 会带着上次攒下的
-    //   积分与速度估计, 表现为"刚开瞄准就冲一下"。
-    // ★ 同时释放 MouseThread(join 它的 moveWorker_ 线程, 并清空未发队列),
-    //   否则"停了之后还动一下", 而且重复启停会累积线程。
     runtime::aim_loop::reset();
 
     g_detector = nullptr;
@@ -373,8 +348,6 @@ void InferenceSession::join_all_locked()
         }
         else if (t.joinable())
         {
-            // Session operations belong to the coordinator, never its workers.
-            // Detaching here would let teardown free state still in use.
             throw std::logic_error("session teardown cannot run on a pipeline worker");
         }
     };
@@ -384,6 +357,4 @@ void InferenceSession::join_all_locked()
     safe_join("heartbeat", heartbeat_thread_);
 }
 
-} // namespace runtime
-
-
+}

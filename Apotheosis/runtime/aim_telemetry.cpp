@@ -10,10 +10,6 @@ std::atomic<unsigned long long> g_mouse_send_failures{0};
 namespace runtime
 {
 
-// =========================================================================
-// ReplayBuffer
-// =========================================================================
-
 ReplayBuffer& ReplayBuffer::instance()
 {
     static ReplayBuffer b;
@@ -48,7 +44,6 @@ void ReplayBuffer::push(const ReplayFrame& frame)
 
     frames_.push_back(frame);
 
-    // Trim by age. We don't bound by count because frame rate varies.
     const auto cutoff = frame.ts - std::chrono::seconds(retention_seconds_);
     while (!frames_.empty() && frames_.front().ts < cutoff)
         frames_.pop_front();
@@ -72,4 +67,4 @@ size_t ReplayBuffer::size() const
     return frames_.size();
 }
 
-} // namespace runtime
+}

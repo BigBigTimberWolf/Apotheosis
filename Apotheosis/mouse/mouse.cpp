@@ -21,21 +21,17 @@ MouseRuntimeParams sanitize(MouseRuntimeParams p)
     return p;
 }
 
-} // namespace
-
-// ★ 瞄准遥测全局量已随控制链删除(2026-09-17)。
-//   原来这里有 g_pid_last_err_px / g_pid_mode_track / g_dynamic_fov_radius_x/y ——
-//   它们的唯一生产者是 mouse_thread_loop.cpp, 该文件已删除, 于是它们退化成
-//   "永远为 0 的死读"(预览窗和 DebugPage 之前还在读)。死读比没有更糟: 界面上会
-//   显示一个永远不动、看起来像"FOV 收缩没生效"的数字。所以连同读取点一起删掉。
+}
 
 MouseThread::MouseThread(
     const MouseRuntimeParams& params,
     MakcuConnection* makcuConnection,
     MakcuNewConnection* makcuNewConnection,
-    KmboxNetConnection* kmboxNetConnection)
+    KmboxNetConnection* kmboxNetConnection,
+    MakcuNewConnection* makcuNewConnectionKbd)
     : makcu_(makcuConnection),
       makcu_new_(makcuNewConnection),
+      makcu_new_kbd_(makcuNewConnectionKbd),
       kmbox_net_(kmboxNetConnection)
 {
     updateParams(params);
@@ -67,9 +63,6 @@ void MouseThread::sendLeftUpToDriver()
     if (driver_) driver_->leftUp();
 }
 
-// 右键 = 通道 2 (见 Makcu.cpp 的 mouseButtonFromChannel: 1=左 2=右 3=中 4/5=侧键)。
-// 自动开镜靠它; 与左键共用同一把递归锁, 保证"开镜指令"和"开火指令"的先后顺序
-// 在串口写出这一层不会被换序。
 void MouseThread::sendRightDownToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
@@ -93,7 +86,6 @@ void MouseThread::queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns)
     if (dx == 0 && dy == 0)
         return;
 
-    // CVM sanitizer：任一轴越出 inclusive [-30000,30000] 时丢弃整条移动。
     const auto valid_component = [](int value) {
         return static_cast<std::uint32_t>(value) + 30000u <= 60000u;
     };
@@ -101,7 +93,6 @@ void MouseThread::queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns)
         return;
 
     std::lock_guard<std::mutex> lg(queueMtx_);
-    // latest-only：新检测帧直接覆盖尚未消费的旧移动，并提升 generation。
     moveSlot_.replace(dx, dy, std::chrono::steady_clock::now(), capture_ns, aim_ns);
     queueCv_.notify_one();
 }
@@ -124,8 +115,6 @@ void MouseThread::moveWorkerLoop()
                 continue;
             ul.unlock();
 
-            // 每个 movement pair 发送前检查 generation。新帧到达后，
-            // 已取出的旧批次立即作废，不再沿旧方向继续发送。
             if (!moveSlot_.isCurrent(move.generation))
                 continue;
 
@@ -157,16 +146,8 @@ void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns
     if (dx == 0 && dy == 0) return;
     {
         std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-        // ★ 哪些后端走【直发】、哪些走队列, 以前是写死 `if (makcu_new_)`,
-        //   等价于"按类型分叉"。现在这个决定收进 IDriver::directSend()
-        //   (见 mouse_driver.h), 加后端时不用再回来改这里。
         if (driver_ && driver_->directSend())
         {
-            // 直发后端不走 moveWorkerLoop。于是那条路上维护的
-            // lastLatencyUs_ / appliedD* / failedMoves_ 永远不会被更新 ——
-            // 直接后果是延迟探针的 aim2mv(T3→T4) 与 E2E 恒为 0.00, 日志看起来
-            // 像"写出零延迟", 实际上是没测。这里就地把真实写出耗时与位移量补上,
-            // 让遥测对这条路径同样成立(语义与队列路径一致: 决策→写出完成)。
             const auto t0 = std::chrono::steady_clock::now();
             const bool ok = driver_->move(dx, dy);
             const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -212,10 +193,15 @@ void MouseThread::releaseRightButton()
 bool MouseThread::tapKey(int hid_key, int hold_ms)
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    // 按**能力**判断, 不按类型: 没有 kCapKeyboard 的后端(MAKCU 官方库)
-    // 直接失败, 调用方据此把"自动急停"当成不可用(不会静默什么都不做)。
     if (!driver_ || !driver_->capabilities()) return false;
     return driver_->tapKey(hid_key, hold_ms);
+}
+
+bool MouseThread::maskRealKeyboard(int duration_ms)
+{
+    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+    if (!driver_) return false;
+    return driver_->maskRealKeyboard(duration_ms);
 }
 
 bool MouseThread::supports(uint32_t capability) const
@@ -242,7 +228,6 @@ std::string MouseThread::driverStatus() const
         return u8"鼠标后端 (未选择) 不可用: 输入方式没有对应到任何已支持的后端";
     if (!driver_->isOpen())
         return mouse_driver::describeStatus(driver_->name(), false, driver_->lastError());
-    // 能力位也一起报 —— 用户据此知道"为什么自动急停在这个档位没反应"。
     return mouse_driver::describeStatus(
         driver_->name(), true,
         std::string(u8"能力: ") + mouse_driver::describeCapabilities(driver_->capabilities()));
@@ -261,7 +246,6 @@ bool MouseThread::sendMovementToDriver(int dx, int dy)
 void MouseThread::clearQueuedMoves()
 {
     std::lock_guard<std::mutex> lock(queueMtx_);
-    // generation 同步提升，可抢占 worker 已取出但尚未发送的旧移动。
     moveSlot_.clear();
     std::lock_guard<std::recursive_mutex> inputLock(input_method_mutex);
     if (driver_) driver_->cancelMove();
@@ -282,16 +266,8 @@ MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
     return out;
 }
 
-// 由三个连接裸指针重新解析出当前生效的统一驱动。
-//
-// ★ 优先级顺序 = "哪个被接线了就用哪个", 与旧代码 `if (makcu_) ... else if
-//   (makcu_new_)` 的优先级一致; 新增的 KMBOXNET 放最后, 所以它**不会**改变
-//   既有两档的行为(老配置里 kmbox_net_ 恒为 nullptr)。
-//
-// ★ 调用方必须持 input_method_mutex (或者在单线程的构造阶段)。
 void MouseThread::refreshDriver()
 {
-    // 先把所有权放开, 再按当前指针重建 —— 顺序反了会 delete 掉正在用的对象。
     driver_owned_.reset();
     driver_ = nullptr;
 
@@ -302,7 +278,10 @@ void MouseThread::refreshDriver()
     }
     else if (makcu_new_)
     {
-        driver_owned_ = std::make_unique<mouse_driver::WrappedMakcuNewDriver>(makcu_new_);
+        // 双硬件: 位移/按键/滚轮走 makcu_new_(鼠标那台), 键盘动作走 makcu_new_kbd_。
+        // makcu_new_kbd_ 为 nullptr 时驱动内部回落, 行为与单硬件版本一致。
+        driver_owned_ = std::make_unique<mouse_driver::WrappedMakcuNewDriver>(
+            makcu_new_, makcu_new_kbd_);
         driver_ = driver_owned_.get();
     }
     else if (kmbox_net_)

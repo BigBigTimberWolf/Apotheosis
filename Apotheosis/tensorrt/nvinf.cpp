@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
@@ -127,19 +127,6 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
     }
     const char* inName = inputTensor->getName();
 
-    // FP16 IO contract: pin every network input AND output tensor to kHALF.
-    // The CUDA preprocess kernel writes __half directly into the input
-    // binding, and the GPU decode kernel reads outputs through a __half
-    // template specialization — without these pins TRT is free to keep
-    // input/output at FP32 (which is what was happening before: an engine
-    // built with kFP16 still shipped an FP32 output tensor, so the kernel
-    // dispatched its float branch and read the wrong stride).
-    //
-    // We deliberately do NOT force per-layer precision: shape tensors must
-    // be integer, Constant layers carry FP32 weights and refuse a kHALF
-    // pin, and reductions intentionally stay at higher precision. kFP16
-    // flag below already lets TRT pick FP16 for all the heavy compute; we
-    // only care that the IO surface matches our kernels.
     for (int i = 0; i < network->getNbInputs(); ++i)
     {
         nvinfer1::ITensor* t = network->getInput(i);
@@ -188,21 +175,10 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
 
     cfg->addOptimizationProfile(profile);
 
-
-    // FP16 build policy. kFP16 lets TRT pick FP16 implementations for every
-    // op that supports it. Combined with the input+output kHALF pins above
-    // this gives us a fully FP16 IO surface (which the preprocess and GPU
-    // decode kernels assume), while leaving shape/Constant ops to their
-    // native dtype so the build doesn't fail. Disable kTF32 too so any
-    // residual FP32 reductions don't slide into TF32 silently.
     std::cout << "[TensorRT] FP16 build: kFP16 (IO pinned to kHALF, kTF32 disabled)" << std::endl;
     cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
     cfg->clearFlag(nvinfer1::BuilderFlag::kTF32);
 
-    // Builder optimization level controls how exhaustively TRT searches kernel
-    // tactics. Default is 3; level 5 spends more build time probing tactics and
-    // usually yields a measurably faster engine — a one-time cost since the
-    // engine is cached on disk. Requires TRT 8.6+.
 #if NV_TENSORRT_MAJOR > 8 || (NV_TENSORRT_MAJOR == 8 && NV_TENSORRT_MINOR >= 6)
     cfg->setBuilderOptimizationLevel(5);
     std::cout << "[TensorRT] Builder optimization level: 5" << std::endl;
@@ -243,7 +219,7 @@ struct ScopedExportState
         gTrtExportLastUpdateMs = TrtNowMs();
     }
 };
-} // namespace
+}
 
 std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const void* data, size_t size, nvinfer1::ILogger& logger)
 {
@@ -339,4 +315,3 @@ nvinfer1::ICudaEngine* buildEngineFromOnnx(const std::string& onnxFile, nvinfer1
     }
     return buildEngineFromOnnxMemory(onnxData.data(), onnxData.size(), logger);
 }
-

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -23,13 +24,6 @@
 namespace
 {
 
-// ── 【2026-09-17 删除】曲线资产读写 (kCurveMagic / write_curve_asset /
-// read_curve_asset) ────────────────────────────────────────────────────────
-// 它们只服务于 aim_path 的自定义手绘曲线(把 32768 个采样量化成 .curve 二进制)。
-// aim_path 连同整个瞄准控制链已被删除, 这两个函数再没有调用者 —— 留着就是
-// 内部链接的未使用函数(MSVC C4505 / GCC -Wunused-function), 所以一并删除。
-// 老配置目录里的 <方案名>.curves/*.curve 文件不再被读取, 也不会被删除或重写。
-
 std::string to_bool_str(bool v)
 {
     return v ? "true" : "false";
@@ -41,7 +35,7 @@ std::string bucket_to_str(ClassBucket b)
     {
     case ClassBucket::Filter: return "filter";
     case ClassBucket::Aim:    return "aim";
-    case ClassBucket::Delete: // fall through
+    case ClassBucket::Delete:
     default:                  return "delete";
     }
 }
@@ -62,9 +56,6 @@ void apply_default_hotkey(HotkeyProfile& hk)
     hk.aim_classes.clear();
 }
 
-// Aim classes 序列化为分号分隔列表;
-// 每条 "class_id:y_min:y_max:min_conf"。旧的 2/3 段格式仍能读回，
-// 并把旧 y_offset 同时作为上下限，避免升级后锁点位置发生变化。
 std::string serialize_aim_classes(const std::vector<HotkeyAimClass>& classes)
 {
     std::ostringstream oss;
@@ -108,7 +99,6 @@ std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
             }
             else
             {
-                // 旧格式: id:y 或 id:y:min_conf。
                 c.y_offset_max = c.y_offset;
                 c.min_conf = (values.size() == 2) ? values[1] : 0.0f;
             }
@@ -119,12 +109,70 @@ std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
             c.min_conf = std::clamp(c.min_conf, 0.0f, 1.0f);
             out.push_back(c);
         }
-        catch (...) { /* skip malformed */ }
+        catch (...) {   }
     }
     return out;
 }
 
-} // namespace
+// ── 自定义手绘曲线采样点 ─────────────────────────────────────────────────
+// 格式: 逗号分隔的定点整数, 每个值 = round(y * 10000)，y ∈ [-1, 1]。
+// ★ 为什么用定点整数而不是浮点文本:
+//   32768 个点, 写成 "-0.1234" 是 8 字符/点 ≈ 256KB, 写成整数 "1234" 是 5 字符
+//   ≈ 160KB, 且没有小数点解析开销。精度 1e-4 对"手绘路径"完全够 ——
+//   曲线的 Y 是【横向偏移比例】, 1e-4 远小于一个像素在框上的比例。
+// ★ 存到 ini 时走 SimpleIni 的多行值 (见 Config::save), 不让单行超长。
+std::string serialize_custom_samples(const std::vector<float>& samples)
+{
+    std::string out;
+    out.reserve(samples.size() * 5);
+    char buf[16];
+    for (size_t i = 0; i < samples.size(); ++i)
+    {
+        if (i) out.push_back(',');
+        const int v = static_cast<int>(std::lround(
+            std::clamp(static_cast<double>(samples[i]), -1.0, 1.0) * 10000.0));
+        std::snprintf(buf, sizeof(buf), "%d", v);
+        out += buf;
+    }
+    return out;
+}
+
+std::vector<float> parse_custom_samples(const std::string& raw)
+{
+    std::vector<float> out;
+    // ★ 预留: 手绘曲线的规范长度就是 kCustomSamples, 但这里不强制 ——
+    //   读到的点数由文件决定, aim_path.h 会按 size() 插值。
+    out.reserve(4096);
+    size_t i = 0;
+    const size_t n = raw.size();
+    while (i < n)
+    {
+        // 跳过空白与分隔符 (SimpleIni 的多行值里可能有换行/空格)
+        while (i < n && (raw[i] == ',' || raw[i] == ' ' || raw[i] == '\t' ||
+                         raw[i] == '\r' || raw[i] == '\n'))
+            ++i;
+        if (i >= n) break;
+        bool neg = false;
+        if (raw[i] == '-') { neg = true; ++i; }
+        else if (raw[i] == '+') { ++i; }
+        long v = 0;
+        bool any = false;
+        while (i < n && raw[i] >= '0' && raw[i] <= '9')
+        {
+            v = v * 10 + (raw[i] - '0');
+            if (v > 1000000) v = 1000000;   // 防溢出: 超范围的值反正会被夹到 ±1
+            ++i;
+            any = true;
+        }
+        if (!any) { ++i; continue; }        // 非法字符, 跳过
+        double d = static_cast<double>(v) / 10000.0;
+        if (neg) d = -d;
+        out.push_back(static_cast<float>(std::clamp(d, -1.0, 1.0)));
+    }
+    return out;
+}
+
+}
 
 std::vector<std::string> Config::splitString(const std::string& str, char delimiter) const
 {
@@ -155,10 +203,6 @@ std::string Config::joinStrings(const std::vector<std::string>& vec, const std::
 
 void Config::writeDefaultsInPlace()
 {
-    // Most members already initialized via C++ default initializers in the
-    // header; this routine only fixes up the fields that want non-default
-    // values when a brand-new config.ini is generated.
-    // (capture_age_offset_ms 已删除 2026-09-13)
     capture_device = "";
     capture_format = "";
     capture_width = 0;
@@ -189,7 +233,6 @@ void Config::writeDefaultsInPlace()
 
     cpuCoreReserveCount = 4;
     systemMemoryReserveMB = 2048;
-
 
     screenshot_button = splitString("None");
     screenshot_delay = 500;
@@ -244,15 +287,6 @@ bool Config::loadConfig(const std::string& filename)
         return ini.GetDoubleValue(section, key, defval);
     };
 
-    // ---------- Capture ----------
-    // ---------- Capture: 只有「采集卡」一种方式 ----------
-    // 旧配置里的 capture_method / udp_* / tcp_* / eth_* / opencv_capture_* /
-    // capture_crop / capture_mf_gpu 一律不再读取; 老 config.ini 里这些键会被
-    // 静默忽略, 并在下次保存时自动消失。
-    //
-    // 这里【不做任何校验或修正】: 组合是否真被设备支持, 要等探测完才知道。
-    // 校验分两处: UI 侧(把无效项从下拉里去掉) + 采集侧(对不上直接报错)。
-    // 之所以不在这里"顺手改成合法值", 是因为那正是用户明令禁止的回退路线。
     capture_device = get_string("", "capture_device", "");
     capture_format = get_string("", "capture_format", "");
     capture_width  = static_cast<int>(get_long("", "capture_width", 0));
@@ -262,23 +296,10 @@ bool Config::loadConfig(const std::string& filename)
     if (capture_height < 0) capture_height = 0;
     if (capture_fps    < 0) capture_fps    = 0;
     capture_gpu_decode = get_bool("", "capture_gpu_decode", true);
-    // detection_resolution 只是模型输入边长的缓存值, 用户不可设。
-    // 真值在启动 / 换模型时由模型元数据写入 (publish_model_metadata),
-    // 这里先读旧值垫底, 探测不到输入形状时才用得上。
     detection_resolution = std::clamp(static_cast<int>(get_long("", "detection_resolution", 320)), 32, 2048);
 
-    // 圆形遮罩不再是用户选项 —— 中心裁切 + 圆形遮罩是本项目的固定设计,
-    // 所以直接忽略 ini 里可能残留的 false, 避免升级后遮罩被静默关掉。
     circle_mask = true;
 
-    // ---------- Hardware ----------
-    // ★ 三档由 mouse/mouse_driver.h 的工厂按名字字符串分派(形状同 AimMagic
-    //   的 FUN_140040ff0)。这里做一次白名单校验: **不认识的档位回落到 MAKCU**,
-    //   而不是原样带下去 —— 带下去的话工厂会拒绝打开、用户看到的是"鼠标不动",
-    //   而真正的原因(名字拼错了)要翻日志才知道。
-    //   注: 老配置里的 MAKCU/MAKCUNEW 取值含义没变, 所以这里只做白名单校验。
-    //   (原文这里还有一句"所以 pidf_mapping_version 不推进" —— 那个版本号已于
-    //    2026-09-17 随瞄准控制链一起删除, 不再是需要维护的东西。)
     input_method = get_string("", "input_method", "MAKCU");
     if (input_method != "MAKCU" && input_method != "MAKCUNEW" && input_method != "KMBOXNET")
         input_method = "MAKCU";
@@ -286,32 +307,24 @@ bool Config::loadConfig(const std::string& filename)
         const double value = get_double("", key, fallback);
         return std::isfinite(value) ? std::clamp(value, low, high) : fallback;
     };
-    // (capture_age_offset_ms 已删除 2026-09-13: 旧 ini 里的这个键会被忽略。)
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
-    // MAKCUNEW固件上电固定115200且不回任何二进制响应帧。
-    // 目标速率 != 115200 时由 MakcuNewConnection 发 0x42 SET_BAUD(或 DE AD 转义帧)
-    // 后自行重连; 协商失败会自动退回 115200, 因此这里默认取固件允许的上限 6000000。
     makcu_new_baudrate = std::clamp(
         static_cast<int>(get_long("", "makcu_new_baudrate", 6000000)),
         1200, 6000000);
     makcu_new_port = get_string("", "makcu_new_port", "COM0");
-    // ── KMBox Net (以太网 UDP) ──
-    // 三个值都从盒子屏幕上抄。**不做格式校验** —— 格式对不对只有连一次才知道,
-    // 而连不上的具体理由由 mouse_driver 的 lastError() 给出(带 IP/端口/UUID),
-    // 比在这里猜"IP 长得像不像"有用得多。
+    // 第二台(键盘): 默认空 = 未配置, 键盘动作回落到第一台。
+    makcu_new_baudrate_kbd = std::clamp(
+        static_cast<int>(get_long("", "makcu_new_baudrate_kbd", 6000000)),
+        1200, 6000000);
+    makcu_new_port_kbd = get_string("", "makcu_new_port_kbd", "");
     kmbox_net_ip = get_string("", "kmbox_net_ip", "192.168.2.88");
     kmbox_net_port = get_string("", "kmbox_net_port", "6234");
     kmbox_net_uuid = get_string("", "kmbox_net_uuid", "12345");
-    // ---------- AI ----------
-    // ★ 2026-09-17: backend 不再从配置读 —— DirectML 已整条移除, TensorRT 是唯一
-    //   后端。老配置里的 backend / dml_device_id 键被安全忽略 (读都不读),
-    //   下次保存时不再写出。
     backend = "TRT";
     ai_model = get_string("", "ai_model", "sunxds_0.5.6.engine");
     confidence_threshold = static_cast<float>(get_double("", "confidence_threshold", 0.15));
     nms_threshold = static_cast<float>(get_double("", "nms_threshold", 0.50));
-    // ★ 2026-09-17: max_detections 固定 20, 不再从配置读(不允许用户设置)。
     max_detections = kFixedMaxDetections;
     small_target_enabled = get_bool("", "small_target_enabled", false);
     small_target_area_frac = static_cast<float>(get_double("", "small_target_area_frac", 0.012));
@@ -330,8 +343,6 @@ bool Config::loadConfig(const std::string& filename)
     cpuCoreReserveCount = get_long("", "cpuCoreReserveCount", 4);
     systemMemoryReserveMB = get_long("", "systemMemoryReserveMB", 2048);
 
-
-    // ---------- Debug ----------
     show_window = get_bool("", "show_window", true);
     show_fps = get_bool("", "show_fps", false);
     screenshot_button = splitString(get_string("", "screenshot_button", "None"));
@@ -344,7 +355,6 @@ bool Config::loadConfig(const std::string& filename)
         static_cast<float>(get_double("", "replay_playback_speed", 0.25)),
         0.05f, 2.0f);
 
-    // ── Auto capture (data collection) ──
     auto_capture_enabled    = get_bool("",   "auto_capture_enabled",    false);
     auto_capture_use_high   = get_bool("",   "auto_capture_use_high",   true);
     auto_capture_high_conf  = std::clamp(
@@ -361,16 +371,13 @@ bool Config::loadConfig(const std::string& filename)
                                          "screenshots/auto");
     auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
 
-    // ---------- Crosshair color detector (palette + rect + area) ----------
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
     crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
     crosshair_min_pixel_count  = std::clamp(get_long("", "crosshair_min_pixel_count", 4), 1, 10000);
     crosshair_close_radius     = std::clamp(get_long("", "crosshair_close_radius",    1), 0, 7);
-    // (crosshair_smooth 已删除 2026-09-13: 旧 ini 里的这个键会被忽略。)
 
     crosshair_colors.clear();
     {
-        // Each [crosshair_color.N] section = one HSV band in the palette.
         CSimpleIniA::TNamesDepend sections;
         ini.GetAllSections(sections);
         std::vector<std::pair<int, std::string>> cc_sections;
@@ -402,8 +409,6 @@ bool Config::loadConfig(const std::string& filename)
         }
         if (crosshair_colors.empty())
         {
-            // Seed with the red double-band so upgrading users don't see an
-            // empty palette the first time.
             CrosshairColorProfileConfig low;
             low.name = "Red-Low";  low.h_low = 0;   low.h_high = 10;
             CrosshairColorProfileConfig hi;
@@ -413,13 +418,10 @@ bool Config::loadConfig(const std::string& filename)
         }
     }
 
-
-    // ---------- Macro (Lua / G HUB-compatible) ----------
     macro_enabled = get_bool("", "macro_enabled", false);
     macro_script_path = get_string("", "macro_script_path", "");
     macro_primary_button_events = get_bool("", "macro_primary_button_events", false);
 
-    // ---------- Class filters ----------
     class_filters.clear();
     {
         CSimpleIniA::TNamesDepend keys;
@@ -446,7 +448,22 @@ bool Config::loadConfig(const std::string& filename)
             });
     }
 
-    // ---------- Hotkeys ----------
+    // 全局选靶与稳定器
+    target_hysteresis_ratio   = get_double("target_stabilizer", "target_hysteresis_ratio",   target_hysteresis_ratio);
+    target_max_distance_px    = get_double("target_stabilizer", "target_max_distance_px",    target_max_distance_px);
+    target_match_center_ratio = get_double("target_stabilizer", "target_match_center_ratio", target_match_center_ratio);
+    target_area_ratio_tol     = get_double("target_stabilizer", "target_area_ratio_tol",     target_area_ratio_tol);
+    target_k_snap_mult        = get_double("target_stabilizer", "target_k_snap_mult",        target_k_snap_mult);
+    target_min_aspect         = get_double("target_stabilizer", "target_min_aspect",         target_min_aspect);
+    target_max_aspect         = get_double("target_stabilizer", "target_max_aspect",         target_max_aspect);
+    target_hysteresis_ratio   = std::clamp(target_hysteresis_ratio, 1.0, 10.0);
+    target_max_distance_px    = std::max(0.0, target_max_distance_px);
+    target_match_center_ratio = std::clamp(target_match_center_ratio, 1e-3, 10.0);
+    target_area_ratio_tol     = std::clamp(target_area_ratio_tol, 1.0, 100.0);
+    target_k_snap_mult        = std::clamp(target_k_snap_mult, 1e-3, 100.0);
+    target_min_aspect         = std::clamp(target_min_aspect, 1e-3, 100.0);
+    target_max_aspect         = std::clamp(target_max_aspect, 1e-3, 100.0);
+
     hotkeys.clear();
     {
         CSimpleIniA::TNamesDepend sections;
@@ -469,7 +486,7 @@ bool Config::loadConfig(const std::string& filename)
         for (const auto& entry : hk_sections)
         {
             const char* sec = entry.second.c_str();
-            HotkeyProfile hk; // defaults come from the struct initializer
+            HotkeyProfile hk;
             hk.name = get_string(sec, "name", hk.name);
             hk.group = get_string(sec, "group", hk.group);
             if (hk.group.empty())
@@ -479,31 +496,9 @@ bool Config::loadConfig(const std::string& filename)
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.fovY = get_long(sec, "fovY", hk.fovY);
 
-            // ── 【2026-09-17 整条删除】瞄准控制链的槽位与迁移机制 ─────────────
-            // 整个瞄准控制链(aim_pid / boss_aim / aim_tracker / aim_scale / aim_path /
-            // anchor_filter / auto_stop / trigger_scope / autotune_*)连同
-            // runtime/mouse_thread_loop.cpp 一起被删除, 程序现在只做【采集 → 推理】。
-            //
-            // 所以下面这些键【读都不读】了(不报错), 写回时也不再出现:
-            //   pidf_mapping_version / pidf_kp_* / pidf_ki_* / pidf_kd_* /
-            //   pidf_psat_* (含更老的 pidf_deadzone_*) / pidf_limit_* /
-            //   pidf_predict_* / pidf_inflight_* / esync_* / aim_scale_* /
-            //   aim_path_* / trigger_* / aim_px_per_count_* / pidf_kf_* / pidf_lr_*
-            //
-            // ★ `pidf_mapping_version` 那套迁移机制【一并删除】: 它的用途是"槽位语义
-            //   变了就把老配置里的槽位重置掉", 而现在那些槽位本身已经不存在 ——
-            //   没有东西可以迁移, 版本号也不再有任何读者。留着它只会让人以为
-            //   "老配置会被正确迁移", 而实际上根本没有槽位需要迁移。
-            // ★ 这【不是】"把迁移逻辑删掉、让老配置被误读": 老配置里那些键的消费者
-            //   (控制器)已经不存在了, 读出来也无处可去。用户升级后那些键被静默丢弃
-            //   才是唯一正确的行为 —— 它们描述的是一套已经不在的程序。
-
-            // 目标选择 — 优先级列表
             {
                 const std::string aim_raw = get_string(sec, "aim_classes", "");
                 hk.aim_classes = parse_aim_classes(aim_raw);
-                // 从旧三槽 target_class_N/y_top_N/y_bot_N 平滑迁移。
-                // 旧值是“距框顶比例”，新 UI 是 1=框顶/0=框底，因此反转。
                 if (aim_raw.empty())
                 {
                     for (int slot = 1; slot <= 3; ++slot)
@@ -532,7 +527,6 @@ bool Config::loadConfig(const std::string& filename)
 
             hk.crosshair_detect_enabled  = get_bool(sec, "crosshair_detect_enabled", false);
 
-            // 动态 FOV:优先读 strength;否则从旧 margin_frac 反推算。
             {
                 hk.dynamic_fov_enabled = get_bool(sec, "dynamic_fov_enabled", hk.dynamic_fov_enabled);
                 const float legacy_margin = static_cast<float>(
@@ -542,17 +536,6 @@ bool Config::loadConfig(const std::string& filename)
                     get_double(sec, "dynamic_fov_strength", legacy_strength));
             }
 
-            // ★ 瞄准轨迹曲线 (aim_path_*: 直线/贝塞尔/手绘/WindMouse) 已于
-            //   2026-09-17 随 mouse/aim_path.h 一起整条删除 —— 没有消费者了。
-            //   老配置里的这些键(含 aim_path_custom_file / aim_path_custom_samples /
-            //   aim_path_neural_*)读都不读, 写回时也不再出现。
-            //   注: 以前这里会在加载边界把自定义曲线升采样到 kAimPathSampleCount,
-            //   那个常数也随字段一起删掉了。
-
-            // ── ★★ 通用控制器层 (2026-09-17 第三轮重建) ───────────────────
-            
-            // ★ 默认值取自 HotkeyProfile 的成员初值(等价历史单套行为),
-            //   所以老配置里没有这些键时行为不变。
             hk.ctl_kp_x = get_double(sec, "ctl_kp_x", hk.ctl_kp_x);
             hk.ctl_kp_y = get_double(sec, "ctl_kp_y", hk.ctl_kp_y);
             hk.ctl_ki_x = get_double(sec, "ctl_ki_x", hk.ctl_ki_x);
@@ -565,10 +548,18 @@ bool Config::loadConfig(const std::string& filename)
             hk.ctl_max_output_counts =
                 static_cast<int>(get_double(sec, "ctl_max_output_counts", hk.ctl_max_output_counts));
             hk.ctl_p_full_scale_px = get_double(sec, "ctl_p_full_scale_px", hk.ctl_p_full_scale_px);
+            hk.ctl_k_px_per_count = get_double(sec, "ctl_k_px_per_count", hk.ctl_k_px_per_count);
+            hk.ctl_inflight_beta  = get_double(sec, "ctl_inflight_beta",  hk.ctl_inflight_beta);
+            hk.ctl_inflight_dead_time_ms = get_double(sec, "ctl_inflight_dead_time_ms", hk.ctl_inflight_dead_time_ms);
+            hk.ctl_predict_lead_ms =
+                get_double(sec, "ctl_predict_lead_ms", hk.ctl_predict_lead_ms);
+            hk.ctl_predict_max_velocity_px_s =
+                get_double(sec, "ctl_predict_max_velocity_px_s", hk.ctl_predict_max_velocity_px_s);
+            hk.ctl_predict_max_lead_ratio =
+                get_double(sec, "ctl_predict_max_lead_ratio", hk.ctl_predict_max_lead_ratio);
             hk.ctl_y_offset     = get_double(sec, "ctl_y_offset",     hk.ctl_y_offset);
             hk.ctl_y_offset_max = get_double(sec, "ctl_y_offset_max", hk.ctl_y_offset_max);
             hk.ctl_hysteresis_ratio = get_double(sec, "ctl_hysteresis_ratio", hk.ctl_hysteresis_ratio);
-            // ★★ 总开关默认 false —— 新增的控制链在真机验证过之前不该自己动鼠标。
             hk.ctl_enabled = get_bool(sec, "ctl_enabled", false);
             hk.ctl_max_distance_px = get_double(sec, "ctl_max_distance_px", hk.ctl_max_distance_px);
             hk.ctl_match_center_ratio = get_double(sec, "ctl_match_center_ratio", hk.ctl_match_center_ratio);
@@ -579,10 +570,6 @@ bool Config::loadConfig(const std::string& filename)
             hk.ctl_random_seed =
                 static_cast<int>(get_double(sec, "ctl_random_seed", hk.ctl_random_seed));
 
-            // ── 自动扳机 (2026-09-17 恢复) ────────────────────────────────
-            // ★ 这些键在 2026-09-17 那轮被连同后端一起删掉过。老配置里若还留着
-            //   它们(旧版本写出去的), 现在【重新生效】—— 这是有意的:
-            //   用户要求把扳机加回来, 那旧值就该继续可用。
             hk.trigger_enabled = get_bool(sec, "trigger_enabled", false);
             hk.trigger_fire_delay = static_cast<int>(get_double(sec, "trigger_fire_delay", hk.trigger_fire_delay));
             hk.trigger_fire_duration = static_cast<int>(get_double(sec, "trigger_fire_duration", hk.trigger_fire_duration));
@@ -597,7 +584,6 @@ bool Config::loadConfig(const std::string& filename)
             hk.trigger_auto_stop = static_cast<int>(get_double(sec, "trigger_auto_stop", hk.trigger_auto_stop));
             hk.trigger_stop_ms = static_cast<int>(get_double(sec, "trigger_stop_ms", hk.trigger_stop_ms));
 
-            // ── 瞄准轨迹曲线 (2026-09-17 恢复) ────────────────────────────
             hk.aim_path_mode = static_cast<int>(get_double(sec, "aim_path_mode", hk.aim_path_mode));
             hk.aim_path_influence = static_cast<int>(get_double(sec, "aim_path_influence", hk.aim_path_influence));
             hk.aim_path_bezier_cx1 = static_cast<float>(get_double(sec, "aim_path_bezier_cx1", hk.aim_path_bezier_cx1));
@@ -609,6 +595,17 @@ bool Config::loadConfig(const std::string& filename)
             hk.aim_path_wind_step = static_cast<float>(get_double(sec, "aim_path_wind_step", hk.aim_path_wind_step));
             hk.aim_path_wind_distance = static_cast<float>(get_double(sec, "aim_path_wind_distance", hk.aim_path_wind_distance));
             hk.aim_path_wind_threshold = static_cast<int>(get_double(sec, "aim_path_wind_threshold", hk.aim_path_wind_threshold));
+            {
+                // 手绘曲线采样点。★ 空值/缺失 ⇒ 保持 nullptr (模式 2 会退化成直线)。
+                const std::string cs = get_string(sec, "aim_path_custom_samples", "");
+                if (!cs.empty())
+                {
+                    auto samples = parse_custom_samples(cs);
+                    if (!samples.empty())
+                        hk.aim_path_custom_samples =
+                            std::make_shared<const std::vector<float>>(std::move(samples));
+                }
+            }
 
             hotkeys.push_back(std::move(hk));
         }
@@ -623,9 +620,6 @@ bool Config::loadConfig(const std::string& filename)
 
     active_hotkey_group = get_string("", "active_hotkey_group", u8"\xe9\xbb\x98\xe8\xae\xa4");
 
-    // Guard against double-encoded UTF-8 group names: if the loaded
-    // active_hotkey_group doesn't match any hotkey's group, fall back
-    // to the group of the first hotkey (or the default).
     {
         bool matched = false;
         for (const auto& hk : hotkeys)
@@ -634,17 +628,8 @@ bool Config::loadConfig(const std::string& filename)
             active_hotkey_group = hotkeys[0].group;
     }
 
-    // ── 【2026-09-17】瞄准控制链的字段夹取整段删除 ───────────────────────────
-    // 这里原本是 clamp_aim_fields(): 把 pidf_* / esync_* / aim_scale_* / aim_path_* /
-    // trigger_* 全部夹到各自的合法域。整个瞄准控制链(连同它的槽位)已被删除, 所以
-    // 这些夹取也一并删除 —— 夹取一个不存在的字段既编不过, 也没有意义。
-    //
-    // ★ 保留下来的只剩"目标选择"与"动态 FOV"两项: 它们服务的是【检测/瞄准点选择】
-    //   这一侧(aim_classes 由 TargetPage 维护, dynamic_fov 由动态 FOV 门控区域),
-    //   与控制链无关, 仍然活着。
     auto clamp_target_fields = [](HotkeyProfile& hk) {
 
-        // 目标选择 clamp
         for (auto& ac : hk.aim_classes)
         {
             ac.y_offset = std::clamp(ac.y_offset, 0.0f, 1.0f);
@@ -656,52 +641,43 @@ bool Config::loadConfig(const std::string& filename)
 
         hk.dynamic_fov_strength = std::clamp(hk.dynamic_fov_strength, 0.0f, 1.0f);
 
-        // ── ★★ 通用控制器层 (2026-09-17 第三轮重建) ───────────────────────
-        // 只夹到"物理上说得通"的范围, 不做"推荐值"式夹取 ——
-        // 具体该填多少是用户在实机上调的(方案 §7 第 10 条)。
-        // ★ 负增益会反转控制方向(正反馈), 直接夹死。
         hk.ctl_kp_x = std::max(0.0, hk.ctl_kp_x);
         hk.ctl_kp_y = std::max(0.0, hk.ctl_kp_y);
         hk.ctl_ki_x = std::max(0.0, hk.ctl_ki_x);
         hk.ctl_ki_y = std::max(0.0, hk.ctl_ki_y);
         hk.ctl_kd_x = std::max(0.0, hk.ctl_kd_x);
         hk.ctl_kd_y = std::max(0.0, hk.ctl_kd_y);
-        // ★ 时间常数必须为正 —— 0 或负会让 exp(-dt/τ) 退化(除零 / 发散)。
-        //   给一个下限而不是夹到 0, 因为 0 在公式里是奇点。
         hk.ctl_tau_unwind_sec = std::clamp(hk.ctl_tau_unwind_sec, 1e-4, 10.0);
-        // ★ D 项低通允许 0(= 不做低通)。方案里 Kd 默认就是 0, 所以 0 是合法值。
         hk.ctl_tau_deriv_sec = std::clamp(hk.ctl_tau_deriv_sec, 0.0, 10.0);
         hk.ctl_i_max = std::max(0.0, hk.ctl_i_max);
         hk.ctl_p_full_scale_px = std::max(0.0, hk.ctl_p_full_scale_px);
-        // ★ 限幅必须 >= 1: 它是量化出口的硬上限, 0 会让控制器永远发不出位移。
+        hk.ctl_k_px_per_count = std::clamp(hk.ctl_k_px_per_count, 0.0, 10.0);
+        hk.ctl_inflight_beta = std::clamp(hk.ctl_inflight_beta, 0.0, 2.0);
+        hk.ctl_inflight_dead_time_ms = std::clamp(hk.ctl_inflight_dead_time_ms, 0.0, 1000.0);
+        // 在途补偿。三个参数都 >= 0，且 0 有明确含义（关闭/不限制），
+        // 所以只做下界与有限性保护；上界留宽，避免把用户合理的调参夹掉。
+        hk.ctl_predict_lead_ms = std::clamp(hk.ctl_predict_lead_ms, 0.0, 1000.0);
+        hk.ctl_predict_max_velocity_px_s =
+            std::clamp(hk.ctl_predict_max_velocity_px_s, 0.0, 100000.0);
+        hk.ctl_predict_max_lead_ratio =
+            std::clamp(hk.ctl_predict_max_lead_ratio, 0.0, 100.0);
         hk.ctl_max_output_counts = std::clamp(hk.ctl_max_output_counts, 1, 1000);
         hk.ctl_y_offset = std::clamp(hk.ctl_y_offset, 0.0, 1.0);
         hk.ctl_y_offset_max = std::clamp(hk.ctl_y_offset_max, 0.0, 1.0);
         if (hk.ctl_y_offset > hk.ctl_y_offset_max)
             std::swap(hk.ctl_y_offset, hk.ctl_y_offset_max);
-        // ★ 滞回倍数 <= 1 等于没有滞回(每帧重选最近) —— 那是合法的调试配置,
-        //   但要 >= 1 才符合"滞回"的定义, 所以夹到 [1, 10]。
         hk.ctl_hysteresis_ratio = std::clamp(hk.ctl_hysteresis_ratio, 1.0, 10.0);
 
-        // 稳定器 / 选靶距离
         hk.ctl_max_distance_px = std::max(0.0, hk.ctl_max_distance_px);
-        // ★ 认目标系数必须 > 0: 0 会让"中心距离 < 0"永不成立 ⇒ 永远认不出目标。
         hk.ctl_match_center_ratio = std::clamp(hk.ctl_match_center_ratio, 1e-3, 10.0);
-        // ★ 面积容差必须 >= 1: < 1 是自相矛盾的区间(下界 > 上界)。
         hk.ctl_area_ratio_tol = std::clamp(hk.ctl_area_ratio_tol, 1.0, 100.0);
-        // ★ 突变系数必须 > 0: 它是"多远算瞬移"的乘子, 0 会让任何位移都算瞬移。
         hk.ctl_k_snap_mult = std::clamp(hk.ctl_k_snap_mult, 1e-3, 100.0);
-        // 宽高比: min <= max, 且都为正。
         hk.ctl_min_aspect = std::clamp(hk.ctl_min_aspect, 1e-3, 100.0);
         hk.ctl_max_aspect = std::clamp(hk.ctl_max_aspect, 1e-3, 100.0);
         if (hk.ctl_min_aspect > hk.ctl_max_aspect)
             std::swap(hk.ctl_min_aspect, hk.ctl_max_aspect);
-        // 种子: 负值无意义(0 已经是"用固定常数"), 夹到非负。
         hk.ctl_random_seed = std::max(0, hk.ctl_random_seed);
 
-        // ── 自动扳机 (2026-09-17 恢复) ────────────────────────────────────
-        // 三个延迟/时长都夹到非负; interval 至少 1ms —— 0 会让 Cooldown
-        // 立刻结束, 在命中区里退化成每拍 press/release 的抖动。
         hk.trigger_fire_delay    = std::max(0, hk.trigger_fire_delay);
         hk.trigger_fire_duration = std::max(0, hk.trigger_fire_duration);
         hk.trigger_fire_interval = std::max(1, hk.trigger_fire_interval);
@@ -710,25 +686,17 @@ bool Config::loadConfig(const std::string& filename)
         hk.trigger_interval_jitter_ms = std::max(0, hk.trigger_interval_jitter_ms);
         hk.trigger_switch_cooldown_ms = std::max(0, hk.trigger_switch_cooldown_ms);
         hk.trigger_scope_delay_ms = std::max(0, hk.trigger_scope_delay_ms);
-        // ★ 命中区百分比下限 10: 比 bbox 小太多的"命中区"几乎不可能命中,
-        //   等于把扳机变成静默失效。上限 300 允许"预开火"(框上方也算)。
         hk.trigger_y_percent = std::clamp(hk.trigger_y_percent, 10, 300);
         hk.trigger_auto_scope = std::clamp(hk.trigger_auto_scope, 0, 2);
         hk.trigger_auto_stop = hk.trigger_auto_stop > 0 ? 1 : 0;
-        // 与旧实现一致: 20~300ms。太短固件来不及弹起, 太长玩家被推着走。
         hk.trigger_stop_ms = std::clamp(hk.trigger_stop_ms, 20, 300);
 
-        // ── 瞄准轨迹曲线 (2026-09-17 恢复) ────────────────────────────────
         hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 3);
         hk.aim_path_influence = std::clamp(hk.aim_path_influence, 0, 100);
-        // Bezier 控制点: X 夹到 [0,1] 保证不出现折返; Y 夹到 [-1,1] 是
-        // 弦长的比例 —— 超出会让路径横向甩出去。
         hk.aim_path_bezier_cx1 = std::clamp(hk.aim_path_bezier_cx1, 0.0f, 1.0f);
         hk.aim_path_bezier_cx2 = std::clamp(hk.aim_path_bezier_cx2, 0.0f, 1.0f);
         hk.aim_path_bezier_cy1 = std::clamp(hk.aim_path_bezier_cy1, -1.0f, 1.0f);
         hk.aim_path_bezier_cy2 = std::clamp(hk.aim_path_bezier_cy2, -1.0f, 1.0f);
-        // WindMouse: 重力/风力/步长/距离都必须为正, 否则物理模型退化
-        // (G=0 或 M=0 会让路径根本走不动)。
         hk.aim_path_wind_gravity = std::clamp(hk.aim_path_wind_gravity, 0.1f, 100.0f);
         hk.aim_path_wind_wind    = std::clamp(hk.aim_path_wind_wind, 0.0f, 100.0f);
         hk.aim_path_wind_step    = std::clamp(hk.aim_path_wind_step, 1.0f, 200.0f);
@@ -738,9 +706,6 @@ bool Config::loadConfig(const std::string& filename)
     for (auto& hk : hotkeys)
         clamp_target_fields(hk);
 
-    // Aim hotkey triggers are restricted to the four mouse buttons. Anything
-    // else (old keyboard bindings, typos) is rewritten to "None" so the UI
-    // combo stays in sync with the allowed set.
     static const std::unordered_set<std::string> kAllowedAimKeys = {
         "None", "LeftMouseButton", "RightMouseButton",
         "X1MouseButton", "X2MouseButton",
@@ -774,10 +739,6 @@ bool Config::saveConfig(const std::string& filename)
     if (target == "config.ini" && !config_path.empty())
         target = config_path;
 
-    // Use the wide-char path so non-ASCII directories (e.g. Chinese
-    // user folders) open correctly. The narrow ofstream ctor on MSVC
-    // interprets the string as the system ANSI codepage and fails when
-    // the UTF-8 path contains characters outside it.
     std::filesystem::path targetPath = std::filesystem::u8path(target);
     std::error_code mkEc;
     if (targetPath.has_parent_path())
@@ -813,14 +774,13 @@ bool Config::saveConfig(const std::string& filename)
         << "makcu_port = " << makcu_port << "\n"
         << "makcu_new_baudrate = " << makcu_new_baudrate << "\n"
         << "makcu_new_port = " << makcu_new_port << "\n"
+        << "makcu_new_baudrate_kbd = " << makcu_new_baudrate_kbd << "\n"
+        << "makcu_new_port_kbd = " << makcu_new_port_kbd << "\n"
         << "# KMBox Net: 三个值照抄盒子屏幕上显示的 ip / port / uuid\n"
         << "kmbox_net_ip = " << kmbox_net_ip << "\n"
         << "kmbox_net_port = " << kmbox_net_port << "\n"
         << "kmbox_net_uuid = " << kmbox_net_uuid << "\n\n";
 
-    // ★ 2026-09-17: backend / dml_device_id / max_detections 不再落盘 ——
-    //   前两者随 DirectML 后端一起删除, 后者固定为 kFixedMaxDetections。
-    //   注意 backend 仍是 Config 成员(会话启动要读), 只是不再写进 config.ini。
     file << "# AI\n"
         << "ai_model = " << ai_model << "\n"
         << std::fixed << std::setprecision(2)
@@ -884,7 +844,6 @@ bool Config::saveConfig(const std::string& filename)
         << "macro_script_path = " << macro_script_path << "\n"
         << "macro_primary_button_events = " << to_bool_str(macro_primary_button_events) << "\n\n";
 
-    // Class filter table.
     file << "[classes]\n";
     file << "# Format: <class_id> = <bucket>,<display_name>\n";
     file << "# bucket in { delete, filter, aim }\n";
@@ -899,7 +858,6 @@ bool Config::saveConfig(const std::string& filename)
 
     file << "active_hotkey_group = " << active_hotkey_group << "\n\n";
 
-    // Hotkey profiles.
     for (size_t i = 0; i < hotkeys.size(); ++i)
     {
         const auto& hk = hotkeys[i];
@@ -909,15 +867,6 @@ bool Config::saveConfig(const std::string& filename)
         file << "keys = " << joinStrings(hk.keys) << "\n";
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
-        // ── 【2026-09-17 整条删除】瞄准控制链的槽位 ─────────────────────────
-        // 这里原本写出 pidf_mapping_version / pidf_* / esync_* / aim_scale_* /
-        // trigger_* / aim_path_* 几十个键。整个瞄准控制链(连同 mouse_thread_loop.cpp)
-        // 已被删除, 程序现在只做【采集 → 推理】, 那些键没有任何消费者 —— 所以
-        // 不再写出。老方案文件里残留的它们会在下一次保存时自动消失。
-        //   ★ pidf_mapping_version 也不再写: 它的唯一用途是"槽位语义变更时重置
-        //     老槽位", 而槽位已经不存在, 版本号没有读者, 写了反而像还有迁移机制。
-        //
-        // 下面这些【保留】: 它们服务的是检测/瞄准点选择与准星找色, 与控制链无关。
         file << std::setprecision(0)
              << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
@@ -926,9 +875,6 @@ bool Config::saveConfig(const std::string& filename)
              << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"
              << std::setprecision(4);
 
-        // ── ★★ 通用控制器层 (2026-09-17 第三轮重建) ───────────────────────
-        // 六个增益全部分方向。数值全部由用户实调 —— 设计里没有任何"最优值"
-        // (方案 §7 第 10 条)。这里只负责落盘。
         file << std::fixed << std::setprecision(4)
              << "ctl_enabled = "          << to_bool_str(hk.ctl_enabled) << "\n"
              << "ctl_kp_x = "             << hk.ctl_kp_x << "\n"
@@ -941,11 +887,15 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_tau_deriv_sec = "    << hk.ctl_tau_deriv_sec << "\n"
              << "ctl_i_max = "            << hk.ctl_i_max << "\n"
              << "ctl_p_full_scale_px = "  << hk.ctl_p_full_scale_px << "\n"
+             << "ctl_k_px_per_count = "   << hk.ctl_k_px_per_count << "\n"
+             << "ctl_inflight_beta = "    << hk.ctl_inflight_beta << "\n"
+             << "ctl_inflight_dead_time_ms = " << hk.ctl_inflight_dead_time_ms << "\n"
+             << "ctl_predict_lead_ms = "  << hk.ctl_predict_lead_ms << "\n"
+             << "ctl_predict_max_velocity_px_s = " << hk.ctl_predict_max_velocity_px_s << "\n"
+             << "ctl_predict_max_lead_ratio = "    << hk.ctl_predict_max_lead_ratio << "\n"
              << "ctl_y_offset = "         << hk.ctl_y_offset << "\n"
              << "ctl_y_offset_max = "     << hk.ctl_y_offset_max << "\n"
              << "ctl_hysteresis_ratio = " << hk.ctl_hysteresis_ratio << "\n"
-             // ★ 它是 int —— `std::fixed` 对整数不起作用, 直接写就是 "200",
-             //   不必为它单独切 setprecision。
              << "ctl_max_output_counts = " << hk.ctl_max_output_counts << "\n"
              << "ctl_max_distance_px = "    << hk.ctl_max_distance_px << "\n"
              << "ctl_match_center_ratio = " << hk.ctl_match_center_ratio << "\n"
@@ -955,9 +905,6 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_max_aspect = "         << hk.ctl_max_aspect << "\n"
              << "ctl_random_seed = "        << hk.ctl_random_seed << "\n";
 
-        // ── ★★ 自动扳机 (2026-09-17 恢复) ────────────────────────────────
-        // 后端在 mouse/trigger_fsm.h + mouse/trigger_scope.h + mouse/auto_stop.h,
-        // 接线在 runtime/aim_loop.cpp。
         file << "trigger_enabled = "        << to_bool_str(hk.trigger_enabled) << "\n"
              << "trigger_fire_delay = "     << hk.trigger_fire_delay << "\n"
              << "trigger_fire_duration = "  << hk.trigger_fire_duration << "\n"
@@ -972,8 +919,6 @@ bool Config::saveConfig(const std::string& filename)
              << "trigger_auto_stop = "      << hk.trigger_auto_stop << "\n"
              << "trigger_stop_ms = "        << hk.trigger_stop_ms << "\n";
 
-        // ── ★★ 瞄准轨迹曲线 (2026-09-17 恢复) ────────────────────────────
-        // 后端在 mouse/aim_path.h, 接线在 runtime/aim_loop.cpp。
         file << "aim_path_mode = "          << hk.aim_path_mode << "\n"
              << "aim_path_influence = "     << hk.aim_path_influence << "\n"
              << "aim_path_bezier_cx1 = "    << hk.aim_path_bezier_cx1 << "\n"
@@ -986,11 +931,25 @@ bool Config::saveConfig(const std::string& filename)
              << "aim_path_wind_distance = " << hk.aim_path_wind_distance << "\n"
              << "aim_path_wind_threshold = " << hk.aim_path_wind_threshold << "\n";
 
+        // 手绘曲线采样点。★ 换行折行: 160KB 挤在一行虽然 SimpleIni 能吃下
+        //   (它整文件 fread 进内存, 无行长上限), 但任何文本编辑器都会卡死,
+        //   人也没法看。每 64 个值一折行, 解析端已按空白/逗号跳过。
+        if (hk.aim_path_custom_samples && !hk.aim_path_custom_samples->empty())
+        {
+            const auto& s = *hk.aim_path_custom_samples;
+            file << "aim_path_custom_samples = ";
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                if (i) { file << ","; if (i % 64 == 0) file << "\n    "; }
+                file << static_cast<int>(std::lround(
+                    std::clamp(static_cast<double>(s[i]), -1.0, 1.0) * 10000.0));
+            }
+            file << "\n";
+        }
+
         file << "\n";
     }
 
-    // Crosshair color palette: one section per entry so users can edit by
-    // hand. Order is preserved (matters for the UI list but not detection).
     for (size_t i = 0; i < crosshair_colors.size(); ++i)
     {
         const auto& c = crosshair_colors[i];
@@ -1005,6 +964,14 @@ bool Config::saveConfig(const std::string& filename)
              << "v_max = "   << c.v_max   << "\n\n";
     }
 
+    file << "[target_stabilizer]\n"
+         << "target_hysteresis_ratio = "   << target_hysteresis_ratio << "\n"
+         << "target_max_distance_px = "    << target_max_distance_px << "\n"
+         << "target_match_center_ratio = " << target_match_center_ratio << "\n"
+         << "target_area_ratio_tol = "     << target_area_ratio_tol << "\n"
+         << "target_k_snap_mult = "        << target_k_snap_mult << "\n"
+         << "target_min_aspect = "         << target_min_aspect << "\n"
+         << "target_max_aspect = "         << target_max_aspect << "\n\n";
 
     file.close();
     return true;

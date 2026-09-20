@@ -153,27 +153,22 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
     switch (button)
     {
     case makcu::MouseButton::LEFT:
-        // LMB = shooting
         shooting_active = pressed;
         break;
 
     case makcu::MouseButton::RIGHT:
-        // RMB = zooming
         zooming_active = pressed;
         break;
 
     case makcu::MouseButton::MIDDLE:
-        // MMB = middle
         middle_active = pressed;
         break;
 
     case makcu::MouseButton::SIDE1:
-        // Mouse4 (side button 1)
         side1_active = pressed;
         break;
 
     case makcu::MouseButton::SIDE2:
-        // Mouse5 (side button 2)
         side2_active = pressed;
         break;
     }

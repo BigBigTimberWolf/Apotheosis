@@ -54,7 +54,6 @@ struct GroupDef {
     QStringList icons;
 };
 
-// 单一导航数据源:一级分组(顶栏)+ 二级子页(侧边栏)+ 子页图标。
 const QVector<GroupDef>& navGroups() {
     static const QVector<GroupDef> kGroups = {
         {QString::fromUtf8(u8"概览"), {}, {}},
@@ -78,7 +77,7 @@ const QVector<GroupDef>& navGroups() {
     return kGroups;
 }
 
-}  // namespace
+}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
@@ -142,7 +141,6 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_sideNav, &SideNav::currentChanged, this, &MainWindow::onSecondaryChanged);
     connect(m_topNav, &TopNavBar::saveClicked, this, &MainWindow::onSaveRequested);
 
-    // ── 全局配置方案 ──
     connect(m_topNav, &TopNavBar::profileSwitchRequested,
             this, &MainWindow::onProfileSwitchRequested);
     connect(m_topNav, &TopNavBar::profileSaveRequested,
@@ -171,8 +169,6 @@ MainWindow::MainWindow(QWidget* parent)
     m_topNav->setCurrentPrimary(0);
     onPrimaryChanged(0);
 
-    // Monitor pages (概览 / 性能统计 / 日志 / 调试) are static widgets — without
-    // this poll loop their setters never get called.
     m_monitorTimer = new QTimer(this);
     m_monitorTimer->setInterval(200);
     connect(m_monitorTimer, &QTimer::timeout, this, &MainWindow::pollMonitorTelemetry);
@@ -194,7 +190,6 @@ void MainWindow::setupPages() {
         range.icons = g.icons;
 
         if (g.subs.isEmpty()) {
-            // 无二级导航的一级分组:整组只有一个落地页。
             m_overviewPage = new OverviewPage();
             connect(m_overviewPage, &OverviewPage::startStopRequested,
                     this, &MainWindow::onHeroToggleInference);
@@ -279,7 +274,6 @@ void MainWindow::switchPage(int index) {
     if (!page || !isVisible() || reduceMotion)
         return;
 
-    // 仅在切页的短时间内启用透明度特效，结束后立即移除，避免持续合成开销。
     auto* effect = new QGraphicsOpacityEffect(page);
     effect->setOpacity(0.72);
     page->setGraphicsEffect(effect);
@@ -328,8 +322,6 @@ void MainWindow::onSaveRequested() {
     if (m_sessionOperation.valid()) return;
     ConfigBridge::instance().syncToRuntime();
 
-    // 落盘目标由 Config::config_path 决定: 建立方案之后它指向当前方案文件,
-    // 所以在「保存设置」和「保存当前方案」是同一件事。
     QString error;
     if (!ConfigProfiles::instance().saveCurrent(&error)) {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
@@ -345,10 +337,6 @@ void MainWindow::onSaveRequested() {
     m_topNav->showProfileFeedback(QString::fromUtf8(u8"已保存"));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 全局配置方案
-// ═══════════════════════════════════════════════════════════════════════════
-
 void MainWindow::refreshProfileControls() {
     auto& profiles = ConfigProfiles::instance();
     m_topNav->setProfiles(profiles.names(), profiles.activeName());
@@ -361,8 +349,6 @@ void MainWindow::onProfileSwitchRequested(const QString& name) {
         return;
     }
 
-    // 推理会话正在跑的时候整套换配置: 采集设备/模型都会变。要让用户知道
-    // 有些东西要重启会话才彻底生效, 而不是悄悄换一半。
     if (m_sessionRunning && !m_starting) {
         const auto answer = QMessageBox::question(
             this, QString::fromUtf8(u8"切换配置方案"),
@@ -494,13 +480,11 @@ void MainWindow::onProfileOpenDirRequested() {
 }
 
 void MainWindow::onProfileRefreshRequested() {
-    // 方案文件可能在资源管理器里被手动增删 —— 重新扫一遍 configs/。
     ConfigProfiles::instance().refresh();
 }
 
 MainWindow::~MainWindow()
 {
-    // std::future owns its worker. No callback captures this window.
     if (m_sessionOperation.valid()) m_sessionOperation.wait();
 }
 
@@ -577,7 +561,6 @@ void MainWindow::pollSessionOperation()
         QMessageBox::critical(this, QString::fromUtf8(u8"会话操作失败"), QString::fromUtf8(error.c_str()));
     if (m_closeRequested)
     {
-        // Always reap a partially started/failed session before closing.
         if (m_starting) beginSessionOperation(false);
         else close();
     }
@@ -590,14 +573,8 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"目标"))       { m_targetPage = new TargetPage(); return m_targetPage; }
     if (name == QString::fromUtf8(u8"硬件"))       return new HardwarePage();
     if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
-    // ★★ 「瞄准设置」页已重建(2026-09-17 第三轮续)。
-    //   上一轮删控制链时把 HotkeyPage 一起删了, 但删过头了 —— 它带走的不只是
-    //   死掉的瞄准参数, 还包括【热键列表管理】、【aim_classes 编辑】、
-    //   【准星找色开关】、【动态 FOV】, 而这些背后是活着的子系统。
-    //   ★ 后果: `config.hotkeys[]` 从那时起没有任何写入者, 界面再也改不动它。
     if (name == QString::fromUtf8(u8"瞄准设置")) { m_hotkeyPage = new AimSettingsPage(); return m_hotkeyPage; }
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
-    // ★ 「自动调参」页已随瞄准控制链删除(2026-09-17)。
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }
@@ -612,18 +589,9 @@ void MainWindow::pollMonitorTelemetry() {
     {
         beginSessionOperation(false);
     }
-    // ── Shared telemetry (computed once, fed to both 概览 and 性能统计) ──────
     const double fps = static_cast<double>(captureFps.load());
     const double sourceFps = static_cast<double>(captureSourceFps.load());
 
-    // 延迟一律取端到端探针(runtime/latency_probe.h)的实测值。原来这里是:
-    //   采集延迟 = 1000 / 采集FPS      -> 那是【帧间隔】, 根本不是延迟: 60fps 恒等于
-    //                                     16.7ms, 再怎么优化都动不了它, 却最容易被
-    //                                     读成"采集卡对接延迟好高";
-    //   总延迟   = detector 内部各项之和 -> 不含采集等待、发布→控制环、写出→HID, 却
-    //                                     被标成"总延迟"/"端到端延迟"。
-    // 现在三项分别是 T1-T0 / T2-T1 / T3-T0。另外把【设备侧帧龄】喂给分段卡片: 它是
-    // 驱动/MF 把帧交给我们之前花掉的时间, 不用于单独判定卡芯片的耗时。
     const auto probe = runtime::latency::snapshot();
     const bool hasProbe = probe.frames_consumed > 0 && fps > 0.0;
     const double cap_ms        = hasProbe ? probe.stages[runtime::latency::kCaptureWait].ema_ms : -1.0;
@@ -634,13 +602,10 @@ void MainWindow::pollMonitorTelemetry() {
         ? probe.stages[runtime::latency::kEndToEnd].ema_ms : -1.0;
     const int deviceAgeUs = probe.device_frame_age_us;
 
-    // "推理延迟"仍用 detector 自报的纯推理耗时(引擎本体), 分段卡片里的"推理"一行
-    // 是探针的整段(含预处理 / D2H / NMS), 两者含义不同, 故意分开。
     const double infer_ms = probe.engine_inference_ms;
 
     const bool running = g_inference_session && g_inference_session->running();
 
-    // Session uptime: stamp on the false→true edge.
     if (running && !m_sessionRunning)
         m_sessionStart = std::chrono::steady_clock::now();
     m_sessionRunning = running;
@@ -653,7 +618,6 @@ void MainWindow::pollMonitorTelemetry() {
         cpuCores = config.cpuCoreReserveCount;
         model = QString::fromStdString(config.ai_model);
     }
-    // ★ 2026-09-17: DirectML 后端整条移除, 状态栏恒显示 TensorRT。
     const QString backendDisp = QStringLiteral("TensorRT (CUDA)");
 
     m_statusBar->setInferenceStatus(running);
@@ -661,7 +625,6 @@ void MainWindow::pollMonitorTelemetry() {
     if (!m_sessionOperation.valid())
         m_topNav->setSessionStatus(running, running ? QString::fromUtf8(u8"运行中") : QString::fromUtf8(u8"已停止"));
 
-    // ── 概览 dashboard ──────────────────────────────────────────────────
     if (m_overviewPage) {
         m_overviewPage->setFps(fps);
         m_overviewPage->setSourceFps(sourceFps);
@@ -691,7 +654,6 @@ void MainWindow::pollMonitorTelemetry() {
             backendDisp, uptime);
     }
 
-    // ── 性能统计 ────────────────────────────────────────────────────────
     if (m_statsPage) {
         m_statsPage->setFps(fps);
         m_statsPage->setSourceFps(sourceFps);
@@ -704,7 +666,6 @@ void MainWindow::pollMonitorTelemetry() {
         m_statsPage->setCpuCores(QString::number(cpuCores));
     }
 
-    // ── Log: drain new tail lines into the textbox ──────────────────────
     if (m_logPage) {
         const auto snap = AppLog::Snapshot();
         const int total = static_cast<int>(snap.size());
@@ -714,13 +675,10 @@ void MainWindow::pollMonitorTelemetry() {
         m_logCursor = total;
     }
 
-    // ── Auto capture status ─────────────────────────────────────────────
     if (m_autoCapPage) {
         m_autoCapPage->setForceHeld(AutoCapture::g_force_held.load());
         m_autoCapPage->setSavedCounts(AutoCapture::g_saved_session.load(),
                                       AutoCapture::g_saved_total.load());
     }
 
-    // ── Debug: 动态 FOV 读数已随瞄准控制链删除(2026-09-17) ────────────────
-    //   那个读数来自 g_dynamic_fov_radius_x/y, 其唯一生产者是 mouse_thread_loop。
 }

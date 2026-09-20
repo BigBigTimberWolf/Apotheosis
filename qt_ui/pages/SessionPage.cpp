@@ -34,9 +34,6 @@ SessionPage::SessionPage(QWidget* parent)
 
     auto& cfg = ConfigManager::instance();
 
-    // ── 推理后端 (Backend) ──
-    // ★ 2026-09-17: DirectML 后端整条移除 → 后端下拉框与 "DirectML 显卡" 一起删除。
-    //   TensorRT 是唯一后端, 所以这里只做只读展示 + 状态行。
     auto* backendCard = new CardWidget(tr("推理后端"), QStringLiteral("cpu"), container);
     auto* bc = backendCard->contentLayout();
 
@@ -46,7 +43,6 @@ SessionPage::SessionPage(QWidget* parent)
         "DirectML 后端已于 2026-09-17 整条移除, 本程序现在只有这一个后端。"));
     bc->addWidget(FormKit::fieldRow(tr("推理后端"), backendLabel));
 
-    // Current backend status line
     m_backendStatusLabel = new QLabel();
     m_backendStatusLabel->setProperty("class", "secondary");
     m_backendStatusLabel->setText(tr("当前选择：TensorRT (CUDA)"));
@@ -54,7 +50,6 @@ SessionPage::SessionPage(QWidget* parent)
 
     layout->addWidget(backendCard);
 
-    // ── 检测预览 (Preview) ──
     auto* previewCard = new CardWidget(tr("检测预览"), QStringLiteral("eye"), container);
     auto* pc = previewCard->contentLayout();
 
@@ -71,7 +66,6 @@ SessionPage::SessionPage(QWidget* parent)
 
     layout->addWidget(previewCard);
 
-    // ── CUDA 设置 (collapsible) ──
     auto* cudaCard = new CardWidget(tr("CUDA 设置"), QStringLiteral("settings"), container);
     cudaCard->setCollapsible(true);
     auto* gc = cudaCard->contentLayout();
@@ -79,8 +73,6 @@ SessionPage::SessionPage(QWidget* parent)
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         gc->addWidget(FormKit::toggleRow(tr("CUDA Graph"), config.use_cuda_graph, m_cudaGraph));
-        // ★ 2026-09-17: "双缓冲流水线" 开关已删除 —— 双缓冲整条移除
-        //   (它白加一整帧延迟, 与"降推理延迟"的目标相反)。
         gc->addWidget(FormKit::toggleRow(tr("GPU 独占模式"), config.enableGpuExclusiveMode, m_gpuExclusive));
 
         QSlider* gpuSlider = nullptr;
@@ -136,8 +128,6 @@ SessionPage::SessionPage(QWidget* parent)
     scroll->setWidget(container);
     root->addWidget(scroll);
 
-    // ── Connections ──
-    // ★ 2026-09-17: 后端下拉框/DML 设备的连接已删除 (DirectML 后端整条移除)。
     connect(m_showWindow, &ToggleSwitch::toggled,
             this, &SessionPage::onShowWindowChanged);
     connect(&cfg, &ConfigManager::configLoaded,
@@ -151,15 +141,12 @@ void SessionPage::onShowWindowChanged(bool checked) {
 void SessionPage::loadConfig() {
     auto& cfg = ConfigManager::instance();
 
-    // ★ 2026-09-17: 后端恒为 TensorRT, 状态行是固定文案, 不需要还原控件状态。
     m_backendStatusLabel->setText(tr("当前选择：TensorRT (CUDA)"));
 
-    // Preview window
     m_showWindow->blockSignals(true);
     m_showWindow->setChecked(cfg.showWindow());
     m_showWindow->blockSignals(false);
 
-    // CUDA settings
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         m_cudaGraph->blockSignals(true);

@@ -71,6 +71,6 @@ std::string base64_encode(const std::vector<uint8_t>& bytes);
 bool base64_decode(const std::string& text, std::vector<uint8_t>& bytes);
 std::string json_escape(const std::string& text);
 
-} // namespace auth
+}
 
 #endif // AUTH_CLIENT_H

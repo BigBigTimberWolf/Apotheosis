@@ -28,7 +28,7 @@ QIcon iconFromGlyph(const QString& name, int px, const QString& color) {
     return QIcon(pm);
 }
 
-}  // namespace
+}
 
 SideNav::SideNav(QWidget* parent) : QWidget(parent) {
     setObjectName("sideNav");

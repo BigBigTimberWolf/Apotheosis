@@ -6,9 +6,6 @@
 
 namespace capture
 {
-// Driver timestamps are not a measurement of the HDMI pipeline. Keep validity
-// and freshness separate from a measured zero; all times here are explicit so
-// missing samples, long stalls and clock changes can be regression tested.
 class DeviceFrameAge
 {
 public:
@@ -30,7 +27,6 @@ public:
         epoch_ = epoch;
         ms = ms < 0.0 ? 0.0 : ms;
         const double us = ms * 1000.0;
-        // A stale interval starts a new series instead of blending in old data.
         if (last_ns_ && now_ns - last_ns_ > kFreshnessNs) samples_ = 0;
         ema_us_ = samples_ == 0 ? us
             : samples_ < 10 ? (ema_us_ * samples_ + us) / (samples_ + 1)
@@ -53,8 +49,6 @@ public:
     }
 
 private:
-    // Distinguishes the epochs (hundreds of years apart) without hiding real
-    // queueing above 500 ms. Ten minutes also fits safely in signed microseconds.
     static bool plausible(double ms) { return std::isfinite(ms) && ms >= -2.0 && ms <= 600000.0; }
     static constexpr int64_t kFreshnessNs = 2'000'000'000;
     void invalidateLocked() { samples_ = 0; epoch_ = 0; last_ns_ = 0; ema_us_ = 0; }

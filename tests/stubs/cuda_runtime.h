@@ -1,5 +1,4 @@
 #pragma once
-// Test-only instrumented CUDA event API. Never on the application's include path.
 struct TestCudaEvent { int records = 0; };
 using cudaEvent_t = TestCudaEvent*;
 using cudaStream_t = void*;

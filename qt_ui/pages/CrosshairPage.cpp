@@ -52,7 +52,7 @@ QColor computePreviewColor(int hLo, int hHi, int sLo, int sHi, int vLo, int vHi)
     return QColor::fromHsv(hDeg, sVal, vVal);
 }
 
-} // namespace
+}
 
 CrosshairPage::CrosshairPage(QWidget* parent)
     : QWidget(parent) {
@@ -72,14 +72,10 @@ CrosshairPage::CrosshairPage(QWidget* parent)
 
     auto& cfg = ConfigManager::instance();
 
-    // ====================================================================
-    // Card 1: 取样区域
-    // ====================================================================
     auto* regionCard = new CardWidget(
         QStringLiteral("取样区域"),
         QStringLiteral("color-swatch"));
 
-    // 宽度（像素）
     QSlider* wSlider = nullptr;
     regionCard->contentLayout()->addWidget(
         FormKit::sliderRow(
@@ -88,7 +84,6 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     connect(m_rectW, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setCrosshairRectW(v); });
 
-    // 高度（像素）
     QSlider* hSlider = nullptr;
     regionCard->contentLayout()->addWidget(
         FormKit::sliderRow(
@@ -99,14 +94,10 @@ CrosshairPage::CrosshairPage(QWidget* parent)
 
     layout->addWidget(regionCard);
 
-    // ====================================================================
-    // Card 2: 准星颜色 (简洁卡片流式配置)
-    // ====================================================================
     auto* colorCard = new CardWidget(
         QStringLiteral("准星颜色"),
         QStringLiteral("palette"));
 
-    // 顶部工具栏: 预设选择 + 应用 + 快速取色 + 添加自定义
     auto* toolBar = new QHBoxLayout;
     toolBar->setSpacing(8);
 
@@ -146,7 +137,6 @@ CrosshairPage::CrosshairPage(QWidget* parent)
 
     colorCard->contentLayout()->addLayout(toolBar);
 
-    // 颜色卡片流容器
     m_colorListContainer = new QWidget(this);
     m_colorListLayout = new QVBoxLayout(m_colorListContainer);
     m_colorListLayout->setContentsMargins(0, 6, 0, 0);
@@ -165,14 +155,10 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     m_pickTimer->setInterval(120);
     connect(m_pickTimer, &QTimer::timeout, this, &CrosshairPage::pollPickedColor);
 
-    // ====================================================================
-    // Card 3: 找色参数
-    // ====================================================================
     auto* shapeCard = new CardWidget(
         QStringLiteral("找色参数"),
         QStringLiteral("target"));
 
-    // 最小像素数
     QSlider* mpSlider = nullptr;
     shapeCard->contentLayout()->addWidget(
         FormKit::sliderRow(
@@ -181,7 +167,6 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     connect(m_minPixels, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setCrosshairMinPixelCount(v); });
 
-    // 闭合半径
     QSlider* crSlider = nullptr;
     shapeCard->contentLayout()->addWidget(
         FormKit::sliderRow(
@@ -190,16 +175,10 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     connect(m_closeRadius, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setCrosshairCloseRadius(v); });
 
-    // ──【2026-09-13 删除】「平滑防抖强度」滑块 (crosshair_smooth) ──────────────
-    // 准星枢轴不再做时间平滑: 现在锚点只有一道 α-β 平滑(anchor_filter), 位置在 PID
-    // 之前。两道串联滤波参数互相耦合, 留一道、放在最接近控制器的地方更好调。
-    // 准星找色检测本身保留, 只是输出直接用原始质心。
-
     layout->addWidget(shapeCard);
 
     layout->addStretch();
 
-    // Load saved config into widgets
     loadConfig();
     connect(&cfg, &ConfigManager::configLoaded, this, &CrosshairPage::loadConfig);
 }
@@ -211,14 +190,12 @@ void CrosshairPage::loadConfig() {
     m_rectH->setValue(cfg.crosshairRectH());
     m_minPixels->setValue(cfg.crosshairMinPixelCount());
     m_closeRadius->setValue(cfg.crosshairCloseRadius());
-    // (m_smoothSpin 已随「平滑防抖强度」滑块一起删除 2026-09-13)
 
     m_colors = cfg.crosshairColors();
     rebuildColorList();
 }
 
 void CrosshairPage::rebuildColorList() {
-    // Clear old rows
     QLayoutItem* item = nullptr;
     while ((item = m_colorListLayout->takeAt(0)) != nullptr) {
         if (item->widget()) {
@@ -256,7 +233,6 @@ void CrosshairPage::rebuildColorList() {
         frameLayout->setContentsMargins(12, 10, 12, 10);
         frameLayout->setSpacing(8);
 
-        // ── 顶部栏: 启用开关 + 颜色圆点 + 名称输入 + 删除按钮 ──
         auto* headerRow = new QHBoxLayout;
         headerRow->setSpacing(10);
 
@@ -297,7 +273,6 @@ void CrosshairPage::rebuildColorList() {
 
         frameLayout->addLayout(headerRow);
 
-        // ── 底部栏: H / S / V 紧凑范围微调器 ──
         auto* rangesRow = new QHBoxLayout;
         rangesRow->setSpacing(14);
 
@@ -350,7 +325,6 @@ void CrosshairPage::rebuildColorList() {
 
         m_colorListLayout->addWidget(itemFrame);
 
-        // Connections for instant live update & save
         auto onValueChanged = [this, idx, chk, nameEdit, hLoBox, hHiBox, sLoBox, sHiBox, vLoBox, vHiBox, updateDotColor]() {
             if (idx < 0 || idx >= m_colors.size()) return;
             auto& entry = m_colors[idx];
@@ -440,8 +414,6 @@ void CrosshairPage::removeColorAt(int index) {
         saveCrosshairColors();
     }
 }
-
-// ---- Crosshair colour eyedropper ----
 
 void CrosshairPage::toggleColorPick() {
     if (m_pickToken != 0) {

@@ -14,4 +14,4 @@ double Box::diagonal() const
     return std::sqrt(w * w + h * h);
 }
 
-} // namespace control
+}

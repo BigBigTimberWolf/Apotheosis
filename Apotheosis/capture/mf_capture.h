@@ -22,28 +22,9 @@
 #include <thread>
 #include <vector>
 
-// 采集卡能力表 (数据模型 + 三级联动查询) 见 capture_card_caps.h。
-// 单独成文件是为了让 Qt UI 与单元测试不必拖进 CUDA / TensorRT 头文件。
 #include "capture_card_caps.h"
 #include "device_frame_age.h"
 
-// Self-written capture-card backend talking to the device directly through
-// Media Foundation (IMFSourceReader). No cv::VideoCapture involved.
-//
-// The caller picks the device, source geometry, fps, an exact pixel format
-// (NV12 / MJPG / YUY2 / RGB32 — no AUTO negotiation), and a decode location:
-//
-//   GPU mode  -> output is a BGR GpuImage (nvJPEG for MJPG, NPP / a small
-//                CUDA kernel for the raw formats). The frame stays on the GPU
-//                for the zero-copy TensorRT detector path.
-//   CPU mode  -> output is a BGR cv::Mat (cv::imdecode for MJPG, cv::cvtColor
-//                for the raw formats); the existing pipeline uploads it.
-//
-// Pipeline contract: the frame handed to inference is the centered square
-// region of interest, never the whole downscaled frame. When cropping is
-// enabled the centered out_side x out_side region is taken; on the GPU raw
-// paths only that region is uploaded, so the per-frame PCIe transfer (the
-// bottleneck on a Gen1-capped card) is bounded by the crop, not the source.
 class MFCapture : public IScreenCapture
 {
 public:
@@ -72,7 +53,6 @@ public:
     GpuImage GetNextFrameGpu() override;
     int GetSourceFpsEstimate() const override { return source_fps_.load(); }
 
-    // 驱动时间戳到 OnReadSample 回调入口的 EMA; 超过两秒未更新即失效。
     int GetDeviceFrameAgeUs() const override;
     bool HasStopped() const override { return receive_finished_.load(); }
     int64_t GetLastFrameCaptureNs() const override { return last_dequeued_capture_ns_; }
@@ -83,24 +63,12 @@ public:
 
     bool IsOpen() const { return is_open_.load(); }
 
-    // 打开失败的原因 (严格协商失败 / 设备消失 / 模式被拒)。
-    // 采集卡路径没有任何回退, 所以失败时必须把【设备实际支持什么】讲清楚,
-    // 让用户照着改下拉, 而不是对着黑屏猜。
     const std::string& LastError() const { return open_error_; }
 
     static std::vector<MFDeviceInfo> EnumerateDevices();
 
-    // 枚举设备【并探测每个设备的真实能力】(分辨率/帧率/像素格式全集)。
-    //
-    // 比 EnumerateDevices() 慢: 每个设备都要激活 source reader 并把
-    // GetNativeMediaType 从 0 枚举到 MF_E_NO_MORE_TYPES。典型 20-300ms/设备,
-    // 所以只在"用户点刷新/打开采集页"时调用, 不要放进采集热路径。
-    //
-    // probe_index >= 0 时只探测该设备, 其余设备保留名称但 caps 留空 ——
-    // 用于"用户切换设备后只重探新设备"的场景。
     static std::vector<MFDeviceInfo> EnumerateDevicesWithCaps(int probe_index = -1);
 
-    // 单独探测某个已枚举设备的能力 (就地填充 dev.caps / dev.caps_probed)。
     static bool ProbeCapabilities(MFDeviceInfo& dev);
     static Format ParseFormat(const std::string& s);
     static const char* FormatLabel(Format f);
@@ -110,48 +78,27 @@ private:
     bool EnsureGpuContext();
     void TickFps();
 
-    // The async reader callback only hands off samples. Conversion remains in
-    // bounded workers so it cannot delay the next device request.
     void StartProcessWorker();
     void StopProcessWorker();
     void ProcessWorkerLoop();
     void EnqueueProcessJob(const uint8_t* data, size_t size, int64_t capture_ns);
 
-    // MJPG-GPU 并行解码 worker 池(说明见下方 DecodeJob 成员处)。
     void StartDecodeWorkers();
     void StopDecodeWorkers();
     void DecodeWorkerLoop();
     void EnqueueJpegJob(const uint8_t* data, size_t size, int64_t capture_ns);
     bool EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq, int64_t capture_ns);
-    bool ShouldDispatchFrame();   // 按 target_fps_ 节流:返回 false 表示这帧应丢弃(不解码)
+    bool ShouldDispatchFrame();
 
-    // GPU decode paths (output BGR GpuImage on gpu_stream_). On a PCIe Gen1 card
-    // the goal is to move and reconstruct as LITTLE as possible:
-    //   raw  -> upload only the centered ROI (crop-before-upload) so the per-
-    //           frame PCIe transfer is bounded by out_side, not the source.
-    //   MJPG -> nvJPEG ROI decode reconstructs only the centered out_side region
-    //           (decodeCropped), avoiding a full-frame decode the weak GPU can't
-    //           sustain at the source fps.
-    // GPU paths do not CPU-synchronize per frame. They record a completion event
-    // on the output slot; consumers wait from their own stream.
     bool PushNv12Gpu(const uint8_t* data, int width, int height, int stride);
     bool PushYuy2Gpu(const uint8_t* data, int width, int height, int stride);
     bool PushRgb32Gpu(const uint8_t* data, int width, int height, int stride);
     bool PushMjpgGpu(const uint8_t* data, size_t size);
 
-    // Center-crop geometry within a width x height source. When cropping is
-    // enabled and the source is big enough, returns the centered out_side square
-    // (origin forced even so NV12/YUY2 chroma stays aligned); otherwise returns
-    // the full frame so the caller resizes to out_side instead.
     void ResolveRoi(int width, int height, int& left, int& top, int& roiW, int& roiH) const;
-    // Next output ring slot (records its index in current_out_idx_); the slot
-    // keeps its own reference so its device buffer is reused once the consumer
-    // releases it, and create() allocates fresh while a consumer still holds it.
     GpuImage& nextOutSlot();
-    // Bilinear-resize src into the next ring slot (same-size = pixel copy).
     GpuImage ResizeToOut(const GpuImage& src);
 
-    // CPU decode paths (output BGR cv::Mat).
     bool PushNv12Cpu(const uint8_t* data, int width, int height, int stride);
     bool PushYuy2Cpu(const uint8_t* data, int width, int height, int stride);
     bool PushRgb32Cpu(const uint8_t* data, int width, int height, int stride);
@@ -172,7 +119,7 @@ private:
 
     std::atomic<bool> is_open_{ false };
     std::atomic<bool> should_stop_{ false };
-    std::string open_error_;   // 仅在协商/打开失败时非空
+    std::string open_error_;
     std::atomic<int> source_fps_{ 0 };
     std::atomic<int> negotiated_fps_{ 0 };
     int source_frame_count_{ 0 };
@@ -180,7 +127,7 @@ private:
     std::chrono::steady_clock::time_point source_fps_start_;
 
     capture::DeviceFrameAge device_age_;
-    bool device_age_missing_logged_ = false; // receiver only
+    bool device_age_missing_logged_ = false;
     std::atomic<bool> receive_finished_{false};
 
     int frame_width_{ 0 };
@@ -189,13 +136,13 @@ private:
 
     std::thread receive_thread_;
     std::mutex frame_mutex_;
-    std::condition_variable frame_cv_;   // 产帧入队后唤醒等待的消费线程
+    std::condition_variable frame_cv_;
     struct CpuFrame { cv::Mat image; int64_t capture_ns = 0; };
     struct DeviceFrame { GpuImage image; int64_t capture_ns = 0; };
     std::queue<CpuFrame> cpu_frame_queue_;
     std::queue<DeviceFrame> gpu_frame_queue_;
-    int64_t last_dequeued_capture_ns_ = 0; // capture consumer only
-    int64_t process_capture_ns_ = 0;       // process worker only
+    int64_t last_dequeued_capture_ns_ = 0;
+    int64_t process_capture_ns_ = 0;
 
     struct ProcessJob
     {
@@ -205,12 +152,6 @@ private:
         int height = 0;
         int stride = 0;
     };
-    // 只保留最新帧: 入队时若已有待处理 job, 直接丢掉它再放新的。
-    //
-    // 原来是 2 —— 深度虽小, 但语义是"丢最旧"的 FIFO, 与下游输出队列的
-    // MAX_QUEUE_SIZE=1(只保留最新)不一致。worker 只要追不上生产者, 队列就会
-    // 稳定停在深水位, 每一帧都白等一拍。而下游 detector 本来就会用下一拍覆盖
-    // 旧帧, 所以多留一帧【不提高任何实际吞吐, 只增加延迟】。
     static constexpr int MAX_PROCESS_QUEUE = 1;
     std::thread process_thread_;
     std::mutex process_mutex_;
@@ -220,12 +161,6 @@ private:
     std::atomic<bool> process_stop_{ false };
     bool mjpg_cpu_fallback_{ false };
 
-    // MJPG-GPU 并行解码 worker 池。host 端 Huffman 熵解码(单帧 ~3.6ms)是产帧瓶颈
-    // 且 CPU-bound,单线程顶不到源帧率。ReceiveThread 只读样本、把 JPEG 字节投进
-    // job 队列;每个 worker 持独立 GpuJpegDecoder(nvjpegJpegState 非线程安全,必须
-    // per-thread)并行解中心 ROI,吞吐随 worker 数翻倍。每帧带单调序号,
-    // EnqueueGpuOrdered 只接受比已入队最大序号更新的帧,保住"队列容量 1 = 最新帧"
-    // 不被乱序的旧帧覆盖。仅在 crop_enabled 的 MJPG-GPU 模式启用。
     struct DecodeJob { std::vector<uint8_t> jpeg; uint64_t seq = 0; int64_t capture_ns = 0; };
     static constexpr int DECODE_WORKERS = 2;
     static constexpr int MAX_JOB_QUEUE = 3;
@@ -234,44 +169,28 @@ private:
     std::queue<DecodeJob> job_queue_;
     std::vector<std::thread> decode_workers_;
     std::atomic<bool> workers_stop_{ false };
-    uint64_t job_seq_{ 0 };                    // ReceiveThread 单线程递增
-    std::atomic<uint64_t> enqueued_seq_{ 0 };  // 已入队最大序号(保序守卫)
+    uint64_t job_seq_{ 0 };
+    std::atomic<uint64_t> enqueued_seq_{ 0 };
 
-    // 采集帧率上限(降采样限速)。worker 满速解码会吃 CPU;只要 N fps 时,在分发解码
-    // 前按目标间隔丢多余帧——不睡眠(不会像 limiter 过冲压低),且丢的帧不解码省 CPU。
-    // 0 或 ≥源帧率 = 满帧不丢。运行时由 SetTargetFps 更新。
     std::atomic<int> target_fps_{ 0 };
-    std::chrono::steady_clock::time_point next_dispatch_{};  // ReceiveThread 单线程访问,无需锁
+    std::chrono::steady_clock::time_point next_dispatch_{};
 
-    // GPU state (only created in GPU mode).
     cudaStream_t gpu_stream_{ nullptr };
     NppStreamContext npp_ctx_{};
     std::unique_ptr<capture::GpuJpegDecoder> gpu_decoder_;
-    uint8_t* pinned_jpeg_buffer_{ nullptr };  // pinned host staging for the MJPG H->D copy
+    uint8_t* pinned_jpeg_buffer_{ nullptr };
     size_t pinned_jpeg_capacity_{ 0 };
 
-    // Reused intermediate GPU buffers. Operations are ordered on gpu_stream_,
-    // so frame N+1 cannot overwrite a scratch before frame N has consumed it.
-    GpuImage scratch_a_;      // Y / packed-source ROI upload
-    GpuImage scratch_b_;      // NV12 UV ROI upload
-    GpuImage scratch_full_;   // full-frame BGR (resize source / MJPG full-decode fallback)
+    GpuImage scratch_a_;
+    GpuImage scratch_b_;
+    GpuImage scratch_full_;
 
-    // Output ring. Enqueued frames (or zero-copy views) reference a slot, so the
-    // ring must be deeper than the frames in flight for a slot's refcount to be
-    // back to 1 by the time we cycle to it. out_events_ pairs one CUDA event per
-    // slot: every GPU path records it so the consumer can wait without blocking
-    // the capture/processing thread.
     static constexpr int OUT_POOL_SIZE = 8;
     std::array<GpuImage, OUT_POOL_SIZE> out_pool_;
     GpuReadyEventPool<OUT_POOL_SIZE> out_events_;
     size_t out_pool_idx_{ 0 };
-    size_t current_out_idx_{ 0 };  // slot index returned by the last nextOutSlot()
+    size_t current_out_idx_{ 0 };
 
-    // Latest-frame semantics: the producer runs at source fps and the consumer
-    // throttles to capture_fps, so a deep queue just feeds the detector stale
-    // frames (every backlogged frame is pure end-to-end latency for aiming).
-    // Depth 1 means Enqueue drops the previous frame and keeps only the newest,
-    // so the consumer always pulls the freshest frame the device has produced.
     static constexpr int MAX_QUEUE_SIZE = 1;
 };
 

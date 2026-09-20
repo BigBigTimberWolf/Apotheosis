@@ -10,9 +10,6 @@ bool CPUAffinityManager::reserveCPUCores(int numCores)
 
     DWORD_PTR mask = 0;
 
-    // 智能防抢占亲和性调优：
-    // 如果系统核心数 >= 4，避开 CPU 0 和 CPU 1（系统中断与桌面服务重度占用区），
-    // 优先绑定到 CPU 2, CPU 3 ... 高性能独立大核；如果核数较少则退化为常规掩码。
     if (totalCores >= 4)
     {
         int count = 0;
@@ -32,18 +29,15 @@ bool CPUAffinityManager::reserveCPUCores(int numCores)
     originalMask = SetProcessAffinityMask(GetCurrentProcess(), mask);
     if (originalMask == 0)
     {
-        // 若进程级亲和性受限，尝试线程级绑定
         SetThreadAffinityMask(GetCurrentThread(), mask);
     }
 
-    // 提升进程基础优先级为 HIGH_PRIORITY_CLASS (高性能电竞级)
     if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
     {
         std::cerr << "[CPU] Failed to set process priority. GetLastError="
                   << GetLastError() << std::endl;
     }
 
-    // 提升主线程优先级
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
     std::cout << "[CPU] Affinity automatically tuned to dedicated cores (mask=0x"

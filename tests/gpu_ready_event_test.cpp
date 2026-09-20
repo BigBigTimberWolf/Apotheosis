@@ -10,14 +10,14 @@ int main()
         CHECK(delayed && liveEvents == 1);
         auto next = pool.record(nullptr);
         CHECK(next && next->handle != delayed->handle);
-        CHECK(delayed->handle->records == 1); // never re-record a delayed frame's marker
+        CHECK(delayed->handle->records == 1);
         auto reusable = next->handle;
         next.reset();
         auto reused = pool.record(nullptr);
         CHECK(reused->handle == reusable);
         CHECK(reused->handle->records == 2);
     }
-    CHECK(liveEvents == 1 && delayed->handle->records == 1); // survives capture teardown
+    CHECK(liveEvents == 1 && delayed->handle->records == 1);
     delayed.reset();
     CHECK(liveEvents == 0);
     {

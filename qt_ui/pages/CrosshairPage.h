@@ -23,27 +23,21 @@ private:
     void rebuildColorList();
     void saveCrosshairColors();
 
-    // ---- Color operations ----
     void addPreset(int presetIdx);
     void addNewColor();
     void removeColorAt(int index);
 
-    // ---- Screen eyedropper (取色) ----
     void toggleColorPick();
     void pollPickedColor();
     void applyPickedColor(int h, int s, int v);
     void finishPicking();
 
-    // ---- Crosshair sampling region ----
     QSpinBox* m_rectW{};
     QSpinBox* m_rectH{};
 
-    // ---- Crosshair shape tolerance ----
     QSpinBox* m_minPixels{};
     QSpinBox* m_closeRadius{};
-    // 【2026-09-13 删除】m_smoothSpin / m_smoothSlider —— 准星平滑已移除。
 
-    // ---- Color Palette UI ----
     QList<ConfigManager::ColorProfile> m_colors;
     QWidget* m_colorListContainer{};
     QVBoxLayout* m_colorListLayout{};
@@ -51,7 +45,6 @@ private:
     QPushButton* m_addPresetBtn{};
     QPushButton* m_addColorBtn{};
 
-    // ---- Screen eyedropper ----
     QPushButton* m_pickColorBtn{};
     QTimer* m_pickTimer{};
     int m_pickToken = 0;

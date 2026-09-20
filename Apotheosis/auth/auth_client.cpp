@@ -231,7 +231,7 @@ std::string auth_body_credentials(const std::string& user_name,
     body += "}";
     return body;
 }
-} // namespace
+}
 
 AuthClient::AuthClient(std::string server_url)
     : server_url_(std::move(server_url))
@@ -470,4 +470,4 @@ bool base64_decode(const std::string& text, std::vector<uint8_t>& bytes)
     return CryptStringToBinaryA(text.c_str(), 0, CRYPT_STRING_BASE64, bytes.data(), &out_len, nullptr, nullptr) != FALSE;
 }
 
-} // namespace auth
+}

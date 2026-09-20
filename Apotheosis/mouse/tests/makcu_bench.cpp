@@ -1,19 +1,3 @@
-// ============================================================
-// makcu_bench.cpp - MAKCU vs MAKCUNEW 链路性能对比 (独立工具, 不进主程序)
-//
-// 用生产同款传输代码测三条曲线:
-//   1) 单发指令耗时 (调用方视角: 这条指令花了多久才交给驱动)
-//   2) 饱和吞吐   (背靠背硬压, 求链路每秒能吃下多少条指令)
-//   3) 120Hz 节奏保真度 (瞄准链路每 8.333ms 发一条, 看实际间隔抖动/迟到)
-//
-// 安全约束: 只发 ±1px 交替位移, 净位移 0; 不点击、不拖动、不滚轮。
-//          桌面上最多看到光标左右抖 1px。
-// 注意: 两个串口是独占的, 必须先关掉 Apotheosis 才能跑(工具会自检并拒绝)。
-//
-// 编译: build\diag\build_makcu_bench.bat
-// 用法: makcu_bench.exe [--makcu COM5:115200] [--new COM3:6000000]
-//                       [--count 4000] [--only both|makcu|new] [--force]
-// ============================================================
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h>
@@ -38,7 +22,6 @@ namespace
 
 using SteadyClock = std::chrono::steady_clock;
 
-// C++20 里 u8"..." 是 char8_t[], 控制台按 UTF-8 输出
 const char* C(const char8_t* s) { return reinterpret_cast<const char*>(s); }
 
 double us_between(SteadyClock::time_point a, SteadyClock::time_point b)
@@ -68,8 +51,6 @@ Stats summarize(std::vector<double> v)
     return s;
 }
 
-// ---------------------------------------------------------------- 后端抽象
-
 struct Backend
 {
     virtual ~Backend() = default;
@@ -80,7 +61,6 @@ struct Backend
     virtual bool move(int dx, int dy) = 0;
 };
 
-// MAKCUNEW: 11 字节二进制帧 (0xA5 0x5C LEN SEQ CMD dxL dxH dyL dyH CRCL CRCH)
 struct MakcuNewBackend final : Backend
 {
     std::string port;
@@ -108,7 +88,6 @@ struct MakcuNewBackend final : Backend
     bool move(int dx, int dy) override { return conn && conn->move(dx, dy); }
 };
 
-// MAKCU: ASCII "km.move(x,y)\r\n" (厂商协议, 固件原生 115200)
 struct MakcuBackend final : Backend
 {
     std::string port;
@@ -129,8 +108,6 @@ struct MakcuBackend final : Backend
             dev.reset();
             return false;
         }
-        // 主程序 createInputDevices() 也是连上后再 setBaudRate(配置值, true)。
-        // 115200 是固件原生速率, 这里不重设, 避免动设备侧配置。
         if (baudRate != 115200 && !dev->setBaudRate(baudRate, true))
         {
             err = "设置波特率失败";
@@ -149,18 +126,16 @@ struct MakcuBackend final : Backend
     bool move(int dx, int dy) override { return dev && dev->mouseMove(dx, dy); }
 };
 
-// ---------------------------------------------------------------- 结果
-
 struct Options
 {
     std::string makcuPort = "COM5";
     unsigned makcuBaud = 115200;
     std::string newPort = "COM3";
     unsigned newBaud = 6000000;
-    int count = 4000;         // 单发采样数
+    int count = 4000;
     int warmup = 200;
-    double satSeconds = 1.5;  // 饱和压测时长
-    double tickSeconds = 2.0; // 120Hz 节奏测试时长
+    double satSeconds = 1.5;
+    double tickSeconds = 2.0;
     bool force = false;
     std::string only = "both";
 };
@@ -181,7 +156,7 @@ struct Result
     size_t late = 0;
 };
 
-constexpr double kTickPeriodUs = 1000000.0 / 120.0; // 8333.33us @120Hz
+constexpr double kTickPeriodUs = 1000000.0 / 120.0;
 
 void runBackend(Backend& b, const Options& o, Result& r)
 {
@@ -197,10 +172,8 @@ void runBackend(Backend& b, const Options& o, Result& r)
 
     int sign = 1;
 
-    // 预热: 把驱动/USB 管线的冷启动代价排除掉
     for (int i = 0; i < o.warmup; ++i) { sign = -sign; b.move(sign, 0); }
 
-    // ---- 1) 单发指令耗时 ----
     {
         std::vector<double> calls;
         calls.reserve(static_cast<size_t>(o.count));
@@ -216,7 +189,6 @@ void runBackend(Backend& b, const Options& o, Result& r)
         r.single = summarize(std::move(calls));
     }
 
-    // ---- 2) 饱和吞吐: 背靠背硬压 ----
     {
         std::vector<double> calls;
         sign = 1;
@@ -237,7 +209,6 @@ void runBackend(Backend& b, const Options& o, Result& r)
         r.satCall = summarize(std::move(calls));
     }
 
-    // ---- 3) 120Hz 节奏保真度 ----
     {
         const int ticks = static_cast<int>(o.tickSeconds * 120.0);
         std::vector<double> gaps, costs;
@@ -248,9 +219,9 @@ void runBackend(Backend& b, const Options& o, Result& r)
         auto prevStart = next;
         for (int i = 0; i < ticks; ++i)
         {
-            next += std::chrono::nanoseconds(8333333); // 120Hz
+            next += std::chrono::nanoseconds(8333333);
             std::this_thread::sleep_until(next - std::chrono::microseconds(400));
-            while (SteadyClock::now() < next) { /* spin */ }
+            while (SteadyClock::now() < next) {   }
 
             const auto c0 = SteadyClock::now();
             sign = -sign;
@@ -262,7 +233,7 @@ void runBackend(Backend& b, const Options& o, Result& r)
             {
                 const double gap = us_between(prevStart, c0);
                 gaps.push_back(gap);
-                if (gap > kTickPeriodUs + 2000.0) ++r.late; // 迟到 >2ms 记一次
+                if (gap > kTickPeriodUs + 2000.0) ++r.late;
             }
             prevStart = c0;
             costs.push_back(us_between(c0, c1));
@@ -273,8 +244,6 @@ void runBackend(Backend& b, const Options& o, Result& r)
 
     b.close();
 }
-
-// ---------------------------------------------------------------- 主程序自检
 
 bool apotheosisRunning()
 {
@@ -316,7 +285,7 @@ void printStats(const char* what, const Stats& s)
               << " max=" << std::setw(10) << s.max << " (us)\n";
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv)
 {
@@ -401,7 +370,6 @@ int main(int argc, char** argv)
         results.push_back(std::move(r));
     }
 
-    // ---- 对比结论 ----
     if (results.size() == 2 && results[0].ok && results[1].ok)
     {
         const Result& a = results[0];

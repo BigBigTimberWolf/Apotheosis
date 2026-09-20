@@ -40,8 +40,6 @@ void reset_session_counter()
 namespace
 {
 
-// Snapshot the configuration once per tick under configMutex so the UI
-// can edit live without us tearing.
 struct CfgSnap
 {
     bool  enabled = false;
@@ -49,8 +47,8 @@ struct CfgSnap
     float high_conf = 0.85f;
     bool  use_low = false;
     float low_conf = 0.30f;
-    bool  any_detection = false;   // 忽略阈值,只要有 YOLO 检测就采集
-    bool  use_flashlight = false;  // 寻光命中触发
+    bool  any_detection = false;
+    bool  use_flashlight = false;
     int   cooldown_ms = 200;
     std::vector<std::string> force_keys;
     std::string out_dir = "screenshots/auto";
@@ -135,7 +133,7 @@ void write_yolo_label(const std::string& path,
     std::fclose(fp);
 }
 
-} // namespace
+}
 
 void auto_capture_thread()
 {
@@ -145,11 +143,8 @@ void auto_capture_thread()
     int last_version = -1;
     auto last_save_ts = std::chrono::steady_clock::time_point::min();
 
-    // NOTE: not gated on session_stop_requested — auto-capture must survive
-    // inference start/stop, only the process-wide shouldExit ends it.
     while (!shouldExit.load())
     {
-        // Wait for a fresh detection (same idiom as mouse_thread_loop).
         bool fresh = false;
         {
             std::unique_lock<std::mutex> lk(detectionBuffer.mutex);
@@ -168,22 +163,18 @@ void auto_capture_thread()
         const CfgSnap cfg = snapshot_cfg();
         if (!cfg.enabled) continue;
 
-        // Force-key state (mouse side button typically).
         const bool force_held = isAnyKeyPressed(cfg.force_keys)
                                 && !cfg.force_keys.empty();
         g_force_held.store(force_held);
 
-        // Pull detections + the latest CPU frame.
         std::vector<cv::Rect> boxes;
         std::vector<int> classes;
         std::vector<float> confidences;
         int v = -1;
         detectionBuffer.get(boxes, classes, confidences, v);
 
-        // No detections AND no force-hold → nothing to record.
         if (boxes.empty() && !force_held) continue;
 
-        // Decide save.
         bool should_save = false;
         if (force_held)
             should_save = true;
@@ -198,7 +189,6 @@ void auto_capture_thread()
         }
         if (!should_save) continue;
 
-        // Cooldown gate.
         const auto now = std::chrono::steady_clock::now();
         const double since_ms = std::chrono::duration<double, std::milli>(
             now - last_save_ts).count();
@@ -208,7 +198,6 @@ void auto_capture_thread()
             continue;
         }
 
-        // Snapshot the most recent BGR detection-resolution frame.
         cv::Mat frame;
         {
             std::lock_guard<std::mutex> lk(frameMutex);
@@ -217,7 +206,6 @@ void auto_capture_thread()
         }
         if (frame.empty()) continue;
 
-        // Ensure output dir exists.
         std::error_code ec;
         std::filesystem::create_directories(cfg.out_dir, ec);
 
@@ -244,4 +232,4 @@ void auto_capture_thread()
     g_force_held.store(false);
 }
 
-} // namespace AutoCapture
+}

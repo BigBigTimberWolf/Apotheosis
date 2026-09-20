@@ -18,7 +18,7 @@ int main()
     output.reset();
     CHECK(lifetime.expired());
     auto pending = std::async(std::launch::async, [&] { return slot.wait(output, stop); });
-    stop.store(true); // driver never supplies the outstanding callback
+    stop.store(true);
     CHECK(pending.wait_for(1s) == std::future_status::ready);
     CHECK(!pending.get());
     stop.store(false);
@@ -27,7 +27,7 @@ int main()
     CHECK(closed.wait_for(1s) == std::future_status::ready && !closed.get());
     auto late = std::make_shared<int>(99);
     std::weak_ptr<int> lateLifetime = late;
-    slot.publish(std::move(late)); // cancelled reader may call back after teardown
+    slot.publish(std::move(late));
     CHECK(lateLifetime.expired());
     std::cout << "interruptible callback slot: passed\n";
 }

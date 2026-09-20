@@ -34,11 +34,9 @@ ModelToolsPage::ModelToolsPage(QWidget* parent)
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(14);
 
-    // -- Card 1: 模型加密 --
     auto* encryptCard = new CardWidget(QStringLiteral("模型加密"), QStringLiteral("lock"), container);
     auto* ec = encryptCard->contentLayout();
 
-    // File path line edit + browse button packed into one control for fieldRow.
     auto* pathControl = new QWidget();
     auto* pathRow = new QHBoxLayout(pathControl);
     pathRow->setContentsMargins(0, 0, 0, 0);
@@ -77,7 +75,6 @@ ModelToolsPage::ModelToolsPage(QWidget* parent)
 
     layout->addWidget(encryptCard);
 
-    // -- Card 2: 模型授权 --
     auto* authCard = new CardWidget(QStringLiteral("模型授权"), QStringLiteral("key"), container);
     auto* ac = authCard->contentLayout();
 

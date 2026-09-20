@@ -30,7 +30,6 @@ LogPage::LogPage(QWidget* parent)
     layout->setSpacing(14);
     scroll->setWidget(content);
 
-    // ── Card 1: 应用日志 ──
     auto* logCard = new CardWidget(QStringLiteral("应用日志"), QStringLiteral("terminal-2"));
 
     m_levelCombo = new QComboBox;

@@ -11,7 +11,6 @@ class QStackedWidget;
 class QWidget;
 class QTimer;
 
-// Mac 预览外壳:用纯 Qt + 假数据驱动重设计的新外壳与概览仪表盘,无 runtime、无登录。
 class PreviewWindow : public QMainWindow {
     Q_OBJECT
 

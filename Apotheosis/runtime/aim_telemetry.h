@@ -13,11 +13,6 @@
 namespace runtime
 {
 
-// -------------------------------------------------------------------------
-// Aim trajectory replay. Ring buffer holding ~replay_seconds of frames.
-// Each frame snapshot is intentionally light (struct-of-vectors) — the
-// overlay reads the buffer directly, no heavy copies.
-// -------------------------------------------------------------------------
 struct ReplayFrame
 {
     std::chrono::steady_clock::time_point ts;
@@ -40,15 +35,11 @@ public:
     void setEnabled(bool enabled);
     bool enabled() const;
 
-    // Cap retention to roughly `seconds` of recent frames. Calls older than
-    // this are dropped each push. Hot path — keep cheap.
     void setRetentionSeconds(int seconds);
 
     void push(const ReplayFrame& frame);
     void clear();
 
-    // Snapshot copy — used by the slow-motion overlay so it can iterate at
-    // its own pace without holding the writer lock.
     std::vector<ReplayFrame> snapshot() const;
     size_t size() const;
 
@@ -61,34 +52,13 @@ private:
     int    retention_seconds_ = 10;
 };
 
-} // namespace runtime
+}
 
-// Replay playback toggles. Defined in overlay/draw_debug.cpp; declared here
-// so any TU that needs to read or set them gets a real declaration instead
-// of a hand-typed local extern. Toggled by the Debug panel; consumed by
-// the playback overlay in the same file (and potentially future overlays).
 #include <atomic>
 extern std::atomic<bool> g_replay_playback_active;
 extern std::atomic<int>  g_replay_playback_frame;
 extern std::atomic<float> g_mouse_queue_latency_ms;
 extern std::atomic<int> g_mouse_queue_backlog;
 extern std::atomic<unsigned long long> g_mouse_send_failures;
-
-
-// -------------------------------------------------------------------------
-// 【2026-09-13 删除】「每计数像素」标定遥测 (整个 runtime::calib 命名空间)
-//
-// 删除的字段: g_measure_request / g_measure_cancel / g_measuring /
-//   g_px_per_count_x/y / g_calib_ready / g_measure_fits / g_measure_fits_needed /
-//   g_reject_* (6 个) / g_measure_accepted / g_max_counts_span /
-//   g_max_anchor_span / g_history_size / g_effective_px_per_count
-//
-// 原因: 它们全是给"标定 k̂(每计数像素)"服务的。前馈删除后控制器不再消费 k̂,
-//       测量功能整个失去意义, 界面上的「测量」按钮也一并移除。
-
-//
-// 注: 这不是"暂时关掉"的开关, 是整条链路移除 —— k̂ 在本项目双机架构下
-//     根本无法可靠测得(§6.7), 留着遥测只会让人误以为它还能用。
-// -------------------------------------------------------------------------
 
 #endif // RUNTIME_AIM_TELEMETRY_H

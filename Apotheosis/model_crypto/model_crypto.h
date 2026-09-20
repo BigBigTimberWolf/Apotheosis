@@ -55,6 +55,6 @@ bool decrypt_file(const std::string& input_path,
                   Payload& payload,
                   std::string& error);
 
-} // namespace oliver
+}
 
 #endif // MODEL_CRYPTO_H

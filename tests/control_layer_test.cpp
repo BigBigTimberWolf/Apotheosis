@@ -1,9 +1,3 @@
-// 控制器层逻辑回归 —— ①选靶 ②稳定器 ③滤波 ④瞄点 ⑤⑥PID+量化
-//
-// ★★ 设计纪律：每条断言都必须能【反向验证】—— 把被测代码改一行，它必须变红。
-//    跑法见文件末尾的说明。
-//
-
 
 #include "control/aim_controller.h"
 #include "control/alpha_beta_filter.h"
@@ -19,7 +13,6 @@
 
 using namespace control;
 
-// ── 极简断言框架 ─────────────────────────────────────────────────────────
 static int g_failures = 0;
 static int g_checks = 0;
 
@@ -49,26 +42,19 @@ static void section(const char* name)
     std::printf("[%s]\n", name);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ① 选靶
-// ══════════════════════════════════════════════════════════════════════════
 static void testSelector()
 {
     section("① 筛选 + 选靶");
 
-    // ★ 本节的用例只关心"桶"的筛选, 不关心逐类置信度门槛 ——
-    //   用一个空门槛表(= 谁都不额外过滤)把那一层关掉, 免得它干扰断言。
-    //   ★★ 逐类置信度的正面/反面用例在 testPerClassConfGate() 里单独钉。
     const SelectorConfig noConfGate;
 
-    // 类别桶：0=Aim, 1=Delete, 2=Filter, 3=Aim
     ClassBuckets buckets;
     buckets.byClassId = { Bucket::Aim, Bucket::Delete, Bucket::Filter, Bucket::Aim };
 
     std::vector<Candidate> cands;
     Candidate a; a.box = Box{ 100, 100, 40, 80 }; a.classId = 0; a.confidence = 0.9;
-    Candidate b; b.box = Box{ 300, 100, 40, 80 }; b.classId = 1; b.confidence = 0.9; // Delete
-    Candidate c; c.box = Box{ 500, 100, 40, 80 }; c.classId = 2; c.confidence = 0.9; // Filter
+    Candidate b; b.box = Box{ 300, 100, 40, 80 }; b.classId = 1; b.confidence = 0.9;
+    Candidate c; c.box = Box{ 500, 100, 40, 80 }; c.classId = 2; c.confidence = 0.9;
     Candidate d; d.box = Box{ 105, 300, 40, 80 }; d.classId = 3; d.confidence = 0.9;
     cands = { a, b, c, d };
 
@@ -76,7 +62,6 @@ static void testSelector()
     check(aimIdx.size() == 2, "Delete 与 Filter 被筛掉, 只剩 2 个 Aim");
     check(aimIdx[0] == 0 && aimIdx[1] == 3, "留下的是下标 0 与 3");
 
-    // 越界类别 ⇒ 安全默认 Delete（未知类别不瞄）
     ClassBuckets small;
     small.byClassId = { Bucket::Aim };
     Candidate odd; odd.box = Box{ 0, 0, 10, 10 }; odd.classId = 99;
@@ -84,33 +69,26 @@ static void testSelector()
     check(filterAimCandidates(one, small, noConfGate).empty(),
           "越界 classId 视为 Delete (未知类别不瞄)");
 
-    // 无效框被排除
     Candidate bad; bad.box = Box{ 0, 0, 0, 0 }; bad.classId = 0;
     std::vector<Candidate> inv = { bad };
     check(filterAimCandidates(inv, buckets, noConfGate).empty(), "无效框(w=0)被排除");
 
-    // ── 选最近的 ──────────────────────────────────────────────────────
     SelectorConfig sc;
     sc.hysteresisRatio = 1.3;
     SelectorState st;
-    const Vec2 cross{ 110, 140 };   // 靠近 a 的中心 (120,140)
+    const Vec2 cross{ 110, 140 };
     std::vector<Candidate> two = { a, d };
     const std::vector<size_t> idx2 = filterAimCandidates(two, buckets, noConfGate);
     TargetSelection sel = selectTarget(two, idx2, cross, sc, st);
     check(sel.found, "选到了目标");
     checkNear(sel.distancePx, 10.0, 1e-9, "选中的是更近的 a (距离 10px)");
 
-    // ── 滞回：新目标必须【明显更近】才切换 ─────────────────────────────
-    // a 稍远、d 稍近，但差距不到 k 倍 ⇒ 应继续保持 a。
-    // a 中心 (120,140)，d 中心 (125,340)。
-    // 把 cross 放在两者之间偏 d 一点：
     const Vec2 cross2{ 121, 250 };
-    const double distA = (Vec2{120,140} - cross2).norm();   // ≈110.0045
-    const double distD = (Vec2{125,340} - cross2).norm();   // ≈90.069
+    const double distA = (Vec2{120,140} - cross2).norm();
+    const double distD = (Vec2{125,340} - cross2).norm();
     check(distD < distA, "前提: d 比 a 更近");
     check(distD * 1.3 >= distA, "前提: d 的领先幅度【不到】k=1.3 倍");
 
-    // 先锁定 a，再喂同样的两候选
     SelectorState st2;
     std::vector<Candidate> two2 = { a, d };
     TargetSelection first = selectTarget(two2, idx2, cross, sc, st2);
@@ -120,34 +98,31 @@ static void testSelector()
     check(second.classId == 0,
           "滞回生效: d 虽更近但没到 1.3 倍, 仍保持锁定 a (classId=0)");
 
-    // 把 k 设成 1.0（无滞回）⇒ 必须改成选 d
     SelectorConfig noHyst = sc;
     noHyst.hysteresisRatio = 1.0;
     SelectorState st3;
-    selectTarget(two2, idx2, cross, noHyst, st3);          // 先锁 a
+    selectTarget(two2, idx2, cross, noHyst, st3);
     TargetSelection switched = selectTarget(two2, idx2, cross2, noHyst, st3);
     check(switched.classId == 3,
           "k=1.0(无滞回) 时改选更近的 d —— 证明滞回确实来自 hysteresisRatio");
 
-    // ── ★ maxDistancePx: 超出范围的候选不参与选择 ─────────────────────
     {
         SelectorConfig far;
         far.hysteresisRatio = 1.3;
         far.maxDistancePx = 50.0;
         SelectorState stF;
-        const Vec2 crossF{ 110, 140 };      // 距 a 中心 10px
-        std::vector<Candidate> one2 = { a };   // a 距 10px ⇒ 在范围内
+        const Vec2 crossF{ 110, 140 };
+        std::vector<Candidate> one2 = { a };
         const std::vector<size_t> idxA = filterAimCandidates(one2, buckets, noConfGate);
         check(selectTarget(one2, idxA, crossF, far, stF).found,
               "maxDistancePx=50 时 10px 的目标可选");
 
-        std::vector<Candidate> farAway = { d };  // d 中心 (125,340) 距 crossF 很远
+        std::vector<Candidate> farAway = { d };
         const std::vector<size_t> idxD = filterAimCandidates(farAway, buckets, noConfGate);
         SelectorState stF2;
         check(!selectTarget(farAway, idxD, crossF, far, stF2).found,
               "★ maxDistancePx=50 时超距目标被排除 (found=false)");
 
-        // 同一次调用, 不限制时应能选到
         SelectorConfig nolimit = far;
         nolimit.maxDistancePx = 0.0;
         SelectorState stF3;
@@ -155,7 +130,6 @@ static void testSelector()
               "maxDistancePx=0 (不限制) 时同一目标可选 —— 证明上一条来自该参数");
     }
 
-    // 锁定目标消失 ⇒ 锁定失效
     SelectorState st4;
     selectTarget(two2, idx2, cross, sc, st4);
     std::vector<Candidate> onlyD = { d };
@@ -163,7 +137,6 @@ static void testSelector()
     TargetSelection afterGone = selectTarget(onlyD, idxOnlyD, cross2, sc, st4);
     check(afterGone.found && afterGone.classId == 3, "锁定目标消失后改选剩下的 d");
 
-    // 空候选 ⇒ found=false 且状态复位
     SelectorState st5;
     std::vector<Candidate> none;
     TargetSelection empty = selectTarget(none, {}, cross, sc, st5);
@@ -171,9 +144,6 @@ static void testSelector()
     check(!st5.locked, "无候选时锁定状态被复位");
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ② 稳定器 —— ★ 最关键的一条: 它必须【不平滑】
-// ══════════════════════════════════════════════════════════════════════════
 static void testStabilizer()
 {
     section("② 稳定器 (认目标 + 剔除异常框, 不滤波)");
@@ -185,30 +155,23 @@ static void testStabilizer()
     cfg.minAspect = 0.2;
     cfg.maxAspect = 5.0;
 
-    // 宽高比
     check(aspectRatioPlausible(Box{0,0,40,80}, cfg), "40x80 (宽高比 0.5) 合法");
-    // ★ 200x40 的宽高比正好是 5.0 = maxAspect ⇒ 落在边界【上】, 应通过
-    //   (判定是 aspect <= maxAspect, 闭区间)
     check(aspectRatioPlausible(Box{0,0,200,40}, cfg), "200x40 (宽高比恰为 5.0) 在闭边界上, 合法");
     check(!aspectRatioPlausible(Box{0,0,201,40}, cfg), "201x40 (宽高比 > 5.0) 被拒");
     check(!aspectRatioPlausible(Box{0,0,400,40}, cfg), "400x40 (宽高比 10) 被拒");
 
-    // 首帧
     StabilizerState st;
     Candidate c1; c1.box = Box{ 100, 100, 40, 80 };
     StabilizerResult r1 = stabilize(c1, cfg, st);
     check(r1.verdict == StabilizerVerdict::NoHistory, "首帧判为 NoHistory");
     check(r1.accepted, "首帧 accepted");
 
-    // ★★★ 核心断言: 输出框 == 输入框 (逐位相同, 证明没有平滑)
-    //   这是 D6 的直接验证。若有人在这里加一行平滑, 本断言必须变红。
     Candidate c2; c2.box = Box{ 103.7, 101.2, 40.5, 79.3 };
     StabilizerResult r2 = stabilize(c2, cfg, st);
     check(r2.box.x == c2.box.x && r2.box.y == c2.box.y &&
           r2.box.w == c2.box.w && r2.box.h == c2.box.h,
           "★ 输出框与输入框逐位相同 —— 稳定器不做任何位置平滑 (D6)");
 
-    // 突变: 中心跳得很远
     StabilizerState st2;
     Candidate base; base.box = Box{ 100, 100, 40, 80 };
     stabilize(base, cfg, st2);
@@ -216,23 +179,17 @@ static void testStabilizer()
     StabilizerResult rT = stabilize(teleport, cfg, st2);
     check(rT.verdict == StabilizerVerdict::Snap, "中心瞬移 ⇒ Snap (下游需硬重置)");
 
-    // 突变: 尺寸突变
     StabilizerState st3;
     stabilize(base, cfg, st3);
-    Candidate grew; grew.box = Box{ 100, 100, 200, 400 };   // 面积 25 倍
+    Candidate grew; grew.box = Box{ 100, 100, 200, 400 };
     StabilizerResult rG = stabilize(grew, cfg, st3);
     check(rG.verdict == StabilizerVerdict::Snap, "面积突变 ⇒ Snap");
 
-    // ★★ 尺寸突变【但中心不动】—— 这条用例才能孤立"尺寸判据"。
-    //    之前的尺寸用例中心也动了, 所以就算把尺寸判据整个删掉,
-    //    "中心太远"这条回退路径照样会返回 Snap ⇒ 那条断言咬不住尺寸逻辑。
-    //    (实测: 把 snapped 里的 !sizeOk 拿掉, 旧用例依然全绿。)
     {
         StabilizerState stSz;
-        Candidate base2; base2.box = Box{ 100, 100, 40, 80 };   // 中心 (120,140), 面积 3200
+        Candidate base2; base2.box = Box{ 100, 100, 40, 80 };
         stabilize(base2, cfg, stSz);
 
-        // 中心仍是 (120,140), 但面积 9 倍 ⇒ 只有尺寸判据能发现
         Candidate sameCenterGrew; sameCenterGrew.box = Box{ 60, 20, 120, 240 };
         checkNear(sameCenterGrew.box.centerX(), 120.0, 1e-9, "前提: 新框中心不变");
         checkNear(sameCenterGrew.box.centerY(), 140.0, 1e-9, "前提: 新框中心不变");
@@ -244,10 +201,9 @@ static void testStabilizer()
               "★ 中心不动但面积 9 倍 ⇒ Snap (证明尺寸判据独立生效, "
               "不是靠'中心太远'那条回退路径)");
 
-        // 反向: 中心不动、面积在容差内 ⇒ 必须判 Ok
         StabilizerState stOk;
         stabilize(base2, cfg, stOk);
-        Candidate sameCenterSame; sameCenterSame.box = Box{ 105, 110, 30, 60 };  // 中心同, 面积比 ~0.56
+        Candidate sameCenterSame; sameCenterSame.box = Box{ 105, 110, 30, 60 };
         checkNear(sameCenterSame.box.centerX(), 120.0, 1e-9, "前提: 中心不变");
         checkNear(sameCenterSame.box.area() / base2.box.area() > 0.5, true, 0.0,
                   "前提: 面积比在容差内");
@@ -255,11 +211,10 @@ static void testStabilizer()
               "中心不动且面积在容差内 ⇒ Ok (证明上面的 Snap 不是无差别触发)");
     }
 
-    // 形状离谱 ⇒ Rejected, 且【不更新基准】
     StabilizerState st4;
     stabilize(base, cfg, st4);
     const Box before = st4.lastBox;
-    Candidate weird; weird.box = Box{ 100, 100, 400, 40 };  // 宽高比 10
+    Candidate weird; weird.box = Box{ 100, 100, 400, 40 };
     StabilizerResult rW = stabilize(weird, cfg, st4);
     check(rW.verdict == StabilizerVerdict::Rejected, "宽高比离谱 ⇒ Rejected");
     check(!rW.accepted, "Rejected 时 accepted=false");
@@ -267,14 +222,10 @@ static void testStabilizer()
           "★ 被剔除的框不成为下一帧基准 (否则误检会带偏基准)");
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ③ α-β 滤波
-// ══════════════════════════════════════════════════════════════════════════
 static void testAlphaBeta()
 {
     section("③ α-β 滤波");
 
-    // α/β 的边界
     checkNear(AlphaBetaFilter::alphaForTau(0.03, 0.0), 0.0, 1e-12, "dt=0 ⇒ α=0");
     checkNear(AlphaBetaFilter::alphaForTau(0.0, 0.008), 1.0, 1e-12, "τ=0 ⇒ α=1 (直通)");
     const double a = AlphaBetaFilter::alphaForTau(0.03, 0.00833);
@@ -283,14 +234,12 @@ static void testAlphaBeta()
     const double b = AlphaBetaFilter::betaForTau(0.03, 0.00833);
     check(b > 0.0 && b < a, "β < α (β 的收敛更慢, 否则速度会发散)");
 
-    // 首帧采纳观测
     AlphaBetaFilter f;
     check(!f.initialized(), "初始未初始化");
     f.observe(Vec2{100, 200}, 0.00833);
     check(f.initialized(), "首帧后已初始化");
     checkNear(f.position().x, 100.0, 1e-9, "首帧位置=观测");
 
-    // 阶跃: 静止目标突然跳到远处 ⇒ 应逐步逼近, 不瞬间到达
     f.reset();
     f.observe(Vec2{0, 0}, 0.00833);
     f.observe(Vec2{100, 0}, 0.00833);
@@ -298,12 +247,10 @@ static void testAlphaBeta()
     check(after1 > 0.0 && after1 < 100.0,
           "阶跃后一拍位置在 (0,100) 之间 —— 既没不动也没瞬间到达");
 
-    // 持续跟随: 多拍后应收敛到观测
     for (int i = 0; i < 200; ++i)
         f.observe(Vec2{100, 0}, 0.00833);
     checkNear(f.position().x, 100.0, 1e-6, "持续喂同一点 ⇒ 收敛到该点");
 
-    // ── ★ 复位必须清掉速度 (否则新目标会被旧速度外推) ────────────────
     AlphaBetaFilter f2;
     for (int i = 0; i < 50; ++i)
         f2.observe(Vec2{ static_cast<double>(i) * 10.0, 0 }, 0.00833);
@@ -312,10 +259,6 @@ static void testAlphaBeta()
     f2.observe(Vec2{0, 0}, 0.00833);
     checkNear(f2.position().x, 0.0, 1e-9, "reset 后首帧直接采纳观测 (速度已清零)");
 
-    // ★★ 首帧速度必须为 0 —— 不能"猜"一个初速。
-    //    猜错的话前几拍会被错误外推, 而 reset 的语义就是"对旧目标一无所知"。
-    //    验证方式: 首帧采纳观测, 第二拍若观测不动, 位置必须【保持不动】。
-    //    (若首帧给了非零速度, 第二拍会被外推到别处。)
     {
         AlphaBetaFilter g;
         g.observe(Vec2{500, 500}, 0.00833);
@@ -326,8 +269,6 @@ static void testAlphaBeta()
                   "(若首帧给了非零速度, 这里会被外推出去)");
     }
 
-    // ★★ 速度【只】是内部状态 —— 复位后残余速度不得影响后续。
-    //    对比: 全新滤波器 vs 跑过再复位的滤波器, 喂同样序列必须完全一致。
     {
         const std::vector<Vec2> seq = {
             {0,0}, {10,0}, {20,0}, {30,0}, {40,0}
@@ -345,23 +286,18 @@ static void testAlphaBeta()
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ④ 瞄点
-// ══════════════════════════════════════════════════════════════════════════
 static void testAnchor()
 {
     section("④ 瞄点 (中心点 + y偏移)");
 
     const Vec2 center{ 200, 300 };
-    const Box box{ 180, 260, 40, 80 };   // 中心正是 (200,300), 高 80
+    const Box box{ 180, 260, 40, 80 };
 
-    // yOffset: 1=框顶, 0.5=中心, 0=框底
     checkNear(anchorFromOffset(center, box, 1.0).y, 260.0, 1e-9, "yOffset=1 ⇒ 框顶 (260)");
     checkNear(anchorFromOffset(center, box, 0.5).y, 300.0, 1e-9, "yOffset=0.5 ⇒ 中心 (300)");
     checkNear(anchorFromOffset(center, box, 0.0).y, 340.0, 1e-9, "yOffset=0 ⇒ 框底 (340)");
     checkNear(anchorFromOffset(center, box, 0.0).x, 200.0, 1e-9, "x 不受 yOffset 影响");
 
-    // 不随机时: yOffsetMax == yOffset ⇒ 恒等于该值
     AimPointConfig cfg;
     cfg.yOffset = 0.25;
     cfg.yOffsetMax = 0.25;
@@ -369,7 +305,6 @@ static void testAnchor()
         checkNear(computeAnchor(center, box, cfg, i).y, 320.0, 1e-9,
                   "yOffset 区间退化时恒定 (0.25 ⇒ 320)");
 
-    // 随机区间: 结果必须落在 [lo, hi] 内, 且【同一帧可复现】
     AimPointConfig rnd;
     rnd.yOffset = 0.4;
     rnd.yOffsetMax = 0.6;
@@ -378,7 +313,6 @@ static void testAnchor()
     for (uint64_t i = 0; i < 200; ++i)
     {
         const double y = computeAnchor(center, box, rnd, i).y;
-        // yOffset 0.4 ⇒ y=308; 0.6 ⇒ y=292
         if (y < 292.0 - 1e-9 || y > 308.0 + 1e-9) inRange = false;
     }
     check(inRange, "随机 yOffset 始终落在 [yOffset, yOffsetMax] 对应的区间内");
@@ -387,14 +321,12 @@ static void testAnchor()
     const double y2 = computeAnchor(center, box, rnd, 7).y;
     checkNear(y1, y2, 0.0, "同一 frameIndex 结果完全可复现 (单测不会闪烁)");
 
-    // 分布确实散开 (不是恒定值)
     bool sawDifferent = false;
     const double yA = computeAnchor(center, box, rnd, 1).y;
     for (uint64_t i = 2; i < 50; ++i)
         if (std::fabs(computeAnchor(center, box, rnd, i).y - yA) > 1e-9) sawDifferent = true;
     check(sawDifferent, "不同帧的随机 yOffset 确实不同 (不是伪随机失效)");
 
-    // 区间写反也能工作
     AimPointConfig rev;
     rev.yOffset = 0.6;
     rev.yOffsetMax = 0.4;
@@ -403,26 +335,20 @@ static void testAnchor()
     check(yr >= 292.0 - 1e-9 && yr <= 308.0 + 1e-9, "yOffset/yOffsetMax 写反也落在同一区间");
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ⑤⑥ PID + 量化
-// ══════════════════════════════════════════════════════════════════════════
 static void testPid()
 {
     section("⑤⑥ PID + 量化结转");
 
     const double dt = 1.0 / 120.0;
 
-    // ── 纯 P: 输出 = lround(dt·Kp·e) ──────────────────────────────────
     {
-        PidConfig cfg;   // 默认 kp=35, ki=kd=0
+        PidConfig cfg;
         PidController pid(cfg);
-        const Counts c = pid.update(Vec2{110, 0}, Vec2{100, 0}, dt);   // e=10
-        // u = dt·Kp·e = 0.008333·35·10 = 2.9167 ⇒ 3
+        const Counts c = pid.update(Vec2{110, 0}, Vec2{100, 0}, dt);
         check(c.x == 3, "纯 P: e=10 ⇒ 3 counts (dt·35·10 = 2.917 ⇒ round 3)");
         check(c.y == 0, "y 误差 0 ⇒ 输出 0");
     }
 
-    // ── 零增益 ⇒ 零输出 (证明没有偷偷加东西) ──────────────────────────
     {
         PidConfig cfg;
         cfg.kpX = cfg.kpY = 0.0;
@@ -431,14 +357,9 @@ static void testPid()
         check(c.x == 0 && c.y == 0, "Kp=0 ⇒ 输出恒 0");
     }
 
-    // ── ★ 余量结转: 小误差反复施加, 必须累出非零输出 ──────────────────
-    //   这是"卡在差两像素不动"那个老问题的直接回归。
     {
         PidConfig cfg;
-        cfg.kpX = cfg.kpY = 0.1;    // 故意很小
-        // e=0.6px ⇒ u = 0.008333·0.1·0.6 = 0.0005 counts/拍
-        // ★ 500 拍累积 = 0.25 counts, 【攒不够 1】⇒ 总下发应当恰好是 0。
-        //   这条钉的是"结转不放大": 只有真攒够 1 才发, 不许四舍五入提前发。
+        cfg.kpX = cfg.kpY = 0.1;
         PidController pid2(cfg);
         int total = 0;
         for (int i = 0; i < 500; ++i)
@@ -446,16 +367,12 @@ static void testPid()
         check(total == 0,
               "★ 结转不放大: 500 拍累积 0.25 counts (<1) ⇒ 总下发为 0");
 
-        // 换一个能攒够的误差: e=3 ⇒ u = 0.0025/拍 × 500 = 1.25 ⇒ 应下发 1
         PidController pid3(cfg);
         int total3 = 0;
         for (int i = 0; i < 500; ++i)
             total3 += pid3.update(Vec2{103.0, 0}, Vec2{100, 0}, dt).x;
         check(total3 == 1, "★ 结转生效: 500 拍累积 1.25 counts ⇒ 总下发 1");
 
-        // ★★ 这条才是"卡在差两像素不动"那个老 bug 的直接回归:
-        //    用极小的 u/拍 持续施加, 足够多拍之后【必须】出非零。
-        //    2500 拍 × 0.0005 = 1.25 ⇒ 必须下发 1。
         PidController pid4(cfg);
         int total4 = 0;
         for (int i = 0; i < 2500; ++i)
@@ -465,7 +382,6 @@ static void testPid()
               "(不结转的话永远是 0, 就是当年'卡在差两像素不动'的 bug)");
     }
 
-    // ── 分方向: x 与 y 增益互不影响 ───────────────────────────────────
     {
         PidConfig cfg;
         cfg.kpX = 100.0;
@@ -476,7 +392,6 @@ static void testPid()
         check(c.y == 0, "★ Kp_y=0 ⇒ y 无输出 (证明两套增益独立)");
     }
 
-    // ── 限幅 ──────────────────────────────────────────────────────────
     {
         PidConfig cfg;
         cfg.kpX = 100000.0;
@@ -486,37 +401,29 @@ static void testPid()
         check(std::abs(c.x) <= 50, "输出被限幅夹住 (|counts| <= maxOutputCounts)");
     }
 
-    // ── ★★ 无死区: 任意小的误差都必须出力 ────────────────────────────
-    //    死区已整项删除(实测 5px 会引出 10.2 次/秒的翻转抖动)。
-    //    这条钉住"没有人把死区加回来" —— 最小误差也必须产生输出。
     {
         PidConfig cfg;
-        cfg.kpX = 100000.0;   // 放大增益, 让极小误差也够 1 count
+        cfg.kpX = 100000.0;
         PidController pid(cfg);
         const Counts tiny = pid.update(Vec2{0.01, 0}, Vec2{0, 0}, dt);
         check(tiny.x > 0,
               "★ 无死区: 误差 0.01px 也照常出力 (若有人加回死区, 这里会变 0)");
 
-        // P 项必须【经过原点且连续】—— 小误差时 P 项就等于误差本身
         PidController pid2(cfg);
         pid2.update(Vec2{0.01, 0}, Vec2{0, 0}, dt);
         checkNear(pid2.telemetry().x.p, 0.01, 1e-12,
                   "★ P 项经过原点: 0.01px 误差 ⇒ P=0.01 (连续, 无死区台阶)");
     }
 
-    // ── ★★ D 项: 低通必须真的起作用 ──────────────────────────────────
-    //    (之前 kd 默认 0 ⇒ D 项整段被跳过, 所以低通从没被测过。)
     {
-        // 无低通(τ=0): 误差阶跃时 D 项 = de/dt, 是冲激式的巨大值
-        // 有低通(τ=20ms): 同一个阶跃被抹平, D 项显著更小
         auto dTermAfterStep = [dt](double tau) {
             PidConfig c;
             c.kpX = 1.0;
             c.kdX = 1.0;
             c.tauDerivSec = tau;
             PidController p(c);
-            p.update(Vec2{0, 0}, Vec2{0, 0}, dt);          // 建立 prevError=0
-            p.update(Vec2{100, 0}, Vec2{0, 0}, dt);        // 误差阶跃到 100
+            p.update(Vec2{0, 0}, Vec2{0, 0}, dt);
+            p.update(Vec2{100, 0}, Vec2{0, 0}, dt);
             return p.telemetry().x.d;
         };
         const double dNoLp = dTermAfterStep(0.0);
@@ -527,38 +434,32 @@ static void testPid()
               "★ D 项低通生效: 同样阶跃下 τ=20ms 的 D 项小于 τ=0 (直通) —— "
               "这就是压制零惯性急停尖峰的机制");
 
-        // ★ kd=0 时 D 项必须恒为 0(不偷偷起作用)
         PidConfig z; z.kpX = 1.0; z.kdX = 0.0;
         PidController pz(z);
         pz.update(Vec2{0, 0}, Vec2{0, 0}, dt);
         pz.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         checkNear(pz.telemetry().x.d, 0.0, 1e-12, "★ kd=0 ⇒ D 项恒为 0");
 
-        // ★ 低通是【指数收敛】不是"一次性全给" —— 连续同向阶跃下方差应衰减
         PidConfig c2; c2.kpX = 1.0; c2.kdX = 1.0; c2.tauDerivSec = 0.020;
         PidController p2(c2);
         p2.update(Vec2{0, 0}, Vec2{0, 0}, dt);
         p2.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         const double d1 = p2.telemetry().x.d;
-        p2.update(Vec2{100, 0}, Vec2{0, 0}, dt);   // 误差不再变化 ⇒ de=0 ⇒ 低通状态衰减
+        p2.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         const double d2 = p2.telemetry().x.d;
         check(d2 < d1,
               "★ 误差不再变化时 D 项经低通衰减 (不是保持尖峰值)");
     }
 
-    // ── ★ P 项连续饱和: 误差超过 pFullScalePx 后 P 项不再增大 ──────────
-    //    与死区的本质区别: 它连续且经过原点 ⇒ 不存在"停了"这个状态。
     {
-        PidConfig a; a.kpX = 1.0; a.pFullScalePx = 0.0;    // 不饱和
-        PidConfig b; b.kpX = 1.0; b.pFullScalePx = 10.0;   // 饱和在 10px
+        PidConfig a; a.kpX = 1.0; a.pFullScalePx = 0.0;
+        PidConfig b; b.kpX = 1.0; b.pFullScalePx = 10.0;
         PidController pa(a), pb(b);
-        // 误差 100px: 不饱和时 u = dt·1·100; 饱和后 u = dt·1·10
         const Counts ca = pa.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         const Counts cb = pb.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(ca.x > cb.x, "★ pFullScalePx 生效: 大误差下饱和版输出更小");
         checkNear(pb.telemetry().x.p, 10.0, 1e-9, "★ P 项被夹到 pFullScalePx");
 
-        // ★ 饱和必须【经过原点且连续】—— 小误差时与不饱和版一致
         PidController pa2(a), pb2(b);
         const Counts sa = pa2.update(Vec2{3, 0}, Vec2{0, 0}, dt);
         const Counts sb = pb2.update(Vec2{3, 0}, Vec2{0, 0}, dt);
@@ -566,26 +467,20 @@ static void testPid()
         checkNear(pb2.telemetry().x.p, 3.0, 1e-9, "小误差时 P 项未被夹");
     }
 
-    // ── ★ 限幅在【余量结转之前】—— 被截掉的位移不许攒成欠账 ──────────
-    //    (若限幅放在结转之后, 被砍掉的部分会以 carry 形式积累,
-    //     表现为"松手后准星冲一下"。)
     {
         PidConfig cfg;
-        cfg.kpX = 1e6;              // 故意巨大, 一定撞限幅
+        cfg.kpX = 1e6;
         cfg.maxOutputCounts = 10;
         PidController pid(cfg);
         int total = 0;
         for (int i = 0; i < 100; ++i)
             total += pid.update(Vec2{10000, 0}, Vec2{0, 0}, dt).x;
-        // 每拍都被限幅到 10 ⇒ 100 拍总下发必须【恰为】1000。
-        // 若被砍的位移进了 carry, 总数会【超过】1000(欠账被补发)。
         check(total == 1000,
               "★ 限幅截掉的位移不攒欠账: 100 拍 × 限幅 10 ⇒ 总下发恰为 1000");
         check(std::fabs(pid.telemetry().x.carry) <= 1.0,
               "★ 撞限幅时 carry 保持有界 (不积累欠账)");
     }
 
-    // ── dt 非法 ⇒ 不输出且不改状态 ────────────────────────────────────
     {
         PidController pid;
         const Counts c0 = pid.update(Vec2{200, 0}, Vec2{0, 0}, 0.0);
@@ -594,7 +489,6 @@ static void testPid()
         check(cN.x == 0 && cN.y == 0, "dt<0 ⇒ 输出 0 (不以假 dt 出假速度)");
     }
 
-    // ── 积分: 消稳态误差 ──────────────────────────────────────────────
     {
         PidConfig cfg;
         cfg.kpX = 1.0;
@@ -607,35 +501,28 @@ static void testPid()
         check(pid.telemetry().x.i != 0.0, "积分器有值");
     }
 
-    // ── ★ 积分回吐: 误差反向时积分被快速削减 ──────────────────────────
     {
         PidConfig cfg;
         cfg.kiX = 20.0;
         cfg.tauUnwindSec = 0.030;
         PidController pid(cfg);
-        // 先同向累积几拍
         for (int i = 0; i < 20; ++i)
             pid.update(Vec2{50, 0}, Vec2{0, 0}, dt);
         const double before = pid.telemetry().x.i;
         check(before > 0.0, "同向累积后积分为正");
 
-        // 反向一拍 ⇒ 应被削减
         pid.update(Vec2{-50, 0}, Vec2{0, 0}, dt);
         check(pid.telemetry().unwoundX, "反向时标出 unwoundX");
         const double after = pid.telemetry().x.i;
         check(std::fabs(after) < std::fabs(before), "★ 反向时积分数值被削减 (回吐生效)");
     }
 
-    // ── ★ 回吐时间常数: 0.03s 必须比 0.2s 吐得更快 ────────────────────
     {
-        // ★ 直接比较"纯回吐衰减因子" —— 这是被测量的定义式,
-        //   不依赖 PID 的其他部分, 所以断言是干净的。
         const double decayFast = std::exp(-dt / 0.030);
         const double decaySlow = std::exp(-dt / 0.200);
         check(decayFast < decaySlow,
               "★ τ=30ms 的衰减因子小于 τ=200ms —— 用户修正了历史过慢的 0.2s");
 
-        // 再确认它确实作用到了积分上: 反向两拍后, τ 小的积分更小
         auto integralAfterTwoReverse = [dt](double tau) {
             PidConfig c;
             c.kiX = 20.0;
@@ -650,7 +537,6 @@ static void testPid()
               "★ 实跑验证: τ=30ms 时反向两拍后的积分小于 τ=200ms");
     }
 
-    // ── clamp 抗饱和 ─────────────────────────────────────────────────
     {
         PidConfig cfg;
         cfg.kiX = 1000.0;
@@ -662,9 +548,7 @@ static void testPid()
               "★ 积分被 clamp 夹住 (iMax=5) —— 抗饱和生效");
     }
 
-    // ── 稳定线读数 ────────────────────────────────────────────────────
     {
-        // Kp=52, dt=1/120 ⇒ g = 52·0.008333·0.593 ≈ 0.2570, /0.2602 ≈ 0.988
         const double r52 = stabilityRatio(52.0, dt);
         check(r52 > 0.9 && r52 < 1.0, "Kp=52 时稳定线读数接近但未越过 1.0");
         const double r100 = stabilityRatio(100.0, dt);
@@ -674,7 +558,6 @@ static void testPid()
         check(r100 > r30, "读数随 Kp 单调增");
     }
 
-    // ── 复位 ──────────────────────────────────────────────────────────
     {
         PidConfig cfg;
         cfg.kiX = 20.0;
@@ -685,11 +568,6 @@ static void testPid()
         pid.reset();
         check(pid.telemetry().x.i == 0.0, "reset 后遥测积分清零");
 
-        // ★★ 关键: 上面那条只看【遥测快照】—— 而遥测是 reset() 里单独清掉的,
-        //    所以它【咬不住】AxisState::reset() 是否真的清了内部状态。
-        //    (实测: 把 AxisState::reset() 里的 integral=0 删掉, 上面那条依然绿。)
-        //    真正能证明内部状态被清的, 是【再跑一拍看输出】——
-        //    若内部积分没清, 输出会比"干净起点"大一截。
         PidController clean(cfg);
         const Counts afterReset = pid.update(Vec2{50, 0}, Vec2{0, 0}, dt);
         const Counts fromClean = clean.update(Vec2{50, 0}, Vec2{0, 0}, dt);
@@ -697,18 +575,42 @@ static void testPid()
               "★ reset 后第一拍的输出 == 全新控制器第一拍的输出 "
               "(证明内部积分/余量/历史真的被清了, 不是只清了遥测)");
 
-        // 反向再证: 不复位的话, 累积的积分会把输出顶得更大
         PidController dirty(cfg);
         for (int i = 0; i < 20; ++i) dirty.update(Vec2{50, 0}, Vec2{0, 0}, dt);
         const Counts withoutReset = dirty.update(Vec2{50, 0}, Vec2{0, 0}, dt);
         check(withoutReset.x >= afterReset.x,
               "不复位时输出不小于复位后 (证明上面那条比较是有区分度的)");
     }
+
+    {
+        // 验证 Smith 在途自身位移补偿 (一帧拉枪)
+        PidConfig cfg;
+        cfg.kpX = 50.0;
+        cfg.kPxPerCount = 0.593;
+        cfg.inflightBeta = 0.8;
+        cfg.deadTimeMs = 46.0;
+
+        PidController pid(cfg);
+        // 第一拍：目标在 100px 处，发出大力度拉枪
+        const Counts c1 = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(c1.x > 0, "★ 第一拍向目标猛拉");
+
+        // 第二拍：由于 46ms 延迟画面尚未改变（仍然看到 100px）
+        // 但已下发的 counts 应当被折算扣除，避免重复下令
+        const Counts c2 = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(c2.x < c1.x, "★ 第二拍因在途位移扣除，输出力度显著减小（精准刹车）");
+
+        // 对照：无在途补偿时（kPxPerCount = 0），第二拍依然在 41 counts 左右满额拉枪
+        PidConfig cfgUncomp = cfg;
+        cfgUncomp.kPxPerCount = 0.0;
+        PidController pidUncomp(cfgUncomp);
+        const Counts u1 = pidUncomp.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        const Counts u2 = pidUncomp.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(u2.x >= 40, "无补偿时第二拍继续满额拉枪（过冲成因）");
+        check(c2.x < u2.x, "★ Smith 补偿确实成功抑制了重复下令！");
+    }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// 整链 ①→⑥
-// ══════════════════════════════════════════════════════════════════════════
 static void testFullChain()
 {
     section("整链 ①→⑥");
@@ -717,13 +619,12 @@ static void testFullChain()
     cfg.buckets.byClassId = { Bucket::Aim };
     cfg.selector.hysteresisRatio = 1.3;
     cfg.aimPoint.yOffset = 0.5;
-    cfg.aimPoint.yOffsetMax = 0.5;   // 不随机, 便于断言
+    cfg.aimPoint.yOffsetMax = 0.5;
     cfg.pid.kpX = 35.0;
     cfg.pid.kpY = 35.0;
 
     const double dt = 1.0 / 120.0;
 
-    // ── 无候选 ⇒ 不 engage ───────────────────────────────────────────
     {
         AimController ac;
         ac.setConfig(cfg);
@@ -737,7 +638,6 @@ static void testFullChain()
               "idleReason = NoCandidates");
     }
 
-    // ── 检测不新鲜 ⇒ 不 engage ───────────────────────────────────────
     {
         AimController ac;
         ac.setConfig(cfg);
@@ -753,14 +653,12 @@ static void testFullChain()
               "idleReason = StaleDetection");
     }
 
-    // ── 正常一拍: 输出方向必须指向目标 ───────────────────────────────
     {
         AimController ac;
         ac.setConfig(cfg);
         ControlInput in;
-        in.cross = Vec2{ 320, 240 };          // 准星在中心
+        in.cross = Vec2{ 320, 240 };
         in.dtSec = dt;
-        // 目标在准星右下方
         Candidate c; c.box = Box{ 380, 300, 40, 80 }; c.classId = 0; c.confidence = 0.9;
         in.candidates.push_back(c);
 
@@ -771,12 +669,10 @@ static void testFullChain()
         check(out.counts.x > 0, "★ 输出 x 为正 (往右拉)");
         check(out.counts.y > 0, "★ 输出 y 为正 (往下拉)");
 
-        // 锚点应在框中心 (yOffset=0.5)
         checkNear(out.anchor.x, 400.0, 1.0, "锚点 x ≈ 框中心 x (400)");
         checkNear(out.anchor.y, 340.0, 1.0, "锚点 y ≈ 框中心 y (340)");
     }
 
-    // ── ★ 突变 ⇒ 滤波与 PID 被复位 ───────────────────────────────────
     {
         AimController ac;
         ac.setConfig(cfg);
@@ -793,25 +689,22 @@ static void testFullChain()
         }
         check(ac.filter()->initialized(), "正常跟随中滤波器已初始化");
 
-        // 瞬移到很远的地方
         Candidate tele; tele.box = Box{ 900, 900, 40, 80 }; tele.classId = 0; tele.confidence = 0.9;
         in.candidates = { tele };
         in.frameIndex = 100;
         const ControlOutput out = ac.update(in);
         check(out.engaged, "瞬移后仍然 engage");
-        // Snap 会 reset 滤波器, 然后本帧 observe 首帧 ⇒ 位置直接采纳新观测
         checkNear(ac.filter()->position().x, 920.0, 1.0,
                   "★ 瞬移后滤波器被复位并直接采纳新位置 (而不是从旧位置慢慢滑过去)");
     }
 
-    // ── 形状离谱的框 ⇒ 不出力 ────────────────────────────────────────
     {
         AimController ac;
         ac.setConfig(cfg);
         ControlInput in;
         in.dtSec = dt;
         in.cross = Vec2{ 320, 240 };
-        Candidate weird; weird.box = Box{ 300, 200, 800, 20 };  // 宽高比 40
+        Candidate weird; weird.box = Box{ 300, 200, 800, 20 };
         weird.classId = 0; weird.confidence = 0.9;
         in.candidates = { weird };
         const ControlOutput out = ac.update(in);
@@ -820,7 +713,6 @@ static void testFullChain()
               "idleReason = RejectedByStabilizer");
     }
 
-    // ── reset ────────────────────────────────────────────────────────
     {
         AimController ac;
         ac.setConfig(cfg);
@@ -835,7 +727,6 @@ static void testFullChain()
         check(!ac.filter()->initialized(), "reset 后滤波器未初始化");
     }
 
-    // ── ★ 二选一: setFilter(nullptr) 恢复 α-β, 不存在"两个同时生效" ──
     {
         AimController ac;
         ac.setConfig(cfg);
@@ -845,24 +736,13 @@ static void testFullChain()
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ★★ 逐类别瞄点覆盖 + 逐类别置信度门槛（2026-09-17 第四轮续）
-//
-//   这两条是为"把旧界面的『瞄准类别』卡改回原样"补的后端。
-//   改之前 aim_classes[].y_offset / min_conf 是【存盘但没人读】的 ——
-//   界面上能调、跑起来没反应，正是本仓库反复踩的"死旋钮"坑。
-//   所以这两节的存在理由就是: 让"没人读"这件事变成一个会变红的断言。
-// ══════════════════════════════════════════════════════════════════════════
-
 static void testPerClassAimPoint()
 {
     section("★ 逐类别瞄点覆盖 (y_offset 真的被读)");
 
-    // 框: 中心 (500,300), 高 100 ⇒ 框顶 y=250, 框底 y=350。
     const Box box{ 460, 250, 80, 100 };
     const Vec2 center{ 500, 300 };
 
-    // 基准: 不传覆盖 ⇒ 用热键级的 0.5（框中心）。
     {
         AimPointConfig c;
         c.yOffset = 0.5; c.yOffsetMax = 0.5;
@@ -870,18 +750,12 @@ static void testPerClassAimPoint()
         check(std::abs(a.y - 300.0) < 1e-9, "无覆盖: yOffset=0.5 ⇒ 瞄点=框中心 300");
     }
 
-    // ★★★ 核心: 必须走【真的 AimController】, 不能在测试里重抄一遍查表逻辑。
-    //   我第一版就是把查表逻辑复制进测试 —— 结果把"覆盖完全没接线"这类变异
-    //   全放过了(实测 3 条变异全绿)。复制逻辑的测试只验证了它自己。
     auto anchorYFor = [box](int classId, const std::vector<ClassAimPoint>& table,
                             double hotkeyLo, double hotkeyHi) {
         ControllerConfig cfg;
-        // ★ 必须把类别放进 Aim 桶, 否则 bucketOf() 返回 Delete ⇒ 没有候选 ⇒
-        //   engaged=false ⇒ anchor 恒为 0。第一版漏了这句, 于是 6 条断言全在
-        //   比 0 —— 它们"失败"是对的, 但失败的原因不是覆盖表, 而是没接上。
         cfg.buckets.byClassId.assign(64, Bucket::Aim);
         cfg.selector.hysteresisRatio = 1.0;
-        cfg.stabilizer.matchCenterRatio = 100.0;   // 稳定器怎么都认
+        cfg.stabilizer.matchCenterRatio = 100.0;
         cfg.stabilizer.kSnapMult = 1000.0;
         cfg.stabilizer.minAspect = 0.01;
         cfg.stabilizer.maxAspect = 100.0;
@@ -893,21 +767,18 @@ static void testPerClassAimPoint()
         ac.setConfig(cfg);
         ControlInput in;
         in.dtSec = 0.008;
-        in.cross = Vec2{ 500, 300 };          // 准星就在中心, 减少滤波扰动
+        in.cross = Vec2{ 500, 300 };
         Candidate c; c.box = box; c.classId = classId; c.confidence = 0.9;
         in.candidates = { c };
 
-        // 跑几拍让滤波收敛, 取最后一拍。
         ControlOutput out;
         for (int i = 0; i < 12; ++i) { in.frameIndex = static_cast<uint64_t>(i); out = ac.update(in); }
         return out.anchor.y;
     };
 
-    // ★ 类别 7 = 头 ⇒ 0.9（贴框顶）; 热键级是 0.5（中心）。
     const std::vector<ClassAimPoint> table = { ClassAimPoint{ 7, 0.9, 0.9 },
                                                ClassAimPoint{ 9, 0.5, 0.5 } };
 
-    // yOffset=0.9 ⇒ 中心 + (0.5-0.9)*100 = 300 - 40 = 260
     const double headY = anchorYFor(7, table, 0.5, 0.5);
     checkNear(headY, 260.0, 0.5,
               "★★ 类别 7 命中覆盖表 ⇒ 瞄点 ~260 (贴框顶), 不是热键级的 300");
@@ -916,36 +787,23 @@ static void testPerClassAimPoint()
     checkNear(bodyY, 300.0, 0.5,
               "类别 9 覆盖为 0.5 ⇒ 瞄点仍 ~300 (覆盖表逐类生效, 不串台)");
 
-    // ★ 查不到的类别 ⇒ 退回热键级（不是退回 0，也不是不瞄）。
     const double otherY = anchorYFor(42, table, 0.5, 0.5);
     checkNear(otherY, 300.0, 0.5,
               "★ 未列入覆盖表的类别 ⇒ 退回热键级 yOffset (不是失效)");
 
-    // ★★ 决定性断言: 覆盖表【为空】时, 同一个类别 7 必须回到热键级 300。
-    //   没有这条, "覆盖表根本没被读"也能让上面的 260 通过(如果表被硬编码)。
     const double headNoTable = anchorYFor(7, {}, 0.5, 0.5);
     checkNear(headNoTable, 300.0, 0.5,
               "★★ 覆盖表为空 ⇒ 类别 7 回到热键级 300 (证明 260 真的来自覆盖表)");
 
-    // ★ 热键级本身也要仍然有效（覆盖表不该"劫持"全部类别）。
     const double hotkeyOnly = anchorYFor(7, {}, 0.8, 0.8);
     checkNear(hotkeyOnly, 270.0, 0.5,
               "★ 无覆盖表时热键级 0.8 ⇒ 瞄点 ~270 (热键级路径没被覆盖逻辑破坏)");
 
-    // ★ 顺序无关: 把表打乱, 类别 7 仍然是 0.9。
     const std::vector<ClassAimPoint> shuffled = { ClassAimPoint{ 9, 0.5, 0.5 },
                                                   ClassAimPoint{ 7, 0.9, 0.9 } };
     checkNear(anchorYFor(7, shuffled, 0.5, 0.5), 260.0, 0.5,
               "覆盖表顺序打乱 ⇒ 仍按 classId 匹配到 7 ⇒ 260");
 
-    // ★★ 随机区间: lo != hi ⇒ 瞄点必须落在区间内, 且【两端都要覆盖到】。
-    //   上面所有用例的 lo 都等于 hi, 所以"只覆盖 lo、丢了 hi"那个变异
-    //   完全区分不出来(实测: 未被捕获)。这里补一条 lo≠hi 的。
-    //   ★ 算准: anchorY = 中心 + (0.5 − offset) × h, h=100
-    //     offset = 0.8 ⇒ 300 + (0.5−0.8)×100 = 270  （贴框顶那一端）
-    //     offset = 0.4 ⇒ 300 + (0.5−0.4)×100 = 310  （靠框底那一端）
-    //   ⇒ y ∈ [270, 310]。★ 若只覆盖 lo(0.4) 而丢了 hi, 每拍恒为 310。
-    //     （我第一版把 0.4 那一端错算成 280 —— 符号写反了, 探针实测才看出来。）
     {
         ControllerConfig cfg;
         cfg.buckets.byClassId.assign(64, Bucket::Aim);
@@ -954,7 +812,7 @@ static void testPerClassAimPoint()
         cfg.stabilizer.kSnapMult = 1000.0;
         cfg.stabilizer.minAspect = 0.01;
         cfg.stabilizer.maxAspect = 100.0;
-        cfg.aimPoint.yOffset = 0.5; cfg.aimPoint.yOffsetMax = 0.5;   // 热键级: 中心
+        cfg.aimPoint.yOffset = 0.5; cfg.aimPoint.yOffsetMax = 0.5;
         cfg.classAimPoints.push_back(ClassAimPoint{ 7, 0.4, 0.8 });
 
         AimController ac;
@@ -970,14 +828,10 @@ static void testPerClassAimPoint()
         {
             in.frameIndex = static_cast<uint64_t>(i);
             const ControlOutput o = ac.update(in);
-            // ★ 跳过前 30 拍的收敛暂态 —— 滤波从初始位置滑到稳定值期间,
-            //   anchor 会被滤波后的中心点带飞(y 一度到 309), 那是暂态不是设计。
-            //   ★ 只统计稳定段, 断言才钉的是"随机区间"本身。
             if (i < 30) continue;
             lo = std::min(lo, o.anchor.y);
             hi = std::max(hi, o.anchor.y);
         }
-        // y ∈ [270, 310]: 期望最小 ~270（offset 0.8）, 最大 ~310（offset 0.4）。
         checkNear(lo, 270.0, 1.0, "★ 逐类随机区间: 最小值 ~270 (offset=0.8 那一端被用到)");
         checkNear(hi, 310.0, 1.0, "★★ 逐类随机区间: 最大值 ~310 (offset=0.4 那一端也被用到)");
         check(hi - lo > 30.0,
@@ -992,14 +846,12 @@ static void testPerClassConfGate()
     ClassBuckets buckets;
     buckets.byClassId = { Bucket::Aim, Bucket::Aim, Bucket::Aim };
 
-    // 三类都是 Aim, 置信度分别 0.10 / 0.30 / 0.90。
     auto mk = [](int cid, double conf) {
         Candidate c; c.box = Box{ 100.0 * cid, 100, 40, 80 };
         c.classId = cid; c.confidence = conf; return c;
     };
     std::vector<Candidate> cands = { mk(0, 0.10), mk(1, 0.30), mk(2, 0.90) };
 
-    // 门槛表: 类别 0 要 0.35（0.10 过不了）, 类别 1 要 0.20（0.30 能过）。
     SelectorConfig cfg;
     cfg.minConfByClassId = { 0.35, 0.20, 0.0 };
 
@@ -1007,7 +859,6 @@ static void testPerClassConfGate()
     check(idx.size() == 2, "★ 类别 0 被置信度门槛挡掉, 剩 2 个");
     check(idx[0] == 1 && idx[1] == 2, "留下的是下标 1(0.30≥0.20) 与 2(0.90, 门槛0=不限)");
 
-    // ★ 反面: 门槛设成 0 ⇒ 完全不过滤（"0 = 跟随全局"的语义）。
     {
         SelectorConfig off;
         off.minConfByClassId = { 0.0, 0.0, 0.0 };
@@ -1015,14 +866,12 @@ static void testPerClassConfGate()
               "★ 门槛全 0 ⇒ 三个都留下 (0 = 不限, 不是『要 0 置信度』)");
     }
 
-    // ★ 空表 ⇒ 谁都不额外过滤。
     {
         SelectorConfig empty;
         check(filterAimCandidates(cands, buckets, empty).size() == 3,
               "空门槛表 ⇒ 不过滤");
     }
 
-    // ★ 越界 classId 查询 ⇒ 返回 0（不限），不是崩也不是误挡。
     {
         SelectorConfig cfg2;
         cfg2.minConfByClassId = { 0.9 };
@@ -1030,20 +879,15 @@ static void testPerClassConfGate()
         check(std::abs(cfg2.minConfOf(0) - 0.9) < 1e-9, "表内 classId 取到 0.9");
     }
 
-    // ★★ 门槛必须是真的【下限比较】: 恰好等于门槛 ⇒ 放行（>= 不是 >）。
-    //   ★ 用类别 1（置信度恰好 0.30）配 0.30 的门槛来测边界。
-    //     （我一开始错写成类别 0 —— 它置信度 0.10, 本来就该被挡掉。）
     {
         SelectorConfig eq;
         eq.minConfByClassId = { 0.0, 0.30, 0.0 };
-        // 把类别 1 的置信度精确设成 0.30, 与门槛逐位相等。
         std::vector<Candidate> c2 = { mk(1, 0.30) };
         const std::vector<size_t> r = filterAimCandidates(c2, buckets, eq);
         check(r.size() == 1,
               "★ 置信度恰好等于门槛(0.30) ⇒ 放行 (>= 语义, 边界不吃掉目标)");
     }
 
-    // ★ 反面: 比门槛小一点点 ⇒ 必须挡掉。没有这条, 上面那条"总是放行"也能过。
     {
         SelectorConfig eq;
         eq.minConfByClassId = { 0.0, 0.30, 0.0 };
@@ -1052,17 +896,11 @@ static void testPerClassConfGate()
               "★ 置信度略低于门槛(0.2999 < 0.30) ⇒ 被挡掉");
     }
 
-    // ★★ 表里存了【负数】⇒ 必须当成"不限", 不能当成"门槛 -0.5"。
-    //   负门槛在数值上会让所有候选都通过(confidence >= 0 > -0.5),
-    //   看似"无害", 但它会让 minConfOf 失去"<=0 即不限"这条契约 ——
-    //   而下游(以及未来的调用方)依赖这条契约判断"这一类有没有设门槛"。
-    //   ★ 实测: 不把负值归零的变异, 在没有这条用例时【完全区分不出来】。
     {
         SelectorConfig neg;
         neg.minConfByClassId = { -0.5, 0.0, 0.0 };
         check(neg.minConfOf(0) == 0.0,
               "★★ 表里存负数 ⇒ minConfOf 归零 (契约: <=0 即『不限』)");
-        // 且行为上确实不过滤低置信度候选。
         std::vector<Candidate> low = { mk(0, 0.0001) };
         check(filterAimCandidates(low, buckets, neg).size() == 1,
               "★★ 负门槛类别 ⇒ 极低置信度候选也放行 (确认它真的是『不限』)");

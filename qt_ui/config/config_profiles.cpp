@@ -24,21 +24,12 @@ extern std::atomic<bool> detector_model_changed;
 namespace
 {
 
-// 方案目录与引导文件名。工作目录此时已经切到 exe 旁 (见 Apotheosis.cpp),
-// 所以 "config.ini" / "configs" 都落在程序旁边。
 constexpr const char* kProfilesDirName   = "configs";
 constexpr const char* kProfileSuffix     = ".ini";
 constexpr const char* kCurveSuffix       = ".curves";
 constexpr const char* kActiveMarkerName  = "active.txt";
 constexpr int         kMaxNameLength     = 48;
 
-// ★ 调参通道的文件【不是方案】(2026-09-15 修)。
-//
-//   live_tune.ini 与方案文件同住 configs/, 方案列表枚举 *.ini 时会把它当成
-//   一个名叫 "live_tune" 的方案。后果实测发生过: 用户看到列表里多了一项,
-//   点它 -> active.txt 变成 'live_tune' -> 从此"切方案/保存"都作用在调参
-//   通道的文件上, 与真正的方案互相覆盖 —— 又是一次"两份真相"。
-//   方案列表必须显式排除它(以及未来任何调参通道的内部文件)。
 QStringList internalNonProfileNames()
 {
     return { QStringLiteral("live_tune") };
@@ -55,7 +46,7 @@ QString curveDirFor(const QString& iniPath)
     return info.dir().filePath(info.completeBaseName() + QString::fromLatin1(kCurveSuffix));
 }
 
-}  // namespace
+}
 
 ConfigProfiles::ConfigProfiles() : QObject(nullptr) {}
 
@@ -95,8 +86,6 @@ QString ConfigProfiles::sanitizeName(const QString& raw)
     if (name.isEmpty() || name == QStringLiteral(".") || name == QStringLiteral(".."))
         return {};
 
-    // Windows 文件名里非法或会让用户困惑的字符; 另外挡掉结尾的 '.' / '空格'
-    // (Win32 会静默吃掉, 导致"保存成功了但列表里找不到")。
     static const QString kBad = QStringLiteral("\\/:*?\"<>|");
     for (const QChar ch : name) {
         if (kBad.contains(ch) || ch < QChar(0x20) || ch == QChar(0x7F))
@@ -121,7 +110,7 @@ QStringList ConfigProfiles::names() const
     const auto files = dir.entryInfoList(filters, QDir::Files, QDir::Name);
     for (const auto& info : files) {
         if (internal.contains(info.completeBaseName()))
-            continue;   // 调参通道的文件不是方案
+            continue;
         out << info.completeBaseName();
     }
     return out;
@@ -139,7 +128,7 @@ QList<ConfigProfiles::Entry> ConfigProfiles::entries() const
     const auto files = dir.entryInfoList(filters, QDir::Files, QDir::Name);
     for (const auto& info : files) {
         if (internal.contains(info.completeBaseName()))
-            continue;   // 调参通道的文件不是方案
+            continue;
         Entry e;
         e.name     = info.completeBaseName();
         e.filePath = info.absoluteFilePath();
@@ -166,8 +155,6 @@ QString ConfigProfiles::activeName() const
 
 QString ConfigProfiles::activeFilePath() const
 {
-    // 没有活动方案时, 生效配置的落盘目标就是引导文件 config.ini
-    // (与 flushCurrent() 的回落规则保持一致 —— 两处必须给出同一个答案)。
     if (m_active.isEmpty())
         return QDir(QDir::currentPath()).filePath(QStringLiteral("config.ini"));
     return profileFilePath(m_active);
@@ -201,7 +188,6 @@ void ConfigProfiles::initialize()
 {
     QDir().mkpath(directory());
 
-    // 一份方案都没有: 把当前生效配置 (config.ini 或它的默认值) 另存成「默认」方案。
     if (names().isEmpty()) {
         const QString path = profileFilePath(g_defaultProfileName());
         bool ok = false;
@@ -230,8 +216,7 @@ void ConfigProfiles::initialize()
     if (!m_active.isEmpty()) {
         writeActiveMarker(m_active);
         QString error;
-        // 内容与 config.ini 一致 (或本来就是从它生成的), 不要重复落盘。
-        if (!applyProfileFile(profileFilePath(m_active), /*autoSaveCurrent=*/false, &error)) {
+        if (!applyProfileFile(profileFilePath(m_active),  false, &error)) {
             emit operationFailed(QString::fromUtf8(u8"应用配置方案失败: %1").arg(error));
         }
     }
@@ -243,9 +228,6 @@ void ConfigProfiles::refresh()
 {
     const QStringList all = names();
     if (!m_active.isEmpty() && !all.contains(m_active)) {
-        // 当前方案文件在外部被删掉/改名了。内存里的配置仍是真相, 但落盘目标
-        // 已经不存在 —— 把目标挪回 config.ini, 免得下一次自动保存把用户刚删掉
-        // 的文件凭空写回来; 同时清掉选择, 让用户显式重选一个方案。
         {
             std::lock_guard<std::recursive_mutex> lk(configMutex);
             config.retargetConfigPath("config.ini");
@@ -258,10 +240,6 @@ void ConfigProfiles::refresh()
 
 bool ConfigProfiles::flushCurrent(QString* error)
 {
-    // 即使还没有活动方案也要落盘: 此时落盘目标就是 config.ini, 写下去没有副作用,
-    // 却能让「切换前不丢改动」这条规则永远成立。
-    // 先停掉防抖计时器并立刻落盘 —— 此时 config_path 仍指向旧方案,
-    // 所以用户刚改的东西写回的是旧方案, 不会串到新方案里。
     ConfigBridge::instance().flush();
 
     const QString target = m_active.isEmpty()
@@ -296,9 +274,6 @@ bool ConfigProfiles::applyProfileFile(const QString& targetPath, bool autoSaveCu
         oldModel = config.ai_model;
         oldInput = config.input_method;
         if (!config.loadConfig(targetPath.toStdString())) {
-            // loadConfig() 是先把 config_path 指过去再解析的: 解析失败时目标
-            // 已经落在坏文件上了, 必须挪回来 —— 否则下一次自动保存会把当前
-            // 内存里的配置(旧方案的)盖到那个坏文件上。
             config.retargetConfigPath("config.ini");
             if (error)
                 *error = QString::fromUtf8(u8"方案解析失败: %1")
@@ -307,10 +282,8 @@ bool ConfigProfiles::applyProfileFile(const QString& targetPath, bool autoSaveCu
         }
     }
 
-    // 运行时读的是不可变快照, 换配置后必须重新发布, 否则鼠标/采集线程还在跑旧值。
     runtime_config::publish();
 
-    // 把新配置推回 Qt 侧缓存 (内部 QSignalBlocker, 不会反过来触发回写)。
     ConfigBridge::instance().syncFromRuntime();
 
     {
@@ -323,7 +296,6 @@ bool ConfigProfiles::applyProfileFile(const QString& targetPath, bool autoSaveCu
             input_method_changed = true;
     }
 
-    // 让所有页面按新值重读一遍控件 (各页连接的是 configLoaded)。
     ConfigManager::instance().notifyRuntimeReloaded();
 
     qInfo("[Profiles] Applied profile: %s", qUtf8Printable(QDir::toNativeSeparators(targetPath)));
@@ -347,7 +319,7 @@ bool ConfigProfiles::switchTo(const QString& name, QString* error)
         return true;
     }
 
-    if (!applyProfileFile(profileFilePath(clean), /*autoSaveCurrent=*/true, error))
+    if (!applyProfileFile(profileFilePath(clean),  true, error))
         return false;
 
     m_active = clean;
@@ -359,7 +331,7 @@ bool ConfigProfiles::switchTo(const QString& name, QString* error)
 bool ConfigProfiles::saveCurrent(QString* error)
 {
     if (m_active.isEmpty())
-        return saveAs(g_defaultProfileName(), /*overwrite=*/true, error);
+        return saveAs(g_defaultProfileName(),  true, error);
 
     ConfigBridge::instance().flush();
     {
@@ -392,7 +364,6 @@ bool ConfigProfiles::saveAs(const QString& name, bool overwrite, QString* error)
         return false;
     }
 
-    // 旧的当前方案先落盘, 免得"另存为"把用户没保存的改动弄丢。
     ConfigBridge::instance().flush();
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
@@ -406,8 +377,7 @@ bool ConfigProfiles::saveAs(const QString& name, bool overwrite, QString* error)
     m_active = clean;
     writeActiveMarker(clean);
 
-    // saveConfig() 不会改 config_path, 必须重读一次把后续保存指向新方案。
-    if (!applyProfileFile(path, /*autoSaveCurrent=*/false, error))
+    if (!applyProfileFile(path,  false, error))
         return false;
 
     emit profilesChanged();
@@ -435,7 +405,6 @@ bool ConfigProfiles::renameProfile(const QString& from, const QString& to, QStri
         return false;
     }
 
-    // 改名的是当前方案时先把内存改动落盘, 否则会丢。
     if (source == m_active)
         flushCurrent(error);
 
@@ -443,7 +412,6 @@ bool ConfigProfiles::renameProfile(const QString& from, const QString& to, QStri
         if (error) *error = QString::fromUtf8(u8"重命名失败, 请检查该文件是否被占用。");
         return false;
     }
-    // 曲线资产目录跟着一起改名, 否则方案加载后曲线会丢。
     const QString oldCurves = profileCurveDir(source);
     if (QFileInfo::exists(oldCurves))
         QDir().rename(oldCurves, profileCurveDir(target));
@@ -451,7 +419,7 @@ bool ConfigProfiles::renameProfile(const QString& from, const QString& to, QStri
     if (source == m_active) {
         m_active = target;
         writeActiveMarker(target);
-        if (!applyProfileFile(profileFilePath(target), /*autoSaveCurrent=*/false, error))
+        if (!applyProfileFile(profileFilePath(target),  false, error))
             return false;
     }
 
@@ -475,12 +443,11 @@ bool ConfigProfiles::remove(const QString& name, QString* error)
     }
 
     if (clean == m_active) {
-        // 先切到别的方案: 不做 autoSave, 否则会把刚删掉的文件又写回来。
         QString fallback;
         for (const QString& n : all) {
             if (n != clean) { fallback = n; break; }
         }
-        if (!applyProfileFile(profileFilePath(fallback), /*autoSaveCurrent=*/false, error))
+        if (!applyProfileFile(profileFilePath(fallback),  false, error))
             return false;
         m_active = fallback;
         writeActiveMarker(fallback);

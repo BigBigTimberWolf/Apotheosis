@@ -14,7 +14,6 @@ GpuJpegDecoder::~GpuJpegDecoder()
 
 void GpuJpegDecoder::cleanup()
 {
-    // ROI objects depend on handle_, so tear them down before nvjpegDestroy.
     cleanupRoi();
 
     if (state_)
@@ -76,7 +75,7 @@ bool GpuJpegDecoder::initRoi()
         nvjpegStateAttachDeviceBuffer(roi_state_[i], roi_device_[i]);
 
         if (cudaEventCreateWithFlags(&roi_event_[i], cudaEventDisableTiming) != cudaSuccess)
-            roi_event_[i] = nullptr;  // wait/record become no-ops; still correct, just not throttled
+            roi_event_[i] = nullptr;
     }
 
     roi_slot_ = 0;
@@ -96,17 +95,11 @@ bool GpuJpegDecoder::decodeCropped(
     if (cropW <= 0 || cropH <= 0) return false;
     if (!initRoi()) return false;
 
-    // Pick this frame's ring slot up front and advance, so pipelined frames use
-    // disjoint pinned/jpeg-stream scratch.
     const size_t slot = roi_slot_;
     roi_slot_ = (roi_slot_ + 1) % ROI_RING;
     nvjpegJpegState_t state = roi_state_[slot];
     nvjpegJpegStream_t jpegStream = roi_stream_[slot];
 
-    // Backpressure: don't overwrite this slot's scratch until its previous
-    // frame's device phase (and the transfer that read those buffers) finished.
-    // No-op at steady state; throttles only when the GPU is ROI_RING frames
-    // behind the source.
     if (roi_event_[slot])
         cudaEventSynchronize(roi_event_[slot]);
 
@@ -123,9 +116,6 @@ bool GpuJpegDecoder::decodeCropped(
 
     const int roiW = std::min(cropW, W);
     const int roiH = std::min(cropH, H);
-    // Round offsets to an even pixel: chroma-subsampled JPEGs (4:2:0 / 4:2:2,
-    // the usual capture-card MJPG output) need the ROI origin on a chroma
-    // sample or nvjpeg rejects the ROI and we fall back to a full decode.
     const int offX = std::max(0, (W - roiW) / 2) & ~1;
     const int offY = std::max(0, (H - roiH) / 2) & ~1;
 
@@ -148,8 +138,6 @@ bool GpuJpegDecoder::decodeCropped(
     st = nvjpegDecodeJpegDevice(handle_, roi_decoder_, state, &out, stream);
     if (st != NVJPEG_STATUS_SUCCESS) return false;
 
-    // Mark this slot's work complete so a later cycle back to it can tell when
-    // the pinned buffer is free again.
     if (roi_event_[slot])
         cudaEventRecord(roi_event_[slot], stream);
 
@@ -160,8 +148,6 @@ bool GpuJpegDecoder::init()
 {
     if (initialized_) return true;
 
-    // NVJPEG_BACKEND_DEFAULT picks hybrid CPU/GPU. The hardware (NVJPEG_BACKEND_HARDWARE)
-    // backend is only available on A100/Hopper-class cards; default is portable.
     nvjpegStatus_t st = nvjpegCreateSimple(&handle_);
     if (st != NVJPEG_STATUS_SUCCESS)
     {
@@ -204,10 +190,6 @@ bool GpuJpegDecoder::decode(
     const int H = heights[0];
     if (W <= 0 || H <= 0) return false;
 
-    // NVJPEG_OUTPUT_BGRI -> interleaved BGR, channel[0] holds the whole image
-    // with pitch = step. GpuImage::create reuses the existing buffer when the
-    // shape already matches, so the UDP hot path doesn't pay cudaMalloc per
-    // frame.
     if (!dst.create(H, W, 3))
         return false;
 
@@ -222,4 +204,4 @@ bool GpuJpegDecoder::decode(
     return st == NVJPEG_STATUS_SUCCESS;
 }
 
-} // namespace capture
+}

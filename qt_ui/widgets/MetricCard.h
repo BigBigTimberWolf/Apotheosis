@@ -4,7 +4,6 @@
 
 class QLabel;
 
-// KPI 指标卡:label + 图标 / 大数值 + 单位 / 语义副行。
 class MetricCard : public QFrame {
     Q_OBJECT
 

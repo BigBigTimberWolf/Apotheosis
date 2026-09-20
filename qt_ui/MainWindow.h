@@ -39,7 +39,6 @@ private slots:
     void onSaveRequested();
     void pollMonitorTelemetry();
 
-    // ── 全局配置方案 ──
     void onProfileSwitchRequested(const QString& name);
     void onProfileSaveRequested();
     void onProfileSaveAsRequested();
@@ -82,8 +81,6 @@ private:
 
     class OverviewPage*      m_overviewPage{};
     class TargetPage*        m_targetPage{};
-    // ★★ 瞄准设置页 (2026-09-17 第三轮续恢复)。它同时是 config.hotkeys[] 的
-    //    【唯一界面写入者】—— 在它被恢复之前, 那个数组没有任何写入者。
     class AimSettingsPage*   m_hotkeyPage{};
 
     class StatsPage*         m_statsPage{};
@@ -91,11 +88,8 @@ private:
     class DebugPage*         m_debugPage{};
     class AutoCapturePage*   m_autoCapPage{};
 
-
-    // Last AppLog snapshot size — only tail-new lines get pushed each tick.
     int m_logCursor = 0;
 
-    // Session uptime: stamped on the running false→true edge, read each poll.
     bool m_sessionRunning = false;
     std::chrono::steady_clock::time_point m_sessionStart{};
 };

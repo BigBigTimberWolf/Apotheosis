@@ -23,8 +23,6 @@ StatusPill::StatusPill(QWidget* parent) : QWidget(parent) {
 }
 
 void StatusPill::setStatus(const QString& text, Tone tone) {
-    // No filled pill background — just a colored dot + colored text, for a clean,
-    // subtle status indicator that sits flush in the top bar.
     QString dot, fg;
     switch (tone) {
         case Success: dot = "#22C55E"; fg = "#16A34A"; break;

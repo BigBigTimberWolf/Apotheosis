@@ -25,7 +25,7 @@ std::filesystem::path token_path()
 {
     return std::filesystem::u8path(kTokenFile);
 }
-} // namespace
+}
 
 AuthState& state()
 {
@@ -309,4 +309,4 @@ void AuthState::set_error_locked(const std::string& error)
     status_text_ = error;
 }
 
-} // namespace auth
+}
