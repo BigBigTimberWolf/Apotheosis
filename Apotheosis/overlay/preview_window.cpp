@@ -17,6 +17,7 @@
 #include "Apotheosis.h"
 #include "capture.h"
 #include "config/config.h"
+#include "control/aim_controller.h"   // 预览叠加用: StabilizerVerdict / IdleReason
 #include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
 #include "crosshair/crosshair_runtime.h"
@@ -174,6 +175,114 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 
         const cv::Scalar baseCol = bgr(60, 200, 255);
         cv::ellipse(canvas, center, baseAxes, 0, 0, 360, baseCol, 1, cv::LINE_AA);
+    }
+
+    // ── 稳定【之后】的叠加 ────────────────────────────────────────────────
+    //
+    // 上面那些绿框是检测的【原始】框(稳定之前)。这一段画的是控制器实际锁定的
+    // 结果: 稳定器放行的框 + α-β 滤波后的中心 + 最终瞄点。两者画在一起,
+    // 才能看出稳定器到底把哪一帧的抖动压掉了。
+    {
+        const runtime::AimOverlayState ov = runtime::readAimOverlay();
+        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - ov.ts).count();
+        const bool fresh = ov.ts.time_since_epoch().count() != 0 &&
+                           age_ms >= 0 && age_ms <= runtime::kAimOverlayStaleMs;
+
+        if (fresh)
+        {
+            // 判定颜色: 同一个目标=绿, 新目标/瞬移=橙, 被稳定器丢掉=红。
+            const auto verdict = static_cast<control::StabilizerVerdict>(ov.verdict);
+            cv::Scalar lockCol = bgr(90, 220, 90);
+            const char* verdictText = "OK";
+            switch (verdict)
+            {
+            case control::StabilizerVerdict::Ok:       lockCol = bgr(90, 220, 90);  verdictText = "OK";       break;
+            case control::StabilizerVerdict::NoHistory:lockCol = bgr(80, 190, 255); verdictText = "NEW";      break;
+            case control::StabilizerVerdict::Snap:     lockCol = bgr(60, 160, 255); verdictText = "SNAP";     break;
+            case control::StabilizerVerdict::Rejected: lockCol = bgr(90, 90, 235);  verdictText = "REJECTED"; break;
+            }
+
+            if (ov.engaged && ov.box.width > 0 && ov.box.height > 0)
+            {
+                const cv::Rect r(ov.box.x, ov.box.y, ov.box.width, ov.box.height);
+                const cv::Rect clipped = r & cv::Rect(0, 0, canvas.cols, canvas.rows);
+                if (clipped.area() > 0)
+                {
+                    // ① 原始锁定框(稳定前): 粗框, 颜色 = 稳定器判定。
+                    cv::rectangle(canvas, clipped, lockCol, 2, cv::LINE_AA);
+
+                    const cv::Point rawC(clipped.x + clipped.width / 2,
+                                         clipped.y + clipped.height / 2);
+                    const cv::Point stabC(static_cast<int>(std::lround(ov.filtered_cx)),
+                                          static_cast<int>(std::lround(ov.filtered_cy)));
+
+                    // ② 稳定后的框: 尺寸还是检测的尺寸, 但【中心换成滤波后的中心】——
+                    //    这就是"稳定之后"的框。抖的时候它会明显比原始框稳。
+                    const cv::Rect stabRect(stabC.x - clipped.width / 2,
+                                            stabC.y - clipped.height / 2,
+                                            clipped.width, clipped.height);
+                    const cv::Rect stabClip = stabRect & cv::Rect(0, 0, canvas.cols, canvas.rows);
+                    if (stabClip.area() > 0)
+                    {
+                        cv::rectangle(canvas, stabClip, bgr(255, 120, 240), 1, cv::LINE_AA);
+                        draw_text_with_bg(canvas, "STAB",
+                                          cv::Point(stabClip.x,
+                                                    std::min(canvas.rows - 2,
+                                                             stabClip.y + stabClip.height + 12)),
+                                          bgr(255, 200, 250), bgr(40, 0, 40));
+                    }
+
+                    // ③ 原始中心 → 滤波中心: 这条线的长度 = 这一拍压掉的抖动量。
+                    if (rawC != stabC)
+                        cv::line(canvas, rawC, stabC, bgr(255, 120, 240), 1, cv::LINE_AA);
+
+                    char label[96];
+                    std::snprintf(label, sizeof(label), "LOCK #%d id=%d %s",
+                                  ov.target_class_id, ov.target_id, verdictText);
+                    draw_text_with_bg(canvas, label,
+                                      cv::Point(clipped.x, std::max(12, clipped.y)),
+                                      bgr(250, 245, 240), bgr(0, 0, 0));
+
+                    // ④ 最终瞄点(锚点): 橙点。
+                    const cv::Point aim(static_cast<int>(std::lround(ov.anchor_x)),
+                                        static_cast<int>(std::lround(ov.anchor_y)));
+                    cv::circle(canvas, aim, 4, bgr(0, 140, 255), 2, cv::LINE_AA);
+                }
+            }
+
+            // 状态行: 一屏说清"锁没锁、锁的是谁、稳定器怎么判、哪一步丢的"。
+            {
+                char line[240];
+                if (ov.engaged)
+                {
+                    const double dx = ov.filtered_cx - (ov.box.x + ov.box.width * 0.5);
+                    const double dy = ov.filtered_cy - (ov.box.y + ov.box.height * 0.5);
+                    std::snprintf(line, sizeof(line),
+                                  "Stab: %s | id=%d #%d | raw->filtered %+.1f,%+.1f px%s",
+                                  verdictText, ov.target_id, ov.target_class_id, dx, dy,
+                                  ov.scope_params ? " | SCOPE-PARAMS" : "");
+                }
+                else
+                {
+                    using Idle = control::ControlOutput::IdleReason;
+                    const char* why = "idle";
+                    switch (static_cast<Idle>(ov.idle_reason))
+                    {
+                    case Idle::NoCandidates:          why = "no-candidate";   break;
+                    case Idle::StaleDetection:        why = "stale-detection";break;
+                    case Idle::StaleCrosshair:        why = "stale-crosshair";break;
+                    case Idle::RejectedByStabilizer:  why = "STAB-REJECTED (wide/tall)"; break;
+                    case Idle::BadDt:                 why = "bad-dt";         break;
+                    case Idle::None:                  why = "idle";           break;
+                    }
+                    std::snprintf(line, sizeof(line), "Stab: not locked | %s%s",
+                                  why, ov.scope_params ? " | SCOPE-PARAMS" : "");
+                }
+                draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 30),
+                                  bgr(245, 245, 245), bgr(0, 0, 0));
+            }
+        }
     }
 
     if (cfg.crosshair_rect_w > 0 && cfg.crosshair_rect_h > 0)

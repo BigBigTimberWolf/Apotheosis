@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
@@ -338,13 +340,22 @@ bool CheckGeometry(IMFSourceReader* reader, std::string& outError)
     return true;
 }
 
-bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outError)
+bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outError,
+                   size_t expectedBytes = 0, const std::string& dumpFirstFramePath = std::string())
 {
     const DWORD start = GetTickCount();
     int frames = 0;
     int nullSamples = 0;
     LONGLONG firstTs = 0;
     LONGLONG lastTs = 0;
+    uint64_t totalBytes = 0;
+    DWORD minBytes = 0;
+    DWORD maxBytes = 0;
+    uint64_t prevHash = 0;
+    int uniqueFrames = 0;
+    int dupTotal = 0;
+    int dupRun = 0;
+    int maxDupRun = 0;
 
     while (GetTickCount() - start < static_cast<DWORD>(durationMs))
     {
@@ -376,6 +387,76 @@ bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outErro
             if (frames == 0) firstTs = ts;
             lastTs = ts;
             ++frames;
+
+            DWORD len = 0;
+            if (SUCCEEDED(sample->GetTotalLength(&len)))
+            {
+                totalBytes += len;
+                if (minBytes == 0 || len < minBytes) minBytes = len;
+                if (len > maxBytes) maxBytes = len;
+            }
+
+            // 帧内容去重: 判定卡/驱动是否在用"重复上一帧"填充声称的帧率。
+            // 若重复帧很多, 则声称的 240fps 是灌出来的, 真实唯一帧率远低于它。
+            ComPtr<IMFMediaBuffer> cbuf;
+            BYTE* p = nullptr;
+            DWORD capLen = 0, curLen = 0;
+            if (SUCCEEDED(sample->ConvertToContiguousBuffer(&cbuf)) && cbuf
+                && SUCCEEDED(cbuf->Lock(&p, &capLen, &curLen)) && p && curLen > 0)
+            {
+                uint64_t h = 1469598103934665603ull;
+                for (DWORD i = 0; i < curLen; i += 61)
+                {
+                    h ^= static_cast<uint64_t>(p[i]);
+                    h *= 1099511628211ull;
+                }
+                h ^= static_cast<uint64_t>(curLen);
+
+                if (frames == 1 || h != prevHash)
+                {
+                    ++uniqueFrames;
+                    dupRun = 0;
+                }
+                else
+                {
+                    ++dupTotal;
+                    if (++dupRun > maxDupRun) maxDupRun = dupRun;
+                }
+                prevHash = h;
+
+                if (frames == 1)
+                {
+                    uint32_t lo = 255, hi = 0;
+                    uint64_t sum = 0;
+                    for (DWORD i = 0; i < curLen; ++i)
+                    {
+                        const uint32_t v = p[i];
+                        if (v < lo) lo = v;
+                        if (v > hi) hi = v;
+                        sum += v;
+                    }
+                    printf("      [首帧] min=%lu max=%lu mean=%.1f"
+                           " (整幅恒定 = 静止画面/无信号, 不是活画面)\n",
+                           static_cast<unsigned long>(lo), static_cast<unsigned long>(hi),
+                           static_cast<double>(sum) / static_cast<double>(curLen));
+
+                    if (!dumpFirstFramePath.empty())
+                    {
+                        std::ofstream out(dumpFirstFramePath, std::ios::binary);
+                        if (out)
+                        {
+                            out.write(reinterpret_cast<const char*>(p),
+                                      static_cast<std::streamsize>(curLen));
+                            printf("      [转储] 首帧 %lu 字节 -> %s\n",
+                                   static_cast<unsigned long>(curLen),
+                                   dumpFirstFramePath.c_str());
+                        }
+                    }
+                }
+
+                // 必须放在所有读像素的代码之后: Unlock 之后 p 即失效
+                cbuf->Unlock();
+            }
         }
         else
         {
@@ -393,18 +474,50 @@ bool MeasureStream(IMFSourceReader* reader, int durationMs, std::string& outErro
         return false;
     }
 
-    double fps = 0.0;
+    double spanSec = 0.0;
     if (lastTs > firstTs && frames > 1)
-    {
-        const double spanSec = static_cast<double>(lastTs - firstTs) / 1.0e7;
-        if (spanSec > 0.0)
-            fps = static_cast<double>(frames - 1) / spanSec;
-    }
-    if (fps <= 0.0)
+        spanSec = static_cast<double>(lastTs - firstTs) / 1.0e7;
+    if (spanSec <= 0.0)
+        spanSec = static_cast<double>(durationMs) / 1000.0;
+
+    double fps = static_cast<double>(frames - 1) / spanSec;
+    if (!(fps > 0.0))
         fps = static_cast<double>(frames) * 1000.0 / static_cast<double>(durationMs);
 
     printf("      [ ok ] %dms 内收到 %d 帧 -> 实测 %.1f fps (空样本 %d)\n",
            durationMs, frames, fps, nullSamples);
+
+    if (uniqueFrames > 0)
+    {
+        printf("      [去重] 唯一帧 %d / 总帧 %d -> 重复 %d 帧 (%.1f%%), 最长连续重复 %d"
+               " -> 唯一帧率 %.1f fps\n",
+               uniqueFrames, frames, dupTotal,
+               frames > 0 ? 100.0 * dupTotal / static_cast<double>(frames) : 0.0,
+               maxDupRun, static_cast<double>(uniqueFrames) / spanSec);
+    }
+
+    const DWORD wallMs = GetTickCount() - start;
+    if (frames > 0 && totalBytes > 0 && wallMs > 0)
+    {
+        const double avgBytes = static_cast<double>(totalBytes) / static_cast<double>(frames);
+        const double mbPerSec = static_cast<double>(totalBytes) * 1000.0
+                              / static_cast<double>(wallMs) / 1.0e6;
+        printf("      [字节] 每帧 avg=%.0f  min=%lu  max=%lu  ->  实测净荷 %.1f MB/s (%.2f Gbps)\n",
+               avgBytes, static_cast<unsigned long>(minBytes),
+               static_cast<unsigned long>(maxBytes), mbPerSec, mbPerSec * 8.0 / 1000.0);
+        if (expectedBytes > 0)
+        {
+            const double pct = avgBytes / static_cast<double>(expectedBytes) * 100.0;
+            printf("      [核对] 该模式完整原始帧应为 %llu 字节, 实收 %.1f%%%s\n",
+                   static_cast<unsigned long long>(expectedBytes), pct,
+                   (pct < 99.0) ? "   <<<< 帧被截断, 并不是完整原始帧!" : "   (完整)");
+        }
+    }
+    else if (frames > 0)
+    {
+        printf("      [字节] 取不到 sample 长度 (GetTotalLength 失败), 无法统计净荷\n");
+    }
+
     outError.clear();
     return true;
 }
@@ -418,8 +531,11 @@ int main(int argc, char** argv)
     const int wantW   = (argc > 3) ? std::atoi(argv[3]) : 1920;
     const int wantH   = (argc > 4) ? std::atoi(argv[4]) : 1080;
     const int wantFps = (argc > 5) ? std::atoi(argv[5]) : 120;
+    const std::string dumpPath = (argc > 6) ? argv[6] : std::string();
 
     SetConsoleOutputCP(CP_UTF8);
+    // 诊断工具必须"看到哪报到哪": 关掉块缓冲, 崩溃时前面已打印的信息不会丢
+    setvbuf(stdout, nullptr, _IONBF, 0);
 
     printf("=== 采集卡现场诊断 ===\n");
     printf("目标组合: 设备=\"%s\"  %s %dx%d @ %dfps\n\n",
@@ -538,8 +654,16 @@ int main(int argc, char** argv)
         if (!CheckGeometry(reader.Get(), geoErr))
             printf("      [warn] %s\n", geoErr.c_str());
 
+        size_t expectedRaw = 0;
+        if (wantFormat == "NV12" || wantFormat == "I420")
+            expectedRaw = static_cast<size_t>(wantW) * static_cast<size_t>(wantH) * 3 / 2;
+        else if (wantFormat == "YUY2")
+            expectedRaw = static_cast<size_t>(wantW) * static_cast<size_t>(wantH) * 2;
+        else if (wantFormat == "RGB32" || wantFormat == "ARGB32")
+            expectedRaw = static_cast<size_t>(wantW) * static_cast<size_t>(wantH) * 4;
+
         std::string readErr;
-        if (MeasureStream(reader.Get(), 3000, readErr))
+        if (MeasureStream(reader.Get(), 3000, readErr, expectedRaw, dumpPath))
         {
             printf("      [ ok ] 采集链路是通的, 且能持续出帧。\n");
         }

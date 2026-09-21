@@ -1,0 +1,996 @@
+--- orig
++++ curr
+@@ -7,7 +7,6 @@
+ 
+ bool EspUsbHost::deviceMouseReady = false;
+ bool EspUsbHost::deviceConnected = false;
+-EspUsbHost::HIDReportDescriptor EspUsbHost::HIDReportDesc = {};
+ void flashLED();
+ 
+ 
+@@ -248,30 +247,49 @@
+ }
+ 
+ 
++// 原始字节 hex 打印。
++//
++// 原实现每次调用都构造 std::stringstream + std::string(两次堆分配), 而它在
++// 描述符回调与 HID 报文热路径上被无条件调用 —— 即使 ESP_LOGI 的日志级别被裁掉,
++// 参数求值也照样发生。现改为栈上定长缓冲 + 直接格式化, 零堆分配、无 STL 依赖。
++//
++// 超过 kMaxLogBytes 的部分截断打印(描述符最长 512B, 报文很短, 足够诊断)。
+ void EspUsbHost::logRawBytes(const char *functionName, const uint8_t *data, uint16_t length)
+ {
+-    std::stringstream rawByteStream;
+-    
+-    for (int i = 0; i < length; ++i)
+-    {
+-        rawByteStream << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+-    }
+-
+-    ESP_LOGI(functionName, "Raw Bytes: %s", rawByteStream.str().c_str());
++    const uint16_t kMaxLogBytes = 128;
++    char buf[kMaxLogBytes * 3 + 24];
++    int n = 0;
++
++    n += snprintf(buf + n, sizeof(buf) - n, "Raw Bytes(%u):", (unsigned)length);
++
++    const uint16_t shown = (length > kMaxLogBytes) ? kMaxLogBytes : length;
++    for (uint16_t i = 0; i < shown; ++i)
++    {
++        if ((int)sizeof(buf) - n < 4) break;   // 留出 "XX \0"
++        n += snprintf(buf + n, sizeof(buf) - n, " %02X", (unsigned)data[i]);
++    }
++    if (shown < length)
++    {
++        snprintf(buf + n, sizeof(buf) - n, " ...");
++    }
++
++    ESP_LOGI(functionName, "%s", buf);
+ }
+ 
+ void EspUsbHost::onConfig(const uint8_t bDescriptorType, const uint8_t *p)
+ {
+     static uint8_t currentInterfaceNumber;
+ 
++    // 描述符原始字节只在调试模式下打印: 它会遍历整个配置描述符,
++    // 非调试时纯属浪费(而且每个描述符还会各打一次)。
++    if (debugModeActive) {
+         logRawBytes("EspUsbHost::onConfig", p, p[0]);
++    }
+ 
+     switch (bDescriptorType)
+     {
+     case USB_DEVICE_DESC:
+     {
+-        // Log raw bytes for USB_DEVICE_DESC
+-        logRawBytes("USB_DEVICE_DESC", p, p[0]); 
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_DEVICE_DESC");
+ 
+         const usb_device_desc_t *dev_desc = (const usb_device_desc_t *)p;
+@@ -297,8 +315,6 @@
+ 
+     case USB_STRING_DESC:
+     {
+-        // Log raw bytes for USB_STRING_DESC
+-        logRawBytes("USB_STRING_DESC", p, p[0]);
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_STRING_DESC");
+ 
+         const usb_standard_desc_t *desc = (const usb_standard_desc_t *)p;
+@@ -321,11 +337,26 @@
+ 
+     case USB_INTERFACE_DESC:
+     {
+-        // Log raw bytes for USB_INTERFACE_DESC
+-        logRawBytes("USB_INTERFACE_DESC", p, p[0]);
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_INTERFACE_DESC");
+ 
+         const usb_intf_desc_t *intf = (const usb_intf_desc_t *)p;
++
++        // 保存接口描述符原始字段。
++        // 原来这里只填了 endpoint_data_list[], 而 sendInterfaceDescriptors()
++        // 读的是 interface_descriptors[] —— 那个数组在主机侧从未被写过,
++        // 于是上报给上位机的接口列表(class/protocol)恒为 0。
++        if (interfaceCounter < MAX_INTERFACE_DESCRIPTORS)
++        {
++            interface_descriptors[interfaceCounter].bLength            = intf->bLength;
++            interface_descriptors[interfaceCounter].bDescriptorType    = intf->bDescriptorType;
++            interface_descriptors[interfaceCounter].bInterfaceNumber   = intf->bInterfaceNumber;
++            interface_descriptors[interfaceCounter].bAlternateSetting  = intf->bAlternateSetting;
++            interface_descriptors[interfaceCounter].bNumEndpoints      = intf->bNumEndpoints;
++            interface_descriptors[interfaceCounter].bInterfaceClass    = intf->bInterfaceClass;
++            interface_descriptors[interfaceCounter].bInterfaceSubClass = intf->bInterfaceSubClass;
++            interface_descriptors[interfaceCounter].bInterfaceProtocol = intf->bInterfaceProtocol;
++            interface_descriptors[interfaceCounter].iInterface         = intf->iInterface;
++        }
+ 
+         if (interfaceCounter < MAX_INTERFACE_DESCRIPTORS)
+         {
+@@ -356,8 +387,6 @@
+ 
+     case USB_ENDPOINT_DESC:
+     {
+-        // Log raw bytes for USB_ENDPOINT_DESC
+-        logRawBytes("USB_ENDPOINT_DESC", p, p[0]);
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_ENDPOINT_DESC");
+ 
+         const usb_ep_desc_t *ep_desc = (const usb_ep_desc_t *)p;
+@@ -385,18 +414,16 @@
+                 return;
+             }
+ 
+-            uint8_t ep_num = USB_EP_DESC_GET_EP_NUM(ep_desc);
+-            endpoint_data_list[ep_num].bInterfaceNumber = endpoint_data_list[currentInterfaceNumber].bInterfaceNumber;
+-            endpoint_data_list[ep_num].bInterfaceClass = endpoint_data_list[currentInterfaceNumber].bInterfaceClass;
+-            endpoint_data_list[ep_num].bInterfaceSubClass = endpoint_data_list[currentInterfaceNumber].bInterfaceSubClass;
+-            endpoint_data_list[ep_num].bInterfaceProtocol = endpoint_data_list[currentInterfaceNumber].bInterfaceProtocol;
+-            endpoint_data_list[ep_num].bCountryCode = endpoint_data_list[currentInterfaceNumber].bCountryCode;
+-
+-            // 单独记一份不会被接口描述符覆盖的映射: 端点号 -> 所属接口的 class/protocol。
+-            // 此处 endpoint_data_list[currentInterfaceNumber] 仍是刚解析的那个接口(接口描述符
+-            // 紧邻其端点), 后续接口才会产生覆盖。
+-            this->ep_owner_class[ep_num] = endpoint_data_list[currentInterfaceNumber].bInterfaceClass;
+-            this->ep_owner_protocol[ep_num] = endpoint_data_list[currentInterfaceNumber].bInterfaceProtocol;
++            // 注意: 这里**不再**往 endpoint_data_list[] 写。
++            // 原来它按【端点号】写入, 而接口描述符分支按【接口号】写入同一个数组,
++            // 两个下标空间重叠 => 端点记录会覆盖接口记录, 而 serialization.cpp 的
++            // sendInterfaceDescriptors() 正是按接口号读它的 => 上报给上位机的
++            // 接口列表(class/protocol)是错的。端点归属改由下面的 ep_owner[] 承载。
++            const uint8_t slot = epSlot(ep_desc->bEndpointAddress);
++            this->ep_owner[slot].iface    = currentInterfaceNumber;
++            this->ep_owner[slot].isIn     = (ep_desc->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) != 0;
++            this->ep_owner[slot].xferType = (uint8_t)(ep_desc->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK);
++            this->ep_owner[slot].used     = true;
+ 
+             if ((ep_desc->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) != USB_BM_ATTRIBUTES_XFER_INT)
+             {
+@@ -423,7 +450,9 @@
+                 this->usbTransfer[this->usbTransferSize]->callback = this->_onReceive;
+                 this->usbTransfer[this->usbTransferSize]->context = this;
+                 this->usbTransfer[this->usbTransferSize]->num_bytes = ep_desc->wMaxPacketSize;
+-                interval = ep_desc->bInterval;
++                // 原此处有 `interval = ep_desc->bInterval;` —— interval 是只写不读的
++                // 死成员(主机侧轮询节奏由 USB Host 驱动按端点描述符自行处理),
++                // 已随该成员一并删除。
+                 isReady = true;
+                 this->usbTransferSize++;
+ 
+@@ -444,8 +473,6 @@
+ 
+     case USB_INTERFACE_ASSOC_DESC:
+     {
+-        // Log raw bytes for USB_INTERFACE_ASSOC_DESC
+-        logRawBytes("USB_INTERFACE_ASSOC_DESC", p, p[0]);   // did not log 
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_INTERFACE_ASSOC_DESC");
+ 
+         const usb_iad_desc_t *iad_desc = (const usb_iad_desc_t *)p;
+@@ -464,8 +491,6 @@
+ 
+     case USB_HID_DESC:
+     {
+-        // Log raw bytes for USB_HID_DESC
+-        logRawBytes("USB_HID_DESC", p, p[0]);
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_HID_DESC");
+ 
+         const tusb_hid_descriptor_hid_t *hid_desc = (const tusb_hid_descriptor_hid_t *)p;
+@@ -491,8 +516,6 @@
+ 
+     case USB_CONFIGURATION_DESC:
+     {
+-        // Log raw bytes for USB_CONFIGURATION_DESC
+-        logRawBytes("USB_CONFIGURATION_DESC", p, p[0]);
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: USB_CONFIGURATION_DESC");
+ 
+         const usb_config_desc_t *config_desc = (const usb_config_desc_t *)p;
+@@ -511,8 +534,6 @@
+ 
+     default:
+     {
+-        // Log raw bytes for unknown descriptor type
+-        logRawBytes("Unknown", p, p[0]);
+         ESP_LOGI("EspUsbHost::onConfig", "Descriptor Type: Unknown (0x%02X)", bDescriptorType);
+         break;
+     }
+@@ -525,13 +546,9 @@
+     EspUsbHost *usbHost = static_cast<EspUsbHost *>(arg);
+     esp_err_t err;
+ 
+-    // Helper function to log raw bytes using std::stringstream
+-    auto logRawBytes = [](const char* descriptorType, const uint8_t* data, uint8_t length) {
+-        std::stringstream rawByteStream;
+-        for (int i = 0; i < length; ++i) {
+-            rawByteStream << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+-        }
+-        ESP_LOGI("EspUsbHost::_clientEventCallback", "Raw Bytes (%s): %s", descriptorType, rawByteStream.str().c_str());
++    // 复用成员版 logRawBytes(栈缓冲、零堆分配), 不再自己造 stringstream。
++    auto logRawBytes = [usbHost](const char* descriptorType, const uint8_t* data, uint8_t length) {
++        usbHost->logRawBytes(descriptorType, data, length);
+     };
+ 
+     switch (eventMsg->event)
+@@ -546,15 +563,22 @@
+         usbHost->hidDescriptorCounter = 0;
+         usbHost->unknownDescriptorCounter = 0;
+         memset(usbHost->endpoint_data_list, 0, sizeof(usbHost->endpoint_data_list));
+-        memset(usbHost->ep_owner_class, 0, sizeof(usbHost->ep_owner_class));
+-        memset(usbHost->ep_owner_protocol, 0, sizeof(usbHost->ep_owner_protocol));
++        // 端点归属 / 各接口的报告描述符 / 选中的鼠标接口, 全部随设备插入清空。
++        // 不清会让上一只鼠标的布局残留下来, 新设备用旧布局解码 => 乱移乱点。
++        memset(usbHost->ep_owner, 0, sizeof(usbHost->ep_owner));
++        memset(usbHost->descPerIface, 0, sizeof(usbHost->descPerIface));
++        memset(usbHost->descPerIfaceValid, 0, sizeof(usbHost->descPerIfaceValid));
++        memset(usbHost->rawDescPerIface, 0, sizeof(usbHost->rawDescPerIface));
++        usbHost->mouseIface = -1;
++        usbHost->keyboardIface = -1;
+         // 设备刚插入: 上一只鼠标的按键位图必须作废, 否则新鼠标的第一帧会被拿去和
+         // 旧状态做差分, 抬键判定直接失效(表现为按键卡死/漏按)。
+         usbHost->lastReportedButtons = 0;
+ 
+-        ESP_LOGD("EspUsbHost", "New device event detected. Raw event message:");
+-
+-        logRawBytes("New Device Event Message", (const uint8_t *)eventMsg, sizeof(usb_host_client_event_msg_t));
++        // 事件结构体原始字节只在调试模式下打印
++        if (usbHost->debugModeActive) {
++            logRawBytes("New Device Event Message", (const uint8_t *)eventMsg, sizeof(usb_host_client_event_msg_t));
++        }
+ 
+         err = usb_host_device_open(usbHost->clientHandle, eventMsg->new_dev.address, &usbHost->deviceHandle);
+         if (err != ESP_OK)
+@@ -569,10 +593,6 @@
+         err = usb_host_device_info(usbHost->deviceHandle, &dev_info);
+         if (err == ESP_OK)
+         {
+-            ESP_LOGD("EspUsbHost", "Retrieved device info. Raw device info:");
+-
+-            logRawBytes("Device Info", (const uint8_t *)&dev_info, sizeof(usb_device_info_t));
+-
+             usbHost->device_info.speed = dev_info.speed;
+             usbHost->device_info.dev_addr = dev_info.dev_addr;
+             usbHost->device_info.vMaxPacketSize0 = dev_info.bMaxPacketSize0;
+@@ -597,9 +617,6 @@
+         if (err == ESP_OK)
+         {
+             ESP_LOGI("EspUsbHost::_clientEventCallback", "Device descriptor retrieved successfully");
+-
+-            // Log raw bytes for the device descriptor
+-            logRawBytes("Device Descriptor", (const uint8_t *)dev_desc, sizeof(usb_device_desc_t));
+ 
+             // Field-by-field assignment of the descriptor
+             usbHost->descriptor_device.bLength = dev_desc->bLength;
+@@ -626,9 +643,6 @@
+         err = usb_host_get_active_config_descriptor(usbHost->deviceHandle, &config_desc);
+         if (err == ESP_OK)
+         {
+-            // Log raw bytes for the configuration descriptor
+-            logRawBytes("Configuration Descriptor", (const uint8_t *)config_desc, config_desc->wTotalLength);
+-
+             usbHost->descriptor_configuration.bLength = config_desc->bLength;
+             usbHost->descriptor_configuration.bDescriptorType = config_desc->bDescriptorType;
+             usbHost->descriptor_configuration.wTotalLength = config_desc->wTotalLength;
+@@ -775,13 +789,21 @@
+ 
+ void EspUsbHost::_onReceiveControl(usb_transfer_t *transfer)
+ {
+-    EspUsbHost *usbHost = static_cast<EspUsbHost *>(transfer->context);
++    const ControlContext *ctx = static_cast<const ControlContext *>(transfer->context);
++    EspUsbHost *usbHost = ctx ? ctx->host : nullptr;
+     if (!usbHost)
+     {
++        usb_host_transfer_free(transfer);
+         return;
+     }
+-
+-     usbHost->logRawBytes("EspUsbHost::_onReceiveControl", transfer->data_buffer, transfer->actual_num_bytes);
++    if (!usbHost)
++    {
++        return;
++    }
++
++    if (usbHost->debugModeActive) {
++        usbHost->logRawBytes("EspUsbHost::_onReceiveControl", transfer->data_buffer, transfer->actual_num_bytes);
++    }
+ 
+     uint8_t *p = &transfer->data_buffer[8];  // Skip the first 8 bytes for processing
+     int totalBytes = transfer->actual_num_bytes;
+@@ -795,49 +817,100 @@
+         return;
+     }
+ 
+-    // Check if it's a mouse: 原来只扫描原始字节找 "05 01 09 02", 任何含鼠标 collection 的
+-    // 复合设备都会命中(键盘上的 Consumer 页、厂商接口都可能出现该字节序列)。
+-    // 现改为: 扫描仍然保留(它对不规范描述符有兜底价值), 但真正的判定交给下面的
+-    // parseHIDReportDescriptor() -> desc.valid, 也就是"必须真的解析出轴或按钮"才算数。
+-    bool isMouse = false;
+-    for (int i = 0; i + 3 < totalBytes - 8; i++)
+-    {
+-        if (p[i] == 0x05 && p[i + 1] == 0x01 && p[i + 2] == 0x09 && p[i + 3] == 0x02)
+-        {
+-            isMouse = true;
+-            break;
+-        }
+-    }
+-
+-    if (!isMouse)
+-    {
+-        ESP_LOGI("EspUsbHost", "Device is not a mouse, skipping further processing");
++    // 接口号由 submitControl() 透过 transfer->context 带过来(见那里的注释)。
++    const uint8_t ifaceNum = ctx->iface;
++
++    // 先看接口自身的 class/protocol —— 这才是"是不是鼠标接口"的权威依据,
++    // 比在描述符字节流里扫魔数可靠得多。
++    const bool ifaceIsHid = (ifaceNum < kMaxIface) &&
++                            (usbHost->endpoint_data_list[ifaceNum].bInterfaceClass == USB_CLASS_HID);
++    const uint8_t ifaceProto = (ifaceNum < kMaxIface)
++                                   ? usbHost->endpoint_data_list[ifaceNum].bInterfaceProtocol
++                                   : (uint8_t)HID_ITF_PROTOCOL_NONE;
++
++    // 说明: 原先这里有一段字节流魔数扫描(找 05 01 09 02 判定"像鼠标"), 但它
++    // 的结果 looksLikeMouse 从未参与控制流 —— 下面 candidate 只看 ifaceIsHid。
++    // 也就是说该循环在每个 HID 接口的描述符回调上白跑最多 totalBytes 次比较,
++    // 唯一的去处是一条日志。已删除, 分类交给 parseHIDReportDescriptor()。
++
++    // 候选接口: 任何 HID 接口都放行解析。
++    //
++    // 修复: 原实现只放行 MOUSE(2) 和 NONE(0), 把 KEYBOARD(1) 直接挡在门外 ——
++    // 于是键盘接口的报告描述符永远不被解析, 键盘链路整体失效。
++    // 现在不再按 protocol 预先筛除, 一律交给 parseHIDReportDescriptor() 判断:
++    // 它按内容(有没有 X/Y 轴、有没有键码数组)分类, 比 protocol 字段可靠
++    // (很多设备把 protocol 写成 0, 也有鼠标声明成键盘协议的)。
++    const bool candidate = ifaceIsHid;
++
++    if (!candidate)
++    {
++        ESP_LOGI("EspUsbHost", "iface %u is not a HID interface (class=0x%02X proto=%u), skipping",
++                 (unsigned)ifaceNum,
++                 (unsigned)endpoint_data_list[ifaceNum].bInterfaceClass,
++                 (unsigned)ifaceProto);
+         usb_host_transfer_free(transfer);
+         return;
+     }
+ 
+-    ESP_LOGI("EspUsbHost", "Mouse device detected, parsing HID report descriptor");
++    ESP_LOGI("EspUsbHost", "Parsing HID report descriptor for iface %u (proto=%u, len=%d)",
++             (unsigned)ifaceNum, (unsigned)ifaceProto, (int)(totalBytes - 8));
++
++    // ---- 保存原始报告描述符字节 ----
++    // 阶段 4(报文格式克隆)需要把真设备的描述符原样搬给 fw_device, 让被控机
++    // 读到的 GET_DESCRIPTOR(0x22) 与我们插入的真设备逐字节一致。
++    // 解析出来的结构体只够自己解码用, 重建回字节流必然有差异, 所以必须留原件。
++    {
++        const int rawLen = totalBytes - 8;
++        if (ifaceNum < kMaxIface && rawLen > 0) {
++            const int cap = (int)sizeof(usbHost->rawDescPerIface[ifaceNum].bytes);
++            const int n = rawLen < cap ? rawLen : cap;
++            memcpy(usbHost->rawDescPerIface[ifaceNum].bytes, &transfer->data_buffer[8], (size_t)n);
++            usbHost->rawDescPerIface[ifaceNum].len = (uint16_t)n;
++            if (rawLen > cap) {
++                ESP_LOGW("EspUsbHost::_onReceiveControl",
++                         "iface %u report descriptor %d bytes truncated to %d",
++                         (unsigned)ifaceNum, rawLen, cap);
++            }
++        }
++    }
+ 
+     HIDReportDescriptor descriptor =
+-        usbHost->parseHIDReportDescriptor(&transfer->data_buffer[8], totalBytes - 8);
++        usbHost->parseHIDReportDescriptor(&transfer->data_buffer[8], totalBytes - 8, ifaceNum);
+ 
+     if (!descriptor.valid)
+     {
+-        ESP_LOGW("EspUsbHost", "HID report descriptor parsed as unsupported layout, ignoring device");
++        // 注意: 这里不再拒绝设备。该接口布局无效只是"这个接口用不了",
++        // 其它接口(真正的鼠标)仍然可能有效 —— 旧代码在这里就放弃了。
++        ESP_LOGW("EspUsbHost::_onReceiveControl",
++                 "iface %u layout unsupported, iface ignored",
++                 (unsigned)ifaceNum);
+     }
+ 
+     usb_host_transfer_free(transfer);
+ }
+ 
+ 
+-void EspUsbHost::onMouse(hid_mouse_report_t report, uint8_t last_buttons)
+-{
+-    // 热路径保持轻量，避免高频日志阻塞
+-}
++// 说明: 原先这里有一个空的 onMouse()(函数体只有注释), 却在每帧 HID 报文上
++// 被无条件调用 —— 一次虚表跳转 + 8 字节结构体按值传递, 对行为零贡献。
++// 已连同其声明与调用点一并删除。
+ 
+ 
+ void EspUsbHost::onMouseButtons(hid_mouse_report_t report, uint8_t last_buttons)
+ {
++    // 屏蔽窗口内: 真实按键变化一律不转发。
++    //
++    // 关键: 这里【不能】更新 maskLastButtons。那份快照记录的是"设备侧此刻
++    // 认为按着什么", 而屏蔽期间设备侧收不到任何变化 —— 它的认知冻结在屏蔽
++    // 生效那一刻。若在这里跟着真实输入更新, maskStop() 就会去释放"用户已经
++    // 松开、但设备侧根本不知道松开了"的键, 而真正被设备侧认为按下的那些键
++    // 反而不会被释放 => 被控机上按键永久卡死。
++    // lastReportedButtons 同步更新, 它表示"本机已知的最后一帧", 用于屏蔽
++    // 退出后与新状态做差分。
++    if (maskIsActive()) {
++        lastReportedButtons = report.buttons;
++        return;
++    }
++
+     if (deviceMouseReady)
+     {
+         if (!(last_buttons & MOUSE_BUTTON_LEFT) && (report.buttons & MOUSE_BUTTON_LEFT))
+@@ -890,6 +963,10 @@
+ 
+ void EspUsbHost::onMouseMove(hid_mouse_report_t report)
+ {
++    // 屏蔽窗口内丢弃真实位移。相对位移无需补偿: 丢掉就等于"sensor 没动",
++    // 恢复后天然连续, 不会造成跳变。滚轮同理(离散事件)。
++    if (maskIsActive()) return;
++
+     if (deviceMouseReady)
+     {
+         if (report.x != 0 || report.y != 0)
+@@ -909,6 +986,203 @@
+             serial1Send("km.wheel(%d)\n", report.wheel);
+         }
+     }
++}
++
++
++void EspUsbHost::onKeyboard(const KeyboardReport &report)
++{
++    if (!deviceMouseReady) {
++        return;
++    }
++
++    uint8_t n = report.keyCount;
++    if (n > 6) n = 6;
++
++    // 屏蔽窗口内: 真实键盘变化不转发。
++    //
++    // 与鼠标按键同理, 这里【不能】更新 maskLastKeys/maskLastModifiers ——
++    // 那份快照记录的是设备侧的认知(冻结在屏蔽生效那一刻), 在这里跟着真实
++    // 输入更新会让 maskStop() 释放错误的键, 真正按下的键反而留在设备侧。
++    if (maskIsActive()) {
++        return;
++    }
++
++    // 快照去重: 键盘报文会周期性重发相同内容(真实键盘每 1~8ms 一帧, 但只在
++    // 状态变化时才改变内容)。这里比对上一帧, 内容相同就整帧丢弃 ——
++    // 否则串口上行会被无意义的重复快照占满, 而设备侧还要白跑一遍 HID 发送。
++    //
++    // 去重缓存用成员变量而非 static: maskStop() 需要作废它(见那里的说明),
++    // static 局部变量在类外部无法重置。
++    bool changed = (report.modifiers != kbdDedupModifiers) || (n != kbdDedupCount);
++    for (uint8_t i = 0; !changed && i < n; i++) {
++        if (report.keys[i] != kbdDedupKeys[i]) changed = true;
++    }
++    if (!changed) return;
++
++    kbdDedupModifiers = report.modifiers;
++    kbdDedupCount = n;
++    for (uint8_t i = 0; i < 6; i++) {
++        kbdDedupKeys[i] = (i < n) ? report.keys[i] : 0;
++    }
++
++    // 维护"键盘当前状态影子副本": 屏蔽功能进入时需要它来补发释放。
++    kbdLastModifiers = report.modifiers;
++    for (uint8_t i = 0; i < 6; i++) {
++        kbdLastKeys[i] = (i < n) ? report.keys[i] : 0;
++    }
++
++    serial1SendKeyboardBinary(report.modifiers, report.keys, n);
++}
++
++
++// ============================================================================
++// 瞬时屏蔽真实输入
++//
++// 语义: 在 maskUntilMs 之前, 真实键鼠的任何变化都不转发给设备侧。
++// 恢复时把"屏蔽期间被按住的东西"补一个抬起, 避免被控机侧按键卡死。
++//
++// 三条安全设计见 EspUsbHost.h 的声明处注释。
++// ============================================================================
++void EspUsbHost::maskStart(uint32_t durationMs)
++{
++    if (durationMs == 0) durationMs = kMaskDefaultMs;
++    if (durationMs > kMaskMaxMs) durationMs = kMaskMaxMs;   // 上限钳制
++
++    // 已经在屏蔽中就拒绝重新计时。
++    //
++    // 允许重入会让软体(或失控的调用方)通过高频重发 km.mask(2000) 把设备
++    // 无限期锁在屏蔽态 —— 那正是"硬超时"要防的事。这里让超时成为绝对的:
++    // 一旦进入, 只能等到期或显式 km.mask(0)/km.maskoff, 不能再被延长。
++    //
++    // maskUntilMs 横跨两条任务: maskStart 在 RxTaskSerial0(km.mask),
++    // maskTick/maskStop 在 RxTaskSerial1(硬超时)。下面的检查与写入若不加锁
++    // 就是 check-then-act, 且 maskStop 尾段的 `maskUntilMs = 0` 会覆盖掉
++    // 本函数刚写进去的未来时刻 —— 表现为"屏蔽被静默取消", 真实输入照常
++    // 注入被控机, 正是屏蔽要阻止的事。volatile 不提供原子性, 故用互斥量。
++    if (!s_mask_mtx) return;
++    if (xSemaphoreTake(s_mask_mtx, pdMS_TO_TICKS(20)) != pdTRUE) return;
++
++    // 临界区内复查: 前一个持有者可能刚改了状态
++    if (maskUntilMs != 0) { xSemaphoreGive(s_mask_mtx); return; }
++
++    // 进入屏蔽前必须记下"此刻设备侧认为按着什么"。
++    //
++    // 这一步是整个屏蔽功能的安全关键: 屏蔽期间真实输入被丢弃, 设备侧不会
++    // 收到任何抬键, 于是 maskLastButtons/maskLastKeys 记录的这份状态就是
++    // 唯一能用来补发释放的依据。漏了它 -> maskStop() 不发释放命令 ->
++    // 被控机上该键永久卡住(游戏里表现为人物一直前进/一直射击)。
++    // 原实现只在命令处理函数里设这个标志, 导致任何其它调用路径都漏补发。
++    maskHeldStateValid = true;
++    maskLastButtons = lastReportedButtons;
++    maskLastModifiers = kbdLastModifiers;
++    memcpy(maskLastKeys, kbdLastKeys, sizeof(maskLastKeys));
++
++    maskUntilMs = millis() + durationMs;
++    if (maskUntilMs == 0) maskUntilMs = 1;                  // 0 是"未屏蔽"的哨兵
++
++    xSemaphoreGive(s_mask_mtx);
++}
++
++void EspUsbHost::maskStop()
++{
++    // 与 maskStart 共用 s_mask_mtx: 保证"检查 active -> 清标志 -> 补发抬键"
++    // 整体不被 maskStart 插入, 否则 maskStart 刚写下的新屏蔽会被这里的
++    // `maskUntilMs = 0` 抹掉(屏蔽静默取消)。
++    if (!s_mask_mtx) return;
++    if (xSemaphoreTake(s_mask_mtx, pdMS_TO_TICKS(20)) != pdTRUE) return;
++
++    if (maskUntilMs == 0) { xSemaphoreGive(s_mask_mtx); return; }
++
++    // ---- 先清标志, 再补发抬键 ----
++    //
++    // 顺序至关重要(原实现的真实缺陷):
++    // maskUntilMs = 0 是"屏蔽已解除"的唯一标志, 它必须在【任何串口写之前】完成。
++    // 若像原实现那样放在 5 次 serial1Send 之后, 那几次写在 5Mbps 下会阻塞排队,
++    // 期间 usbClientTask 上的 onMouseButtons 仍看到 maskIsActive()==true, 于是走
++    // `lastReportedButtons = report.buttons; return;` 把基准刷成"此刻真实按着"。
++    // 等补发的 km.left(0) 已发出(设备侧已抬起)、基准却记成"按住", 后续差分
++    // `!(last_buttons & LEFT) && (report.buttons & LEFT)` 恒假 -> 设备侧永远收不到
++    // 重新按下 -> 屏蔽结束后该键静默失灵, 直到用户松手重按。
++    const uint8_t snapButtons   = maskLastButtons;
++    const uint8_t snapModifiers = maskLastModifiers;
++    uint8_t snapKeys[6];
++    memcpy(snapKeys, maskLastKeys, sizeof(snapKeys));
++    const bool snapValid = maskHeldStateValid;
++
++    maskUntilMs = 0;                  // 先解除: 此后真实输入立即恢复正常转发
++    maskHeldStateValid = false;
++    lastReportedButtons = 0;
++    // 键盘影子副本也归零, 与设备侧状态保持一致
++    kbdLastModifiers = 0;
++    memset(kbdLastKeys, 0, sizeof(kbdLastKeys));
++
++    // 作废键盘去重缓存。
++    //
++    // 屏蔽期间真实键盘变化被丢弃, 去重缓存还停在屏蔽【进入前】的内容。若用户
++    // 在这期间一直按着某个键, 屏蔽结束后送来的那一帧与缓存完全相同 -> 被当成
++    // 重复帧丢掉 -> 设备侧永远不知道这个键还按着, 表现为屏蔽后按键失灵。
++    // 这里把缓存置为一个不可能出现的值(全 0xFF), 强制下一帧必定下发。
++    kbdDedupModifiers = 0xFF;
++    memset(kbdDedupKeys, 0xFF, sizeof(kbdDedupKeys));
++    kbdDedupCount = 0xFF;
++
++    // ---- 补发抬键: 屏蔽期间按着的东西必须在恢复前放掉 ----
++    //
++    // 屏蔽期间真实输入被丢弃, 设备侧不会收到任何抬键, 所以它仍然以为
++    // snap* 里记的那些键是按下的。必须显式发释放, 否则被控机上该键
++    // 永久卡住(游戏里表现为人物一直前进 / 一直射击)。
++    //
++    // 鼠标位移不需要补偿: 相对位移丢掉就等于"sensor 没动", 恢复后天然连续。
++    if (snapValid) {
++        if (snapButtons & MOUSE_BUTTON_LEFT)    serial1Send("km.left(0)\n");
++        if (snapButtons & MOUSE_BUTTON_RIGHT)   serial1Send("km.right(0)\n");
++        if (snapButtons & MOUSE_BUTTON_MIDDLE)  serial1Send("km.middle(0)\n");
++        if (snapButtons & MOUSE_BUTTON_FORWARD) serial1Send("km.side1(0)\n");
++        if (snapButtons & MOUSE_BUTTON_BACKWARD) serial1Send("km.side2(0)\n");
++
++        // 键盘: 只要屏蔽期间有键处于按下状态就发一帧"全空"快照。
++        // 用快照而非逐键抬, 因为快照语义幂等, 不会漏键也不会重复抬。
++        bool anyHeld = (snapModifiers != 0);
++        for (int i = 0; i < 6 && !anyHeld; i++) {
++            if (snapKeys[i] != 0) anyHeld = true;
++        }
++        if (anyHeld) {
++            static const uint8_t emptyKeys[6] = {0, 0, 0, 0, 0, 0};
++            serial1SendKeyboardBinary(0, emptyKeys, 6);
++        }
++    }
++
++    xSemaphoreGive(s_mask_mtx);
++}
++
++void EspUsbHost::maskTick()
++{
++    // 只读一次快照, 避免 maskStart/maskStop 在两次读之间改变状态导致
++    // "active 为真但随后读到 0" 这类撕裂判断。
++    if (!s_mask_mtx || xSemaphoreTake(s_mask_mtx, pdMS_TO_TICKS(20)) != pdTRUE) return;
++    const uint32_t until = maskUntilMs;
++    xSemaphoreGive(s_mask_mtx);
++
++    if (until != 0 && (int32_t)(millis() - until) >= 0) {
++        maskStop();
++    }
++}
++
++// 把 16 位相对位移收进 hid_mouse_report_t 的 int8 字段。
++//
++// hid_mouse_report_t 由 TinyUSB 定义, x/y 是 int8_t, 装不下 16 位值。原实现
++// 直接 (int8_t) 强转 —— 那是【环绕截断】而非截顶: +256 变成 0(看起来没动),
++// +511 变成 -1(【反向】移动一格)。这是最坏的一种失效: 方向错了但系统不报错。
++//
++// 正确做法是饱和截顶: 超范围时钳到 ±127, 方向保持正确、幅度有上限。设备侧
++// handleMove 本来就会把大位移拆成多个 ±127 的步进, 因此这里钳位不会"丢位移",
++// 只是把一次大跳拆到相邻几帧里 —— 相对位移的累积量依然接近正确。
++// 注: 真正的无损方案是把 x/y 改成 int16 一路传到底, 那要动 TinyUSB 的类型与
++// 设备侧帧格式, 超出本次修复范围; 钳位消除了"反向"这个致命错误。
++static inline int8_t clampAxis16(int16_t v) {
++    if (v >  127) return  127;
++    if (v < -127) return -127;
++    return (int8_t)v;
+ }
+ 
+ 
+@@ -939,10 +1213,24 @@
+     transfer->device_handle = deviceHandle;
+     transfer->bEndpointAddress = 0x00;
+     transfer->callback = _onReceiveControl;
+-    transfer->context = this;
+-
+-    // Log raw bytes using the helper function
+-    logRawBytes("EspUsbHost::submitControl", transfer->data_buffer, transfer->num_bytes);
++
++    // 把"该描述符属于哪个接口"带给异步回调。
++    // 回调里没法再知道发起时的接口号, 而复合设备会连续发起多个接口的
++    // GET_DESCRIPTOR(0x22), 缺了它就只能全局猜 —— 那正是旧代码用静态
++    // HIDReportDesc 被覆盖的根因。
++    // 注意: usb_transfer_s 里没有 bInterval 字段(它只存在于端点描述符),
++    // 所以用 context 指向一个预分配的小结构同时携带对象指针与接口号。
++    const uint8_t ctxIface = (wInterfaceNumber < kMaxIface)
++                                 ? (uint8_t)wInterfaceNumber
++                                 : (uint8_t)(kMaxIface - 1);
++    controlCtx[ctxIface].host  = this;
++    controlCtx[ctxIface].iface = ctxIface;
++    transfer->context = &controlCtx[ctxIface];
++
++    // 只在调试模式下打印原始字节, 避免每次发控制传输都格式化一遍数据。
++    if (debugModeActive) {
++        logRawBytes("EspUsbHost::submitControl", transfer->data_buffer, transfer->num_bytes);
++    }
+ 
+     ESP_LOGI("EspUsbHost", "Submitting control transfer, bmRequestType=0x%02x, bDescriptorIndex=0x%02x, bDescriptorType=0x%02x, wInterfaceNumber=0x%04x, wDescriptorLength=%d",
+              bmRequestType, bDescriptorIndex, bDescriptorType, wInterfaceNumber, wDescriptorLength);
+@@ -967,7 +1255,7 @@
+ //   - _onReceive 用设备可控的偏移直接索引 data_buffer
+ // ============================================================================
+ 
+-EspUsbHost::HIDReportDescriptor EspUsbHost::parseHIDReportDescriptor(uint8_t *data, int length)
++EspUsbHost::HIDReportDescriptor EspUsbHost::parseHIDReportDescriptor(uint8_t *data, int length, uint8_t ifaceNum)
+ {
+     // ============================================================
+     // 重写说明(原实现的缺陷):
+@@ -1114,6 +1402,33 @@
+                 break;
+             }
+ 
++            // 键盘修饰键: Usage Page 0x07(Keyboard), Usage 0xE0..0xE7
++            // 描述符标准写法是 REPORT_SIZE=1 / REPORT_COUNT=8 / USAGE_MIN=0xE0 /
++            // USAGE_MAX=0xE7, 8 个 1-bit 字段拼成 1 字节。usageMinimum 也能触发
++            // (有的设备只写 MIN/MAX 不写单个 USAGE)。
++            if (usagePage == 0x07 && !desc.hasModifierByte && reportSize == 1 &&
++                ((usage >= 0xE0 && usage <= 0xE7) ||
++                 (usageMinimum >= 0xE0 && usageMinimum <= 0xE7))) {
++                desc.modifierByte = (uint8_t)(bitOffset / 8);
++                desc.hasModifierByte = true;
++                desc.isKeyboard = true;
++                bitOffset += reportSize * reportCount;
++                if (bitOffset > kMaxBits) bitOffset = kMaxBits;
++                break;
++            }
++
++            // 键盘主键码数组: Usage Page 0x07, 8-bit, USAGE_MIN=0x00..USAGE_MAX=0x65
++            // 标准键盘是 REPORT_COUNT=6。NKRO 键盘可能更多, 这里按实际 count 记。
++            if (usagePage == 0x07 && reportSize == 8 && !desc.keyArrayCount &&
++                (usageMinimum < 0xE0 || usageMinimum == 0)) {
++                desc.keyArrayStartByte = (uint8_t)(bitOffset / 8);
++                desc.keyArrayCount = (uint8_t)(reportCount > 32 ? 32 : reportCount);
++                desc.isKeyboard = true;
++                bitOffset += reportSize * reportCount;
++                if (bitOffset > kMaxBits) bitOffset = kMaxBits;
++                break;
++            }
++
+             // 其它字段(常量填充 / 厂商自定义): 按声明的位数跳过
+             bitOffset += reportSize * reportCount;
+             if (bitOffset > kMaxBits) bitOffset = kMaxBits;
+@@ -1126,7 +1441,7 @@
+     }
+ 
+     // ---- 收尾校验: 任何越界布局一律判为无效, 宁可不上报也不越界读 ----
+-    desc.valid = (haveX || haveY || haveButtons);
++    desc.valid = (haveX || haveY || haveButtons || desc.isKeyboard);
+ 
+     if (desc.hasReportId) {
+         // 带 REPORT_ID 的报文首字节是 ID, 所有布局整体后移 1 字节
+@@ -1134,6 +1449,8 @@
+         if (desc.xAxisStartByte < kMaxByte)  desc.xAxisStartByte++;
+         if (desc.yAxisStartByte < kMaxByte)  desc.yAxisStartByte++;
+         if (desc.wheelStartByte < kMaxByte)  desc.wheelStartByte++;
++        if (desc.keyArrayStartByte < kMaxByte) desc.keyArrayStartByte++;
++        if (desc.hasModifierByte && desc.modifierByte < kMaxByte) desc.modifierByte++;
+     }
+ 
+     // 轴宽合法化: 只接受 8/12/16 位
+@@ -1142,33 +1459,98 @@
+     if (desc.xAxisSize > 16) desc.xAxisSize = 16;
+     if (desc.yAxisSize > 16) desc.yAxisSize = 16;
+ 
+-    if (desc.xAxisSize != 8 && desc.xAxisSize != 12 && desc.xAxisSize != 16) desc.valid = false;
+-    if (desc.yAxisSize != 8 && desc.yAxisSize != 12 && desc.yAxisSize != 16) desc.valid = false;
++    // 键盘没有 X/Y 轴, 上面那套轴向校验对它不适用 —— 否则键盘接口会被判无效。
++    // 只对"含鼠标轴"的布局做轴向检查。
++    if (haveX || haveY) {
++        if (desc.xAxisSize != 8 && desc.xAxisSize != 12 && desc.xAxisSize != 16) desc.valid = false;
++        if (desc.yAxisSize != 8 && desc.yAxisSize != 12 && desc.yAxisSize != 16) desc.valid = false;
++        if (desc.xAxisStartByte > kMaxByte) desc.valid = false;
++        if (desc.yAxisStartByte > kMaxByte) desc.valid = false;
++
++        const uint8_t xBytes = (uint8_t)((desc.xAxisSize + 7) / 8);
++        const uint8_t yBytes = (uint8_t)((desc.yAxisSize + 7) / 8);
++        if ((uint32_t)desc.xAxisStartByte + xBytes > (uint32_t)kMaxDesc) desc.valid = false;
++        if ((uint32_t)desc.yAxisStartByte + yBytes > (uint32_t)kMaxDesc) desc.valid = false;
++    }
+ 
+     // 起始字节必须在本缓冲范围内
+-    if (desc.xAxisStartByte > kMaxByte) desc.valid = false;
+-    if (desc.yAxisStartByte > kMaxByte) desc.valid = false;
+     if (desc.wheelStartByte > kMaxByte) desc.valid = false;
+     if (desc.buttonStartByte > kMaxByte) desc.valid = false;
+ 
+-    // 轴跨字节数不能越过缓冲尾
+-    const uint8_t xBytes = (uint8_t)((desc.xAxisSize + 7) / 8);
+-    const uint8_t yBytes = (uint8_t)((desc.yAxisSize + 7) / 8);
+-    if ((uint32_t)desc.xAxisStartByte + xBytes > (uint32_t)kMaxDesc) desc.valid = false;
+-    if ((uint32_t)desc.yAxisStartByte + yBytes > (uint32_t)kMaxDesc) desc.valid = false;
++    // 键盘字段越界同样判无效
++    if (desc.isKeyboard) {
++        if (desc.modifierByte > kMaxByte) desc.valid = false;
++        if ((uint32_t)desc.keyArrayStartByte + desc.keyArrayCount > (uint32_t)kMaxDesc) {
++            desc.valid = false;
++        }
++    }
+ 
+     if (desc.maxAxisBitsPerByte == 0) desc.maxAxisBitsPerByte = 1;
+ 
+-    HIDReportDesc = desc;
++    // 写入【该接口自己的】槽位, 不再覆盖全局单份布局。
++    // 复合设备(鼠标+键盘+厂商接口)每个 HID 接口都会走到这里一次,
++    // 各存各的, 互不影响。
++    if (ifaceNum < kMaxIface) {
++        descPerIface[ifaceNum]      = desc;
++        descPerIfaceValid[ifaceNum] = true;
++
++        // 选定鼠标接口: 优先 protocol == MOUSE, 其次 NONE(厂商/无协议)。
++        // 只选一个, 避免同一份位移被多个接口重复注入。
++        const uint8_t proto = endpoint_data_list[ifaceNum].bInterfaceProtocol;
++        const bool isMouseProto = (proto == HID_ITF_PROTOCOL_MOUSE);
++        const bool isNoneProto  = (proto == HID_ITF_PROTOCOL_NONE);
++        const bool isKbdProto   = (proto == HID_ITF_PROTOCOL_KEYBOARD);
++
++        // 该接口的布局是否真的含鼠标轴/按钮。键盘的按钮(Usage Page 0x09 的
++        // 修饰键)也会让 haveButtons 为真, 所以不能只看 desc.valid ——
++        // 必须要求出现 X/Y 轴, 否则纯键盘接口会被误选成鼠标接口,
++        // 于是键盘报文被当鼠标解码, 产生垃圾位移。
++        const bool hasMouseAxes = (desc.xAxisSize > 0 && desc.yAxisSize > 0 &&
++                                   (desc.xAxisStartByte != desc.yAxisStartByte ||
++                                    desc.xAxisBitOffset != desc.yAxisBitOffset));
++        const bool looksLikeMouse =
++            desc.valid && !isKbdProto && !desc.isKeyboard && hasMouseAxes;
++
++        if (looksLikeMouse && (isMouseProto || isNoneProto)) {
++            if (mouseIface < 0) {
++                mouseIface = (int8_t)ifaceNum;
++            } else if (isMouseProto &&
++                       endpoint_data_list[mouseIface].bInterfaceProtocol != HID_ITF_PROTOCOL_MOUSE) {
++                // 后出现的"真鼠标协议"接口优先级更高, 顶掉先前选中的 NONE 接口
++                mouseIface = (int8_t)ifaceNum;
++            }
++        }
++
++        // 选定键盘接口: 必须是 keyboard 协议, 或布局里确实解析出了键码数组。
++        // 支持"只插键盘": 此时 mouseIface 一直为 -1, 但键盘链路照常工作。
++        const bool looksLikeKeyboard = desc.valid && desc.isKeyboard;
++        if (looksLikeKeyboard && (isKbdProto || !hasMouseAxes)) {
++            if (keyboardIface < 0) {
++                keyboardIface = (int8_t)ifaceNum;
++            } else if (isKbdProto &&
++                       endpoint_data_list[keyboardIface].bInterfaceProtocol != HID_ITF_PROTOCOL_KEYBOARD) {
++                keyboardIface = (int8_t)ifaceNum;
++            }
++        }
++    } else {
++        ESP_LOGW("EspUsbHost::parseHIDReportDescriptor",
++                 "iface %u out of range (max %u), layout dropped",
++                 (unsigned)ifaceNum, (unsigned)kMaxIface);
++    }
+ 
+     ESP_LOGI("EspUsbHost::parseHIDReportDescriptor",
+-             "layout: valid=%d id=%u btn(sz=%u,byte=%u) x(sz=%u,byte=%u,bit=%u) y(sz=%u,byte=%u,bit=%u) wheel(byte=%u,sz=%u) perByte=%u",
++             "iface=%u layout: valid=%d id=%u btn(sz=%u,byte=%u) x(sz=%u,byte=%u,bit=%u) y(sz=%u,byte=%u,bit=%u) wheel(byte=%u,sz=%u) perByte=%u kbd=%d keyArr(byte=%u,n=%u) mod(byte=%u,has=%d) mouseIface=%d keyboardIface=%d",
++             (unsigned)ifaceNum,
+              desc.valid ? 1 : 0, (unsigned)desc.reportId,
+              (unsigned)desc.buttonSize, (unsigned)desc.buttonStartByte,
+              (unsigned)desc.xAxisSize, (unsigned)desc.xAxisStartByte, (unsigned)desc.xAxisBitOffset,
+              (unsigned)desc.yAxisSize, (unsigned)desc.yAxisStartByte, (unsigned)desc.yAxisBitOffset,
+              (unsigned)desc.wheelStartByte, (unsigned)desc.wheelSize,
+-             (unsigned)desc.maxAxisBitsPerByte);
++             (unsigned)desc.maxAxisBitsPerByte,
++             desc.isKeyboard ? 1 : 0,
++             (unsigned)desc.keyArrayStartByte, (unsigned)desc.keyArrayCount,
++             (unsigned)desc.modifierByte, desc.hasModifierByte ? 1 : 0,
++             (int)mouseIface, (int)keyboardIface);
+ 
+     return desc;
+ }
+@@ -1183,7 +1565,6 @@
+         return;
+     }
+ 
+-    uint8_t endpoint_num = transfer->bEndpointAddress & 0x0F;
+     bool has_data = (transfer->actual_num_bytes > 0);
+     const int reportLen = transfer->actual_num_bytes;
+ 
+@@ -1206,18 +1587,29 @@
+ 
+     // ===== 只处理"数据实际来自的那个端点"所属的接口 =====
+     //
+-    // 原实现是 for (int i = 0; i < 16; i++) 遍历所有接口槽位, 对每个匹配项都调用一次
+-    // onMouseMove()。而 endpoint_data_list[] 在 onConfig() 里被两个下标写入过:
+-    //   - USB_INTERFACE_DESC 分支: 以【接口号】为下标写入 class/protocol
+-    //   - USB_ENDPOINT_DESC  分支: 以【端点号】为下标, 把所属接口的 class/protocol 再写一遍
+-    // 于是哪怕是最简单的"单接口+单端点"鼠标, 也有 2 个槽位同时命中
+-    // -> 同一份位移被注入 2 次; 复合 HID 设备(鼠标+键盘+厂商接口)命中更多, 成倍放大。
+-    //
+-    // 这里改为用数据实际来自的端点号去查"端点->所属接口"映射, 保证一份报表只处理一次。
+-    bool epIsHidMouse =
+-        (usbHost->ep_owner_class[endpoint_num] == USB_CLASS_HID) &&
+-        (usbHost->ep_owner_protocol[endpoint_num] == HID_ITF_PROTOCOL_MOUSE ||
+-         usbHost->ep_owner_protocol[endpoint_num] == HID_ITF_PROTOCOL_NONE);
++    // 用数据实际来自的端点【完整地址(含方向位)】去查 ep_owner[], 拿到所属接口号,
++    // 再用该接口号取它自己的报告布局。这样:
++    //   1) 一份报表只处理一次(旧实现按 16 个槽位遍历, 同一份位移被注入多次);
++    //   2) 不会被其它接口(键盘/厂商接口)的布局串味;
++    //   3) IN/OUT 端点号相同的复合设备不会互相顶掉(旧 ep_owner_class[16] 丢了方向位)。
++    const uint8_t epSlotIdx = EspUsbHost::epSlot(transfer->bEndpointAddress);
++    const bool    epKnown   = usbHost->ep_owner[epSlotIdx].used;
++    // 端点未经描述符登记时, iface 字段是 0 —— 而 0 可能恰好等于 mouseIface,
++    // 于是未登记的端点会被误判成鼠标接口。这里用一个不可能相等的哨兵值兜住,
++    // 保证后续所有以 ifaceNum 为下标的访问都短路在 epKnown 之后。
++    const uint8_t ifaceNum  = epKnown ? usbHost->ep_owner[epSlotIdx].iface
++                                      : (uint8_t)0xFF;
++
++    // 只认被选中的那个鼠标接口; 未选中(还没解析到鼠标描述符)就什么都不做。
++    // 另外要求该接口 class == HID, 避免厂商接口的报文被误当鼠标。
++    bool epIsSelectedMouse =
++        epKnown &&
++        (usbHost->mouseIface >= 0) &&
++        (ifaceNum == (uint8_t)usbHost->mouseIface) &&
++        (ifaceNum < EspUsbHost::kMaxIface) &&
++        (usbHost->endpoint_data_list[ifaceNum].bInterfaceClass == USB_CLASS_HID) &&
++        usbHost->descPerIfaceValid[ifaceNum] &&
++        usbHost->descPerIface[ifaceNum].valid;
+ 
+     // ===== 报表解码 =====
+     //
+@@ -1231,9 +1623,9 @@
+     //   axisSize==8  -> 每轴 1 字节
+     //   axisSize==12 且两轴挤在 2 字节里 -> 半字节交织(QMK/部分游戏鼠标)
+     //   axisSize==16 -> 每轴 2 字节小端
+-    if (has_data && epIsHidMouse && usbHost->HIDReportDesc.valid)
+-    {
+-        const EspUsbHost::HIDReportDescriptor &d = usbHost->HIDReportDesc;
++    if (has_data && epIsSelectedMouse)
++    {
++        const EspUsbHost::HIDReportDescriptor &d = usbHost->descPerIface[ifaceNum];
+ 
+         // Report ID 过滤: 描述符里有 REPORT_ID 时, 报文首字节必须是该 ID
+         bool reportIdOk = !d.hasReportId || (reportLen > 0 && transfer->data_buffer[0] == d.reportId);
+@@ -1267,17 +1659,18 @@
+                 // 12 位有符号就近还原(游戏鼠标的 12 位相对位移通常以 0x800 为 0)
+                 if (xValue >= 0x800) xValue -= 0x1000;
+                 if (yValue >= 0x800) yValue -= 0x1000;
+-                report.x = (int8_t)xValue;
+-                report.y = (int8_t)yValue;
++                report.x = clampAxis16(xValue);   // 饱和截顶, 不做环绕截断
++                report.y = clampAxis16(yValue);
+                 report.wheel = d.wheelSize ? (int8_t)db[d.wheelStartByte] : 0;
+             }
+             else if (d.xAxisSize == 16 && d.yAxisSize == 16)
+             {
+                 int16_t xv = (int16_t)((uint16_t)db[d.xAxisStartByte] | ((uint16_t)db[d.xAxisStartByte + 1] << 8));
+                 int16_t yv = (int16_t)((uint16_t)db[d.yAxisStartByte] | ((uint16_t)db[d.yAxisStartByte + 1] << 8));
+-                // 自身结构只支持 8 位相对位移, 大步长由设备侧拆分
+-                report.x = (int8_t)xv;
+-                report.y = (int8_t)yv;
++                // 16 位值收进 int8 字段: 饱和截顶而非环绕 —— 原 (int8_t) 强转会让
++                // +511 变成 -1(反向移动), +256 变成 0(静默丢帧), 见 clampAxis16 说明。
++                report.x = clampAxis16(xv);
++                report.y = clampAxis16(yv);
+                 report.wheel = d.wheelSize ? (int8_t)db[d.wheelStartByte] : 0;
+             }
+             else
+@@ -1288,7 +1681,6 @@
+                 report.wheel = d.wheelSize ? (int8_t)db[d.wheelStartByte] : 0;
+             }
+ 
+-            usbHost->onMouse(report, usbHost->lastReportedButtons);
+             if (report.buttons != usbHost->lastReportedButtons)
+             {
+                 usbHost->onMouseButtons(report, usbHost->lastReportedButtons);
+@@ -1312,6 +1704,65 @@
+         }
+     }
+ 
++    // ===== 键盘报文解码 =====
++    //
++    // 与鼠标完全对称, 但走"快照"语义: 键盘报文本身描述的就是"此刻按下了哪些键",
++    // 所以直接把修饰键字节 + 键码数组原样交给设备侧重建即可。
++    //
++    // 支持"只插键盘": 此时 epIsSelectedMouse 恒为 false, 但这一段照常工作,
++    // 不再像旧代码那样因为没有鼠标接口而让整台设备静默。
++    const bool epIsSelectedKeyboard =
++        epKnown &&
++        (usbHost->keyboardIface >= 0) &&
++        (ifaceNum == (uint8_t)usbHost->keyboardIface) &&
++        (ifaceNum < EspUsbHost::kMaxIface) &&
++        (usbHost->endpoint_data_list[ifaceNum].bInterfaceClass == USB_CLASS_HID) &&
++        usbHost->descPerIfaceValid[ifaceNum] &&
++        usbHost->descPerIface[ifaceNum].valid &&
++        usbHost->descPerIface[ifaceNum].isKeyboard;
++
++    if (has_data && epIsSelectedKeyboard)
++    {
++        const EspUsbHost::HIDReportDescriptor &k = usbHost->descPerIface[ifaceNum];
++
++        // 键码数组必须完整落在本帧内 —— 同样宁可丢帧也不越界读。
++        const bool kbdLayoutOk =
++            (k.keyArrayCount > 0) &&
++            ((int)k.keyArrayStartByte + (int)k.keyArrayCount <= reportLen) &&
++            (!k.hasModifierByte || (int)k.modifierByte < reportLen);
++
++        // Report ID 过滤(键盘接口常带自己的 ID)
++        const bool kbdIdOk =
++            !k.hasReportId || (reportLen > 0 && transfer->data_buffer[0] == k.reportId);
++
++        if (kbdLayoutOk && kbdIdOk)
++        {
++            EspUsbHost::KeyboardReport kr = {};
++            const uint8_t *db = transfer->data_buffer;
++
++            if (k.hasModifierByte) {
++                kr.modifiers = db[k.modifierByte];
++            }
++
++            uint8_t n = k.keyArrayCount;
++            if (n > sizeof(kr.keys)) n = (uint8_t)sizeof(kr.keys);
++            for (uint8_t i = 0; i < n; i++) {
++                kr.keys[i] = db[k.keyArrayStartByte + i];
++            }
++            kr.keyCount = n;
++
++            usbHost->onKeyboard(kr);
++        }
++        else if (usbHost->debugModeActive)
++        {
++            ESP_LOGW("EspUsbHost::_onReceive",
++                     "drop kbd report: len=%d idOk=%d layoutOk=%d (keys@%u n=%u mod@%u has=%d)",
++                     reportLen, kbdIdOk ? 1 : 0, kbdLayoutOk ? 1 : 0,
++                     (unsigned)k.keyArrayStartByte, (unsigned)k.keyArrayCount,
++                     (unsigned)k.modifierByte, k.hasModifierByte ? 1 : 0);
++        }
++    }
++
+     // Handle transfer status
+     if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+         if (transfer->status == USB_TRANSFER_STATUS_STALL) {

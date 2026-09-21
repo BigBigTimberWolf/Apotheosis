@@ -1,6 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,6 +26,75 @@ struct HotkeyAimClass
     float y_offset = 0.5f;
     float y_offset_max = 0.5f;
     float min_conf = 0.0f;
+};
+
+// ── 瞄准控制器参数组 ────────────────────────────────────────────────────────
+//
+// 同一套参数在配置里存在【两份】:
+//   · 默认档 HotkeyProfile::ctl_*      —— 平时(未开镜)生效
+//   · 开镜档 HotkeyProfile::ctl_scope  —— 自动开镜生效期间整组取代默认档
+//
+// ★ 为什么要有开镜档: 开镜后游戏内灵敏度被【倍率】放大, 镜前调好的一套增益
+//   与灵敏度折算填进镜内必然过冲(瞬狙最典型: 镜前一甩就在镜内飞出去)。
+//   所以镜内单独一套参数; 跟随热键(默认)时逐拍与没有这个功能时完全一致。
+//
+// ★ 这里只装【「瞄准控制器」卡里那 18 个旋钮】。选靶/稳定器/滞回/瞄点 Y 等
+//   参数不属于"控制器增益", 仍然只有热键一份, 不随开镜切档。
+//
+// ★ clamp() 是这两档【唯一】的夹取实现(默认档也走它), 规则只有一份 —— 见
+//   Config::loadConfig 里对 ctl_* 的处理。
+struct AimCtlParams
+{
+    double kp_x = 35.0;
+    double kp_y = 35.0;
+    double ki_x = 0.0;
+    double ki_y = 0.0;
+    double kd_x = 0.0;
+    double kd_y = 0.0;
+
+    double tau_unwind_sec = 0.030;
+    double tau_deriv_sec = 0.020;
+    double i_max = 0.0;
+    int    max_output_counts = 200;
+    double p_full_scale_px = 0.0;
+
+    // Smith 在途自身位移补偿 (一帧拉枪)
+    double k_px_per_count = 0.0;
+    double inflight_beta = 0.8;
+    double inflight_dead_time_ms = 46.0;
+
+    // 在途补偿 (预测提前量)。lead_ms == 0 时预测整体不生效。
+    double predict_lead_ms = 0.0;
+    double predict_max_velocity_px_s = 0.0;
+    double predict_max_lead_ratio = 0.0;
+
+    // 瞄点 Y 随机抖动的种子 (0 = 用内部固定常数)
+    int random_seed = 0;
+
+    // 夹取。★ 逐条对应 config.cpp 里原来手写的那一组, 不新增也不放松任何一条。
+    void clamp()
+    {
+        kp_x = std::max(0.0, kp_x);
+        kp_y = std::max(0.0, kp_y);
+        ki_x = std::max(0.0, ki_x);
+        ki_y = std::max(0.0, ki_y);
+        kd_x = std::max(0.0, kd_x);
+        kd_y = std::max(0.0, kd_y);
+        tau_unwind_sec = std::clamp(tau_unwind_sec, 1e-4, 10.0);
+        tau_deriv_sec = std::clamp(tau_deriv_sec, 0.0, 10.0);
+        i_max = std::max(0.0, i_max);
+        p_full_scale_px = std::max(0.0, p_full_scale_px);
+        k_px_per_count = std::clamp(k_px_per_count, 0.0, 10.0);
+        inflight_beta = std::clamp(inflight_beta, 0.0, 2.0);
+        inflight_dead_time_ms = std::clamp(inflight_dead_time_ms, 0.0, 1000.0);
+        // 下面三个 0 都有明确含义(关闭/不限制), 所以只做下界与有限性保护,
+        // 上界留宽, 避免把用户合理的调参夹掉。
+        predict_lead_ms = std::clamp(predict_lead_ms, 0.0, 1000.0);
+        predict_max_velocity_px_s = std::clamp(predict_max_velocity_px_s, 0.0, 100000.0);
+        predict_max_lead_ratio = std::clamp(predict_max_lead_ratio, 0.0, 100.0);
+        max_output_counts = std::clamp(max_output_counts, 1, 1000);
+        random_seed = std::max(0, random_seed);
+    }
 };
 
 struct HotkeyProfile
@@ -105,6 +175,14 @@ struct HotkeyProfile
 
     int ctl_random_seed = 0;
 
+    // ── 开镜档 (自动开镜生效期间取代上面的 ctl_* 整组) ────────────────────
+    // ★ scope_ctl_enabled: 0 = 跟随热键默认档(默认值, 逐拍与没有这个功能一致);
+    //                      1 = 开关按下右键之后改用 ctl_scope。
+    // ★ 判定在 runtime/aim_loop.cpp: 只有【自动开镜真的按下了右键】且热键仍被
+    //   按住的那几拍才切档 —— 不是"只要开镜就切"。
+    int scope_ctl_enabled = 0;
+    AimCtlParams ctl_scope;
+
     bool trigger_enabled = false;
     int  trigger_fire_delay = 0;
     int  trigger_fire_duration = 0;
@@ -133,6 +211,62 @@ struct HotkeyProfile
     std::shared_ptr<const std::vector<float>> aim_path_custom_samples;
 
 };
+
+// ── 默认档 ↔ AimCtlParams 的搬运 ────────────────────────────────────────────
+//
+// 两个用途, 都用同一份实现:
+//   1) Config::loadConfig 的夹取: 默认档借道 AimCtlParams::clamp() 走【同一份】
+//      规则, 免得默认档与开镜档的夹取各写一遍、日后漂移。
+//   2) 界面上的「一键复制指定热键的默认瞄准参数」: 把别的热键的【默认档】
+//      搬进本热键的【开镜档】(复制的是默认档, 不是对方的开镜档)。
+//
+// ★ 故意放在头文件里(非 config.cpp): 它是纯搬运, 逻辑测试不需要链 config.cpp
+//   就能钉住它。
+inline AimCtlParams ctlParamsOf(const HotkeyProfile& hk)
+{
+    AimCtlParams p;
+    p.kp_x = hk.ctl_kp_x;
+    p.kp_y = hk.ctl_kp_y;
+    p.ki_x = hk.ctl_ki_x;
+    p.ki_y = hk.ctl_ki_y;
+    p.kd_x = hk.ctl_kd_x;
+    p.kd_y = hk.ctl_kd_y;
+    p.tau_unwind_sec = hk.ctl_tau_unwind_sec;
+    p.tau_deriv_sec = hk.ctl_tau_deriv_sec;
+    p.i_max = hk.ctl_i_max;
+    p.max_output_counts = hk.ctl_max_output_counts;
+    p.p_full_scale_px = hk.ctl_p_full_scale_px;
+    p.k_px_per_count = hk.ctl_k_px_per_count;
+    p.inflight_beta = hk.ctl_inflight_beta;
+    p.inflight_dead_time_ms = hk.ctl_inflight_dead_time_ms;
+    p.predict_lead_ms = hk.ctl_predict_lead_ms;
+    p.predict_max_velocity_px_s = hk.ctl_predict_max_velocity_px_s;
+    p.predict_max_lead_ratio = hk.ctl_predict_max_lead_ratio;
+    p.random_seed = hk.ctl_random_seed;
+    return p;
+}
+
+inline void applyCtlParams(HotkeyProfile& hk, const AimCtlParams& p)
+{
+    hk.ctl_kp_x = p.kp_x;
+    hk.ctl_kp_y = p.kp_y;
+    hk.ctl_ki_x = p.ki_x;
+    hk.ctl_ki_y = p.ki_y;
+    hk.ctl_kd_x = p.kd_x;
+    hk.ctl_kd_y = p.kd_y;
+    hk.ctl_tau_unwind_sec = p.tau_unwind_sec;
+    hk.ctl_tau_deriv_sec = p.tau_deriv_sec;
+    hk.ctl_i_max = p.i_max;
+    hk.ctl_max_output_counts = p.max_output_counts;
+    hk.ctl_p_full_scale_px = p.p_full_scale_px;
+    hk.ctl_k_px_per_count = p.k_px_per_count;
+    hk.ctl_inflight_beta = p.inflight_beta;
+    hk.ctl_inflight_dead_time_ms = p.inflight_dead_time_ms;
+    hk.ctl_predict_lead_ms = p.predict_lead_ms;
+    hk.ctl_predict_max_velocity_px_s = p.predict_max_velocity_px_s;
+    hk.ctl_predict_max_lead_ratio = p.predict_max_lead_ratio;
+    hk.ctl_random_seed = p.random_seed;
+}
 
 struct CrosshairColorProfileConfig
 {
@@ -188,6 +322,19 @@ public:
     float small_target_area_frac = 0.012f;
     float small_target_confidence = 0.06f;
     bool fixed_input_size = false;
+
+    // ── 引擎精度 (导出 .engine 时生效; 改完必须删掉旧 .engine 重新导出) ──────
+    //   "fp16" : 现状, 默认。网络 IO 钉成 kHALF, 关 TF32。
+    //   "int8" : TensorRT 隐式量化 + 熵校准 (IInt8EntropyCalibrator2)。
+    //            Turing(sm_75) 有 INT8 tensor core, 吞吐约为 FP16 的 2 倍,
+    //            代价是需要校准图集, 且量化误差对小目标最敏感 —— 必须实测精度。
+    //   ⚠ FP8 不在选项里: 它需要 Ada(sm_89)/Hopper(sm_90)+, sm_75 硬件不支持。
+    std::string engine_precision = "fp16";
+    std::string int8_calib_dir   = "calib";  // 校准图目录(相对 exe 目录或绝对路径)
+    int         int8_calib_images = 200;     // 最多使用多少张 (1..2000)
+    // 注意: 没有"校准批大小"这个键 —— 本工程的网络是固定 batch=1 的
+    // (优化 profile 写死 Dims4{1,3,H,W}), TensorRT 要求校准批大小与网络 batch
+    // 维一致, 所以它恒为 1, 不暴露成可调参数。
 
     bool use_cuda_graph = true;
     bool use_spin_wait_sync = true;

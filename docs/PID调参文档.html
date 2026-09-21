@@ -163,7 +163,8 @@
     <li><a href="#s8">选靶 / 稳定器（影响 PID 的前提）</a></li>
     <li><a href="#s9">场景配方</a></li>
     <li><a href="#s10">故障排查表</a></li>
-    <li><a href="#s11">源码索引与存疑项</a></li>
+    <li><a href="#s11">开镜档（自动开镜期间的第二套参数）</a></li>
+    <li><a href="#s12">源码索引与存疑项</a></li>
   </ol>
 </nav>
 
@@ -1029,12 +1030,30 @@ g_crit(d) = 2 · sin( π / (2·(2d+1)) )
 </p>
 
 <h3>8.2 选靶与稳定器参数</h3>
+
+<div class="callout warn">
+  <div class="t">★ 这几项在界面上的位置（2026-09-20 起）：控制 → 稳定器</div>
+  <p style="margin-bottom:6px">
+    这 7 项是<b>全局</b>参数（所有热键、所有方案共用一套），原来挂在「目标」页的一张卡里，
+    现已搬到 <b>控制 → 稳定器</b> 独立页（与「准星找色」并列 —— 两者都作用于控制器【之前】的输入），
+    改完立即生效。
+  </p>
+  <p style="margin-bottom:0">
+    <b>★ 键名以本节的 <code>target_*</code> 为准，不要手改 <code>ctl_*</code> 那一组同名的键。</b>
+    <code>config.ini</code> 里每个热键段虽然也有 <code>ctl_hysteresis_ratio</code> /
+    <code>ctl_match_center_ratio</code> / <code>ctl_k_snap_mult</code> / <code>ctl_min_aspect</code> /
+    <code>ctl_max_aspect</code> / <code>ctl_max_distance_px</code> / <code>ctl_area_ratio_tol</code>
+    这些键，但控制器读的是 <code>[target_stabilizer]</code> 段里的全局值
+    （见 <span class="src">runtime/aim_loop_config.cpp</span> 的 <code>flattenProfile</code>），
+    改热键段里那份<b>不会有任何效果</b>。
+  </p>
+</div>
 <div class="tw">
 <table>
   <thead><tr><th>键 / UI 标签</th><th>默认</th><th>范围</th><th>说明</th></tr></thead>
   <tbody>
     <tr>
-      <td><code>ctl_hysteresis_ratio</code><br><span class="src">选靶滞回倍数</span></td>
+      <td><code>target_hysteresis_ratio</code><br><span class="src">选靶滞回倍数</span></td>
       <td class="num">1.3</td><td class="num">1.0 – 10.0</td>
       <td>
         已锁定时，新候选必须比它<b>近这么多倍</b>才换目标。<br>
@@ -1044,28 +1063,29 @@ g_crit(d) = 2 · sin( π / (2·(2d+1)) )
       </td>
     </tr>
     <tr>
-      <td><code>ctl_max_distance_px</code><br><span class="src">选靶距离上限 (0=不限)</span></td>
+      <td><code>target_max_distance_px</code><br><span class="src">选靶距离上限 (0=不限)</span></td>
       <td class="num">0.0</td><td class="num">0 – 5000</td>
       <td>超出此距离（检测像素）的候选不参与选靶。<b>默认 0 = 不限</b>，因为距离门控已由 FOV 椭圆承担。</td>
     </tr>
     <tr>
-      <td><code>ctl_match_center_ratio</code><br><span class="src">稳定器·认目标中心系数</span><br><span class="pill p-must">影响 PID</span></td>
+      <td><code>target_match_center_ratio</code><br><span class="src">稳定器·认目标中心系数</span><br><span class="pill p-must">影响 PID</span></td>
       <td class="num">0.5</td><td class="num">0.001 – 10.0</td>
       <td>
         「这帧的框和上帧是同一目标吗」的判据：
         <b>中心距离 ≤ 上帧框对角线 × 该系数</b> ⇒ <code>Ok</code>；<b>否则直接判 <code>Snap</code></b>
         （见 8.1，这是最容易踩的坑）。<br>
         调大 ⇒ 更容易认成同一个（目标跳一下也接着跟）；调小 ⇒ 更容易判成换目标（触发重置）。<br>
-        <b>★ 出现「跟枪一顿一顿」时优先调它，而不是调 PID。</b>
+        <b>★ 出现「跟枪一顿一顿」时优先调它，而不是调 PID。</b><br>
+        <b>★ 调它的时候开着画面预览：稳定后的框会画出来，判定是 Ok 还是 Snap 直接写在框上。</b>
       </td>
     </tr>
     <tr>
-      <td><code>ctl_area_ratio_tol</code><br><span class="src">稳定器·面积容差倍数</span></td>
+      <td><code>target_area_ratio_tol</code><br><span class="src">稳定器·面积容差倍数</span></td>
       <td class="num">2.0</td><td class="num">1.0 – 100.0</td>
       <td>面积比超出 <code>[1/该值, 该值]</code> 判为换目标。目标跑远/跑近时框面积本来就会变，这是留给它的容差。<b>不能小于 1。</b></td>
     </tr>
     <tr>
-      <td><code>ctl_k_snap_mult</code><br><span class="src">稳定器·突变系数</span></td>
+      <td><code>target_k_snap_mult</code><br><span class="src">稳定器·突变系数</span></td>
       <td class="num">1.15</td><td class="num">0.001 – 100.0</td>
       <td>
         本帧位移超过「上帧框对角线 × 该系数」判为瞬移（Snap）⇒ <b>触发滤波与 PID 硬重置</b>。<br>
@@ -1100,6 +1120,45 @@ velocity += residual × (β / dt)</code></pre>
 </p>
 
 <!-- ══════════════════════════════════════════════════════════ -->
+<h3>8.4 画面预览里直接看「稳定之后」的框</h3>
+<p>
+  预览窗（<b>设置里打开「显示画面预览」</b>）原来只画检测的原始框 —— 那是稳定【之前】的东西：
+  稳定器判定、锁的是哪个目标、滤波压掉了多少抖动，全都看不见，调参只能靠感觉。
+  现在预览会把稳定【之后】的结果一并画出来：
+</p>
+<div class="tw">
+<table>
+  <thead><tr><th>画面上的东西</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>细绿框 <code>#类别</code></td>
+        <td>检测的<b>原始</b>框（稳定之前，全部候选）。</td></tr>
+    <tr><td>粗框 + <code>LOCK #类 id=N &lt;判定&gt;</code></td>
+        <td>控制器本拍<b>锁定</b>的目标框 —— 稳定器放行的那一个。
+            颜色即判定：<b>绿 OK</b>（同一目标）/ <b>蓝 NEW</b>（新目标，无历史）/
+            <b>橙 SNAP</b>（判为瞬移，滤波与 PID 已被硬重置）/ <b>红 REJECTED</b>（宽高比离谱被丢掉）。</td></tr>
+    <tr><td>品红细框 + <code>STAB</code></td>
+        <td><b>稳定之后的框</b>：尺寸还是检测的尺寸，但中心换成 α-β 滤波后的中心。
+            目标抖的时候，它会明显比原始框稳 —— 这就是稳定器 + 滤波的净效果。</td></tr>
+    <tr><td>品红短连线</td>
+        <td>从原始框中心指向滤波中心。<b>线的长度 = 这一拍被压掉的抖动量</b>；
+            抖动被压住时线很短，滤波器被 Snap 复位后线会突然变长。</td></tr>
+    <tr><td>橙点</td><td>控制器最终瞄点（锚点，已含逐类 Y 偏移）。</td></tr>
+    <tr><td>底部 <code>Stab:</code> 一行</td>
+        <td>没锁上时会写清<b>为什么</b>：<code>no-candidate</code> / <code>stale-detection</code> /
+            <code>stale-crosshair</code> / <code>STAB-REJECTED</code> / <code>bad-dt</code>。
+            锁上时给出 <code>raw-&gt;filtered</code> 的偏差量，以及本拍是否在用开镜档
+            （<code>SCOPE-PARAMS</code>）。</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="src">
+  数据来源：<span class="src">control/aim_controller.h</span> 的
+  <code>ControlOutput::filteredCenter / stabVerdict / targetClassId</code> →
+  <span class="src">runtime/aim_loop.cpp</span> 每拍发布 →
+  <span class="src">overlay/preview_window.cpp</span> 绘制。
+  ★ 只在热键按住、控制器在跑的时候有数据；松手后 250ms 内自动消失。
+</p>
+
 <h2 id="s9">9. 场景配方</h2>
 
 <div class="grid">
@@ -1126,7 +1185,7 @@ ctl_kp_y = <span class="n">39</span>
 ctl_ki_x = <span class="n">0</span>
 ctl_kd_x = <span class="n">0</span>
 ctl_max_output_counts = <span class="n">200</span>
-ctl_hysteresis_ratio = <span class="n">1.3</span></code></pre>
+target_hysteresis_ratio = <span class="n">1.3</span></code></pre>
 <p style="font-size:12.5px;color:var(--dim);margin-bottom:0">
   就是默认 35 的小幅提升，ratio=0.74。
 </p>
@@ -1254,9 +1313,155 @@ ctl_kd_x = <span class="n">0.08</span>     <span class="c"># 再小量加 D</spa
 </div>
 
 <!-- ══════════════════════════════════════════════════════════ -->
-<h2 id="s11">11. 源码索引与存疑项</h2>
+<h2 id="s11">11. 开镜档（自动开镜期间的第二套瞄准参数）</h2>
 
-<h3>11.1 关键源码位置</h3>
+<p>
+  每个热键现在有<b>两份瞄准控制器参数</b>：<code>ctl_*</code>（<b>默认档</b>，平时生效）与
+  <code>ctl_scope_*</code>（<b>开镜档</b>，自动开镜生效期间<b>整组取代</b>默认档）。
+  它不是"又加了 18 个旋钮"，而是同一组 18 个旋钮的<b>第二份取值</b>。
+</p>
+
+<div class="callout bad">
+  <div class="t">为什么需要它：镜内灵敏度被倍率放大</div>
+  <p style="margin-bottom:0">
+    开镜后游戏对同样的鼠标计数给出更大的画面位移（倍率越高越明显）。
+    镜前标定好的 <code>ctl_kp_x</code> / <code>ctl_k_px_per_count</code> 直接用在镜内，
+    等效回路增益等于乘上倍率 —— 表现就是「镜前一甩、进镜就飞」（瞬狙最典型）。
+    开镜档让镜内用一套独立的（通常更小的）增益与灵敏度折算。
+  </p>
+</div>
+
+<h3>11.1 什么时候切档（判定在 <span class="src">runtime/aim_loop.cpp</span>）</h3>
+<p>两条同时成立才切：</p>
+<ol>
+  <li>该热键开了开镜档：<code>ctl_scope_enabled = 1</code>
+      （UI：自动扳机 → 自动开镜 → <b>开镜期间</b>）；</li>
+  <li><b>自动开镜已经按下了右键</b>，且热键仍被按住。
+      <b>「算不算在镜内」按开镜方式分两种：</b>
+    <ul>
+      <li><b>长按（mode 2）</b>：右键真的按着才算 —— 用开镜控制器自己的
+          <code>engaged()</code>。离开命中区会自动收镜，那一刻就切回默认档。</li>
+      <li><b>点按（mode 1，不收镜）</b>：那一次点按之后镜头在游戏里<b>一直开着</b>，
+          所以「在镜内」<b>粘到松开热键为止</b> —— 不能跟着命中区来回翻，
+          否则「命中了」和「没命中」会用两套参数，与实机镜头状态对不上。</li>
+    </ul>
+  </li>
+</ol>
+<p>
+  <b>★ 它跟着「自动开镜」走，不跟着「游戏内开镜」走。</b>
+  热键本身绑右键时，自动开镜整项不生效（否则会把镜切回去），所以那种情况下开镜档也不会切入 ——
+  镜头是你自己按的，程序无从判定"现在在镜内"。
+</p>
+<p>
+  <b>★ 相位：读的是上一拍的状态。</b>
+  开镜判定要用本拍的目标框（命中区），而目标框是控制器算完才有的，所以本拍读不到本拍的判定。
+  差一拍 ≈ 几毫秒；这样也刻意不去改动扳机 / 开镜的既有相位。
+</p>
+
+<h3>11.2 18 个键</h3>
+<p>
+  键名 = <code>ctl_scope_</code> + 默认档的同名后缀，一一对应。
+  <b>量程、步长、默认值与第 4 节逐条一致</b>，而且两档共用同一份夹取实现
+  （<code>AimCtlParams::clamp()</code>，默认档也走它），不会出现「同一参数两套夹取规则」。
+</p>
+<div class="tw">
+<table>
+  <thead><tr><th>组</th><th>默认档键</th><th>开镜档键</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="10">增益与滤波</td>
+        <td><code>ctl_kp_x</code> / <code>ctl_kp_y</code></td>
+        <td><code>ctl_scope_kp_x</code> / <code>ctl_scope_kp_y</code></td></tr>
+    <tr><td><code>ctl_ki_x</code> / <code>ctl_ki_y</code></td>
+        <td><code>ctl_scope_ki_x</code> / <code>ctl_scope_ki_y</code></td></tr>
+    <tr><td><code>ctl_kd_x</code> / <code>ctl_kd_y</code></td>
+        <td><code>ctl_scope_kd_x</code> / <code>ctl_scope_kd_y</code></td></tr>
+    <tr><td><code>ctl_p_full_scale_px</code></td><td><code>ctl_scope_p_full_scale_px</code></td></tr>
+    <tr><td><code>ctl_tau_unwind_sec</code></td><td><code>ctl_scope_tau_unwind_sec</code></td></tr>
+    <tr><td><code>ctl_tau_deriv_sec</code></td><td><code>ctl_scope_tau_deriv_sec</code></td></tr>
+    <tr><td><code>ctl_i_max</code></td><td><code>ctl_scope_i_max</code></td></tr>
+    <tr><td><code>ctl_max_output_counts</code></td><td><code>ctl_scope_max_output_counts</code></td></tr>
+    <tr><td><code>ctl_random_seed</code></td><td><code>ctl_scope_random_seed</code></td></tr>
+    <tr><td><code>ctl_enabled</code><span class="pill p-off">不在档内</span></td>
+        <td class="src">控制器总开关只有一份（关掉就整条链不走）</td></tr>
+    <tr><td rowspan="3">在途补偿<br>（预测提前量）</td>
+        <td><code>ctl_predict_lead_ms</code></td><td><code>ctl_scope_predict_lead_ms</code></td></tr>
+    <tr><td><code>ctl_predict_max_velocity_px_s</code></td>
+        <td><code>ctl_scope_predict_max_velocity_px_s</code></td></tr>
+    <tr><td><code>ctl_predict_max_lead_ratio</code></td>
+        <td><code>ctl_scope_predict_max_lead_ratio</code></td></tr>
+    <tr><td rowspan="3">Smith 在途<br>自身位移补偿</td>
+        <td><code>ctl_k_px_per_count</code></td><td><code>ctl_scope_k_px_per_count</code></td></tr>
+    <tr><td><code>ctl_inflight_beta</code></td><td><code>ctl_scope_inflight_beta</code></td></tr>
+    <tr><td><code>ctl_inflight_dead_time_ms</code></td>
+        <td><code>ctl_scope_inflight_dead_time_ms</code></td></tr>
+  </tbody>
+</table>
+</div>
+<p class="src">
+  开关本身是 <code>ctl_scope_enabled</code>（0 = 跟随热键默认档，1 = 用上面这套）。
+  ★ 灵敏度折算 <code>ctl_scope_k_px_per_count</code> 也在档内 —— 它本身就是"像素/计数"，
+  镜内倍率直接改变它，属于最该跟着切的一个。
+</p>
+
+<h3>11.3 不随之切档的参数</h3>
+<p>
+  下列参数<b>仍然只有一份</b>，不随开镜切档 —— 它们管的是「瞄谁 / 怎么走」，不是「用多大力」：
+</p>
+<ul>
+  <li>瞄点 Y：<code>ctl_y_offset</code> / <code>ctl_y_offset_max</code>（以及瞄准类别里的逐类 Y）；</li>
+  <li>选靶与稳定器（<b>全局</b>，见第 8.2 节，界面在 控制 → 稳定器）：
+      <code>target_hysteresis_ratio</code> / <code>target_max_distance_px</code> /
+      <code>target_match_center_ratio</code> / <code>target_area_ratio_tol</code> /
+      <code>target_k_snap_mult</code> / <code>target_min_aspect</code> / <code>target_max_aspect</code>；</li>
+  <li>FOV / 动态 FOV / 瞄准类别 / 轨迹曲线 / 自动扳机（含开镜方式与延时）/ 自动急停。</li>
+</ul>
+
+<h3>11.4 一键复制</h3>
+<p>
+  在「自动扳机 → 自动开镜 → 开镜期间」选<b>「用「开镜独立瞄准参数」那一套」</b>后，
+  下面那张「开镜独立瞄准参数」卡里可以选一个源热键并点「复制它的默认参数」。
+</p>
+<ul>
+  <li>复制方向：<b>源热键的【默认档】 → 本热键的【开镜档】</b>（整套 18 项）。</li>
+  <li><b>★ 复制的永远是对方的默认档，不是对方的开镜档。</b>
+      所以可以先把某个热键在镜内调好当模板，再从别的热键一键搬过来。</li>
+  <li>源热键选自己 = 把本热键的开镜档<b>重置回自己的默认参数</b>。</li>
+</ul>
+
+<h3>11.5 怎么确认它真的切了</h3>
+<p>
+  切档那一刻会在日志里打一行（只在切换时打，不刷屏）：
+</p>
+<pre><code>[scope] 自动开镜生效 -&gt; 切到【开镜档】瞄准参数
+[scope] 自动开镜结束 -&gt; 切回热键【默认档】瞄准参数</code></pre>
+<p>看不到这行，说明没切档：要么开关是「跟随热键」，要么自动开镜根本没按下右键（见 11.1）。</p>
+
+<h3>11.6 兼容性与存疑</h3>
+<ul>
+  <li>
+    <b>老配置（没有这些键）⇒ 开关默认 0（跟随热键）</b>，而且开镜档那 18 个值就等于默认档的
+    出厂默认值 —— 所以「打开开关但什么都不改」也不会突然变成另一套参数。
+    <b>默认状态逐拍与没有这个功能时完全一致。</b>
+  </li>
+  <li>
+    <span class="pill p-adv">存疑</span>
+    <b>镜内最优值没有任何实测依据</b>，本文档给不出建议起点。经验方向是"整体比镜前更保守"，
+    但具体降多少必须实机试（可先按 11.4 复制一套，再把 <code>ctl_scope_kp_x</code> 整体下调 30~50% 起试）。
+  </li>
+</ul>
+<p class="src">
+  主要依据：<span class="src">Apotheosis/config/config.h</span>（<code>AimCtlParams</code> /
+  <code>HotkeyProfile::ctl_scope</code>）·
+  <span class="src">Apotheosis/config/config.cpp</span>（读写与夹取）·
+  <span class="src">Apotheosis/runtime/aim_loop_config.cpp</span>（<code>flattenProfile</code> 选档）·
+  <span class="src">Apotheosis/runtime/aim_loop.cpp</span>（切档判定与日志）·
+  <span class="src">qt_ui/pages/AimSettingsPage.cpp</span>（开镜独立瞄准参数卡 + 一键复制）·
+  <span class="src">tests/control_wiring_test.cpp</span> · <span class="src">tests/config_migration_test.cpp</span>
+</p>
+
+<h2 id="s12">12. 源码索引与存疑项</h2>
+
+<h3>12.1 关键源码位置</h3>
 <div class="tw">
 <table>
   <thead><tr><th>内容</th><th>位置</th></tr></thead>
@@ -1280,7 +1485,7 @@ ctl_kd_x = <span class="n">0.08</span>     <span class="c"># 再小量加 D</spa
 </table>
 </div>
 
-<h3>11.2 已核实的事实（不是推测）</h3>
+<h3>12.2 已核实的事实（不是推测）</h3>
 <div class="callout bad">
   <div class="t">以下三条已用全仓库 grep + 逐行读码核实</div>
   <ol>
@@ -1316,7 +1521,7 @@ ctl_kd_x = <span class="n">0.08</span>     <span class="c"># 再小量加 D</spa
   </ol>
 </div>
 
-<h3>11.3 存疑项（源码无依据，请以实机为准）</h3>
+<h3>12.3 存疑项（源码无依据，请以实机为准）</h3>
 <div class="callout warn">
   <div class="t">以下几条源码里没有明确依据，调参时请自行验证</div>
   <ol style="margin-bottom:0">
@@ -1354,7 +1559,7 @@ ctl_kd_x = <span class="n">0.08</span>     <span class="c"># 再小量加 D</spa
   </ol>
 </div>
 
-<h3>11.4 历史文档（已从当前分支删除，可从 git 恢复）</h3>
+<h3>12.4 历史文档（已从当前分支删除，可从 git 恢复）</h3>
 <p>仓库在 <code>41cbd80</code> 删除了全部项目文档（27 个，约 950KB）。与 PID 相关的有：</p>
 <pre><code>git show 41cbd80^:docs/tuning.md                  <span class="c"># 旧版全量调参文档</span>
 git show 41cbd80^:docs/aimmagic-ground-truth.md   <span class="c"># 逆向真值表（46ms / 临界增益来源）</span>

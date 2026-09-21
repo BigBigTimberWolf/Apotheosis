@@ -210,8 +210,21 @@ void MakcuNewConnection::supervisorLoop()
         for (int i = 0; i < 40 && wantOpen_.load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         if (!wantOpen_.load()) break;
-        if (open_.load()) continue;
-        tryReconnect();
+        if (!open_.load())
+        {
+            tryReconnect();
+            continue;
+        }
+
+        // 按键回读保活(每轮 1s 检查一次)。
+        //
+        // 为什么必须保活: 固件的 0x84 只在按键【变化】时推一帧
+        // (fw_device/src/handleCommands.cpp:283, 调用点全是事件驱动)。
+        // 一旦那一帧在链路上丢了(CDC 抖动/CRC 错/分片错位), 固件不会补发,
+        // 上位机的 realButtons_ 就永久停在上一个值 —— 现象正是
+        // "硬件能连、鼠标能动, 但热键一律没反应"。周期性重订阅会触发固件
+        // onSubAsync 里的 updateButtonState(), 强制补发当前真实按键态。
+        keepButtonStreamAlive(3000);
     }
 }
 
@@ -357,11 +370,99 @@ void MakcuNewConnection::sendDeadBaud(unsigned int baud)
 void MakcuNewConnection::subscribeAsync(bool on)
 {
     const uint8_t enable = on ? 1 : 0;
-    sendFrame(makcu::CMD_SUB_ASYNC, &enable, 1);
+    const bool ok = sendFrame(makcu::CMD_SUB_ASYNC, &enable, 1);
+    if (!ok)
+    {
+        std::cerr << "[MakcuNew] 0x48 SUB_ASYNC write failed on " << port_
+                  << " (physical button readback will not work)" << std::endl;
+        buttonStreamReady_.store(false, std::memory_order_release);
+        return;
+    }
+    if (on)
+    {
+        // 第二条冗余通道: 固件的单字节裸掩码流(km.buttons(1))。
+        //
+        // 这条路径与 0x84 帧【互为冗余】, 且更健壮:
+        //   · 0x84 帧是 0xA5 0x5C 开头的 9 字节帧, 需要接收侧帧同步正确、CRC 通过;
+        //     任何一次分片/错位都会让该帧被丢弃, 而固件只在按键【变化】时才推,
+        //     丢了就不会重发 —— 表现就是"能移动但热键读不到按下"。
+        //   · 裸掩码是 1 个 <32 的字节, 上位机 feedAsciiByte() 的 b<0x20 分支直接
+        //     捕获, 不依赖帧同步, 抗错位能力强得多。
+        //
+        // 固件侧两条流由不同开关控制(g_async_sub / g_makcu_buttons_enabled),
+        // 开这条不影响那条, 属于纯增量。
+        writeAsciiLine("km.buttons(1)");
+        makcuButtonsModeOn_.store(true, std::memory_order_release);
+    }
+    else
+    {
+        if (makcuButtonsModeOn_.exchange(false, std::memory_order_acq_rel))
+            writeAsciiLine("km.buttons(0)");
+        buttonStreamReady_.store(false, std::memory_order_release);
+    }
+}
+
+// 发送一行 ASCII 命令(带 CRLF), 不等待任何应答。
+// 与 km.version 探活走同一条文本通道, 固件侧由 asciiLineCb 分发。
+bool MakcuNewConnection::writeAsciiLine(const char* command)
+{
+    std::string wire = command;
+    wire += "\r\n";
+
+    std::lock_guard<std::mutex> lock(writeMutex_);
+    if (!portOpen_.load(std::memory_order_acquire)) return false;
+    try
+    {
+        return serial_.write(reinterpret_cast<const uint8_t*>(wire.data()),
+                             wire.size()) == wire.size();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool MakcuNewConnection::keepButtonStreamAlive(int intervalMs)
+{
+    if (!open_.load(std::memory_order_acquire) || !wantOpen_.load()) return false;
+
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    // 最近收到过按键帧(0x84 或裸掩码) => 链路是活的, 不需要重发。
+    // 固件只在按键变化时推帧, 所以长时间不按键时 lastButtonFrameMs_ 会变旧 ——
+    // 这正是需要保活的原因: 不能把"没按键"误判成"链路死了"而频繁重订阅。
+    // 因此以 lastButtonSubscribeMs_(上次订阅时刻)为准做节流。
+    const int64_t lastSub = lastButtonSubscribeMs_.load(std::memory_order_acquire);
+    if (lastSub != 0 && (nowMs - lastSub) < static_cast<int64_t>(intervalMs))
+        return false;
+
+    lastButtonSubscribeMs_.store(nowMs, std::memory_order_release);
+    subscribeAsync(true);
+    return true;
 }
 
 void MakcuNewConnection::feedAsciiByte(uint8_t b)
 {
+    // ---- 裸掩码流优先于文本判定 ----
+    //
+    // 固件的单字节掩码流(km.buttons(1))发的是 merged & 0x1F, 取值 0..31。
+    // 这里必须先处理它, 否则会被下面的 '\n'/'\r' 判定吃掉:
+    //   · mask 值 0x0A(第 2、4 位=右键+侧键1) 会被当成换行;
+    //   · mask 值 0x0D 会被当成回车;
+    //   · 其余 <0x20 的值虽能落到最后那个分支, 但语义是"控制字节"而非掩码。
+    //
+    // 判定依据: 只有在【我们自己开启了】km.buttons 模式时才把 <0x20 当掩码,
+    // 否则退回原有的文本语义 —— 与未开该模式时的行为逐字节一致, 不影响
+    // km.version 探活(应答是 ASCII 文本, 不含 <0x20 字节)。
+    if (makcuButtonsModeOn_.load(std::memory_order_acquire) && b < 0x20)
+    {
+        // 0x0A/0x0D 是文本行结束符, 固件的 ASCII 应答不会与掩码流同时出现
+        // (固件在 s_tx0_mtx 内二选一发送), 因此这里直接按掩码处理。
+        applyPhysicalButtons(b);
+        return;
+    }
+
     if (b == '\n')
     {
         std::lock_guard<std::mutex> lk(asciiMutex_);
@@ -442,9 +543,35 @@ bool MakcuNewConnection::initializeProtocolSession()
 {
     realButtons_.store(0, std::memory_order_release);
     injectedButtons_.store(0, std::memory_order_release);
+    buttonStreamReady_.store(false, std::memory_order_release);
+    lastButtonFrameMs_.store(0, std::memory_order_release);
 
+    // 订阅按键上报。固件在 onSubAsync 里会立刻补发一帧当前按键态
+    // (见 fw_device/src/handleCommands.cpp:443), 所以这里发完就等一下收帧。
+    lastButtonSubscribeMs_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_release);
     subscribeAsync(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // 等第一帧按键上报落地。等到就说明回读链路是通的; 等不到不阻断启动
+    // (鼠标位移不受影响), 但必须【明确告知】—— 否则用户只会看到"热键没反应"。
+    for (int i = 0; i < 20; ++i)
+    {
+        if (lastButtonFrameMs_.load(std::memory_order_acquire) != 0)
+        {
+            buttonStreamReady_.store(true, std::memory_order_release);
+            std::cout << "[MakcuNew] Physical button stream active on " << port_
+                      << " (hotkeys reading hardware buttons)." << std::endl;
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    std::cerr << "[MakcuNew] WARNING: no physical button report received on "
+              << port_ << " within 100ms. Hotkeys bound to mouse buttons "
+              << "(LeftMouseButton/RightMouseButton/...) will NOT trigger. "
+              << "Mouse movement is unaffected." << std::endl;
     return true;
 }
 
@@ -718,4 +845,9 @@ void MakcuNewConnection::applyPhysicalButtons(uint8_t mask)
 {
     realButtons_.store(static_cast<uint8_t>(mask & 0x1F),
                        std::memory_order_release);
+    lastButtonFrameMs_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_release);
+    buttonStreamReady_.store(true, std::memory_order_release);
 }

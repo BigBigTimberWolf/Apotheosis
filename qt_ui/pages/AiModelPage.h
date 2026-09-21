@@ -26,6 +26,8 @@ private:
     void updateBackendStatus();
 
     QComboBox* m_modelCombo{};
+    QComboBox* m_precisionCombo{};
+    QLabel* m_calibHintLabel{};
     QLineEdit* m_modelPath{};
     QLabel* m_fixedInputLabel{};
     QLabel* m_backendStatusLabel{};

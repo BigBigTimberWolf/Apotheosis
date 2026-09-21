@@ -1,0 +1,45 @@
+# -*- coding: utf-8 -*-
+import io, sys
+sys.stdout.reconfigure(encoding='utf-8')
+
+def rd(p):
+    return open(p, encoding='utf-8', errors='replace').read()
+
+r  = rd(r'_fix1_build\src\serialization.cpp')
+rh = rd(r'_fix1_build\src\esp_usb_host.cpp')
+li = rd(r'fw_device\src\InitSettings.cpp')
+lh = rd(r'fw_device\include\InitSettings.h')
+lu = rd(r'fw_device\src\USBSetup.cpp')
+
+print("=== 数据流验证 ===")
+print()
+print("1) 右板发送 isKbd/isMouse 字段")
+print("   desc[isKbd]   :", 'desc["isKbd"]' in r)
+print("   desc[isMouse] :", 'desc["isMouse"]' in r)
+print("   取值来源      :", 'iface_isKbd[i]' in r and 'iface_isMouse[i]' in r)
+print()
+print("2) 右板解析报告描述符并填充标记")
+print("   iface_isKbd[slot]   :", 'iface_isKbd[slot]' in rh)
+print("   iface_isMouse[slot] :", 'iface_isMouse[slot]' in rh)
+print("   Keyboard usage 判定 :", '0x09 && desc[i + 3] == 0x06' in rh or 'desc[i + 3] == 0x06' in rh)
+print("   Mouse usage 判定    :", 'desc[i + 3] == 0x02' in rh)
+print()
+print("3) 左板接收")
+print("   iface_isKbd[interfaceCounter]   :", 'iface_isKbd[interfaceCounter]' in li)
+print("   iface_isMouse[interfaceCounter] :", 'iface_isMouse[interfaceCounter]' in li)
+print()
+print("4) 左板声明")
+print("   extern bool iface_isKbd   :", 'extern bool iface_isKbd' in lh)
+print("   extern bool iface_isMouse :", 'extern bool iface_isMouse' in lh)
+print()
+print("5) 左板决策")
+print("   读取标记          :", 'if (iface_isKbd[i])   realKbd' in lu)
+print("   键盘优先          :", 'if (realKbd) {' in lu)
+print("   鼠标分支          :", 'else if (realMouse) {' in lu)
+print("   protocol 兜底     :", 'else if (primaryProto == 0x01)' in lu)
+print("   全都不识别->老行为:", 'wantMouse = true;' in lu and 'wantKbd   = true;' in lu)
+print()
+print("6) 最终 begin 调用")
+import re
+for m in re.finditer(r'if \(want(Mouse|Kbd)\) \{\s*\n\s*(Mouse|Kbd)\.begin\(\);', lu):
+    print("   ", m.group(0).replace('\n', ' ').replace('  ', ' '))

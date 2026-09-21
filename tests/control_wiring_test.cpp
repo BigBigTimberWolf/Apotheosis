@@ -661,6 +661,210 @@ static void testFlattenProfile()
     }
 }
 
+// ── ★★ 开镜档: 自动开镜生效期间整组取代默认档 ──────────────────────────────
+//
+// 钉住三件事:
+//   1) 开关没开(默认) ⇒ 与从前逐位一致（这是"能一键退回"的保证）;
+//   2) 开了但【开镜没生效】⇒ 仍然走默认档（切档只在镜内发生）;
+//   3) 开了且开镜生效 ⇒ 18 个参数【整组】换成开镜档, 且选靶/稳定器/瞄点 Y
+//      这些不在组里的参数【不跟着变】。
+static void testScopeCtlSwitch()
+{
+    section("★★ 开镜档: 自动开镜期间整组取代「瞄准控制器」参数");
+
+    Config gcfg;
+    gcfg.target_hysteresis_ratio = 2.4;      // 选靶滞回: 全局, 不随开镜切档
+    gcfg.target_max_distance_px  = 155.0;    // 选靶距离上限: 同上
+    std::vector<ClassFilterState> cfilters;
+
+    HotkeyProfile hk;
+    hk.aim_classes.clear();
+    // 默认档: 一组能与其他取值区分的数
+    hk.ctl_kp_x = 11.0; hk.ctl_kp_y = 12.0;
+    hk.ctl_ki_x = 21.0; hk.ctl_ki_y = 22.0;
+    hk.ctl_kd_x = 31.0; hk.ctl_kd_y = 32.0;
+    hk.ctl_tau_unwind_sec = 0.041;
+    hk.ctl_tau_deriv_sec = 0.052;
+    hk.ctl_i_max = 63.0;
+    hk.ctl_max_output_counts = 77;
+    hk.ctl_p_full_scale_px = 88.0;
+    hk.ctl_k_px_per_count = 0.593;
+    hk.ctl_inflight_beta = 0.7;
+    hk.ctl_inflight_dead_time_ms = 41.0;
+    hk.ctl_predict_lead_ms = 0.065;
+    hk.ctl_predict_max_velocity_px_s = 1700.0;
+    hk.ctl_predict_max_lead_ratio = 0.85;
+    hk.ctl_random_seed = 4242;
+    // 不在组里、绝对不能被切档带走的参数
+    hk.ctl_y_offset = 0.31;
+    hk.ctl_y_offset_max = 0.91;
+    hk.ctl_hysteresis_ratio = 2.4;
+    hk.ctl_max_distance_px = 155.0;
+
+    // 开镜档: 另一组数(镜内通常更保守)
+    hk.ctl_scope.kp_x = 5.0;  hk.ctl_scope.kp_y = 6.0;
+    hk.ctl_scope.ki_x = 0.0;  hk.ctl_scope.ki_y = 0.0;
+    hk.ctl_scope.kd_x = 0.0;  hk.ctl_scope.kd_y = 0.0;
+    hk.ctl_scope.tau_unwind_sec = 0.021;
+    hk.ctl_scope.tau_deriv_sec = 0.011;
+    hk.ctl_scope.i_max = 9.0;
+    hk.ctl_scope.max_output_counts = 40;
+    hk.ctl_scope.p_full_scale_px = 12.0;
+    hk.ctl_scope.k_px_per_count = 0.211;
+    hk.ctl_scope.inflight_beta = 0.9;
+    hk.ctl_scope.inflight_dead_time_ms = 33.0;
+    hk.ctl_scope.predict_lead_ms = 0.015;
+    hk.ctl_scope.predict_max_velocity_px_s = 300.0;
+    hk.ctl_scope.predict_max_lead_ratio = 0.25;
+    hk.ctl_scope.random_seed = 99;
+
+    // ① 默认开关(0) + 开镜生效 ⇒ 必须还是默认档
+    {
+        const FlatConfig f = flattenProfile(hk, 640, cfilters, gcfg, /*scopeEngaged=*/true);
+        check(!f.scopeCtlActive, "① 没开开关 ⇒ scopeCtlActive 为假");
+        checkNear(f.kpX, 11.0, 0.0, "① 没开开关 ⇒ kpX 仍是默认档 11");
+        check(f.maxOutputCounts == 77, "① 没开开关 ⇒ 单拍限幅仍是默认档 77");
+        check(f.randomSeed == 4242, "① 没开开关 ⇒ 随机种子仍是默认档 4242");
+    }
+
+    hk.scope_ctl_enabled = 1;
+
+    // ② 开了, 但开镜还没生效 ⇒ 还是默认档
+    {
+        const FlatConfig f = flattenProfile(hk, 640, cfilters, gcfg, /*scopeEngaged=*/false);
+        check(!f.scopeCtlActive, "② 未开镜 ⇒ scopeCtlActive 为假");
+        checkNear(f.kpX, 11.0, 0.0, "★★ 开了开关但【没开镜】⇒ 仍用默认档 kpX=11");
+        check(f.maxOutputCounts == 77, "★★ 未开镜 ⇒ 仍是默认档限幅");
+        // 不传 scopeEngaged 的老调用点等价于 false
+        const FlatConfig f2 = flattenProfile(hk, 640, cfilters, gcfg);
+        checkNear(f2.kpX, 11.0, 0.0, "★★ 省略 scopeEngaged ⇒ 等同未开镜(默认档)");
+    }
+
+    // ③ 开了 + 开镜生效 ⇒ 18 项整组换成开镜档
+    {
+        const FlatConfig f = flattenProfile(hk, 640, cfilters, gcfg, /*scopeEngaged=*/true);
+        check(f.scopeCtlActive, "③ 开镜生效 ⇒ scopeCtlActive 为真");
+        checkNear(f.kpX, 5.0, 0.0, "★★ 开镜档 kpX 生效");
+        checkNear(f.kpY, 6.0, 0.0, "★★ 开镜档 kpY 生效");
+        checkNear(f.kiX, 0.0, 0.0, "★★ 开镜档 kiX 生效");
+        checkNear(f.kiY, 0.0, 0.0, "★★ 开镜档 kiY 生效");
+        checkNear(f.kdX, 0.0, 0.0, "★★ 开镜档 kdX 生效");
+        checkNear(f.kdY, 0.0, 0.0, "★★ 开镜档 kdY 生效");
+        checkNear(f.tauUnwindSec, 0.021, 0.0, "★★ 开镜档 tauUnwindSec 生效");
+        checkNear(f.tauDerivSec, 0.011, 0.0, "★★ 开镜档 tauDerivSec 生效");
+        checkNear(f.iMax, 9.0, 0.0, "★★ 开镜档 iMax 生效");
+        check(f.maxOutputCounts == 40, "★★ 开镜档 单拍限幅 生效");
+        checkNear(f.pFullScalePx, 12.0, 0.0, "★★ 开镜档 P 项饱和 生效");
+        checkNear(f.kPxPerCount, 0.211, 0.0, "★★ 开镜档 灵敏度折算 k 生效");
+        checkNear(f.inflightBeta, 0.9, 0.0, "★★ 开镜档 在途补偿阻尼 β 生效");
+        checkNear(f.inflightDeadTimeMs, 33.0, 0.0, "★★ 开镜档 死区时间 生效");
+        checkNear(f.predictLeadMs, 0.015, 0.0, "★★ 开镜档 预测提前时间 生效");
+        checkNear(f.predictMaxVelocityPxPerSec, 300.0, 0.0, "★★ 开镜档 速度上限 生效");
+        checkNear(f.predictMaxLeadRatio, 0.25, 0.0, "★★ 开镜档 预测距离上限 生效");
+        check(f.randomSeed == 99, "★★ 开镜档 随机种子 生效");
+
+        // ★ 不在组里的参数必须【不】跟着变 —— 它们管"瞄谁", 不是"用多大力"。
+        checkNear(f.yOffset, 0.31, 0.0, "★★ 瞄点 Y 不随开镜切档");
+        checkNear(f.yOffsetMax, 0.91, 0.0, "★★ 瞄点 Y 上限不随开镜切档");
+        checkNear(f.hysteresisRatio, 2.4, 0.0, "★★ 选靶滞回不随开镜切档 (全局值原样)");
+        checkNear(f.maxDistancePx, 155.0, 0.0, "★★ 选靶距离上限不随开镜切档 (全局值原样)");
+
+        // 真的进了控制器配置 (不是只停在 FlatConfig 里)
+        const control::ControllerConfig cc = toControllerConfig(f);
+        checkNear(cc.pid.kpX, 5.0, 0.0, "★★ 开镜档 kpX 真的进了 ControllerConfig.pid");
+        check(cc.pid.maxOutputCounts == 40, "★★ 开镜档限幅真的进了 ControllerConfig.pid");
+    }
+
+    // ④ 一键复制的搬运: 默认档 → 结构 → 开镜档, 一个字段都不能漏
+    section("★★ 一键复制: ctlParamsOf / applyCtlParams 逐字段搬运");
+    {
+        const AimCtlParams p = ctlParamsOf(hk);
+        checkNear(p.kp_x, 11.0, 0.0, "复制: kp_x");
+        checkNear(p.kp_y, 12.0, 0.0, "复制: kp_y");
+        checkNear(p.ki_x, 21.0, 0.0, "复制: ki_x");
+        checkNear(p.ki_y, 22.0, 0.0, "复制: ki_y");
+        checkNear(p.kd_x, 31.0, 0.0, "复制: kd_x");
+        checkNear(p.kd_y, 32.0, 0.0, "复制: kd_y");
+        checkNear(p.tau_unwind_sec, 0.041, 0.0, "复制: tau_unwind_sec");
+        checkNear(p.tau_deriv_sec, 0.052, 0.0, "复制: tau_deriv_sec");
+        checkNear(p.i_max, 63.0, 0.0, "复制: i_max");
+        check(p.max_output_counts == 77, "复制: max_output_counts");
+        checkNear(p.p_full_scale_px, 88.0, 0.0, "复制: p_full_scale_px");
+        checkNear(p.k_px_per_count, 0.593, 0.0, "复制: k_px_per_count");
+        checkNear(p.inflight_beta, 0.7, 0.0, "复制: inflight_beta");
+        checkNear(p.inflight_dead_time_ms, 41.0, 0.0, "复制: inflight_dead_time_ms");
+        checkNear(p.predict_lead_ms, 0.065, 0.0, "复制: predict_lead_ms");
+        checkNear(p.predict_max_velocity_px_s, 1700.0, 0.0, "复制: predict_max_velocity");
+        checkNear(p.predict_max_lead_ratio, 0.85, 0.0, "复制: predict_max_lead_ratio");
+        check(p.random_seed == 4242, "复制: random_seed");
+
+        // 落地到另一个热键的开镜档, 再验一遍(这是界面按钮真正做的事)
+        HotkeyProfile dst;
+        dst.ctl_scope = ctlParamsOf(hk);
+        const FlatConfig f = flattenProfile(
+            [&] { HotkeyProfile t = dst; t.scope_ctl_enabled = 1; return t; }(),
+            640, cfilters, gcfg, true);
+        checkNear(f.kpX, 11.0, 0.0, "★★ 复制后开镜档 kpX == 源热键默认档 11");
+        check(f.maxOutputCounts == 77, "★★ 复制后开镜档限幅 == 源热键默认档 77");
+        check(f.randomSeed == 4242, "★★ 复制后开镜档随机种子 == 源热键默认档 4242");
+    }
+
+    // ⑤ 夹取: 两档共用【同一份】规则 (默认档的夹取现在借道 AimCtlParams::clamp)
+    section("★★ 开镜档与默认档共用同一份夹取规则");
+    {
+        AimCtlParams bad;
+        bad.kp_x = -5.0;
+        bad.kp_y = -1.0;
+        bad.ki_x = -0.5;
+        bad.tau_unwind_sec = 0.0;
+        bad.tau_deriv_sec = -3.0;
+        bad.i_max = -1.0;
+        bad.p_full_scale_px = -7.0;
+        bad.k_px_per_count = 99.0;
+        bad.inflight_beta = 9.0;
+        bad.inflight_dead_time_ms = 5000.0;
+        bad.predict_lead_ms = 99999.0;
+        bad.predict_max_velocity_px_s = 1e9;
+        bad.predict_max_lead_ratio = 1e6;
+        bad.max_output_counts = 0;
+        bad.random_seed = -3;
+        bad.clamp();
+
+        checkNear(bad.kp_x, 0.0, 0.0, "夹取: 负 kp → 0");
+        checkNear(bad.kp_y, 0.0, 0.0, "夹取: 负 kp(垂直) → 0");
+        checkNear(bad.ki_x, 0.0, 0.0, "夹取: 负 ki → 0");
+        checkNear(bad.tau_unwind_sec, 1e-4, 1e-12, "夹取: tau_unwind 0 → 1e-4 (不能为 0)");
+        checkNear(bad.tau_deriv_sec, 0.0, 0.0, "夹取: 负 tau_deriv → 0");
+        checkNear(bad.i_max, 0.0, 0.0, "夹取: 负 i_max → 0");
+        checkNear(bad.p_full_scale_px, 0.0, 0.0, "夹取: 负 P 项饱和 → 0");
+        checkNear(bad.k_px_per_count, 10.0, 0.0, "夹取: 灵敏度折算上限 10");
+        checkNear(bad.inflight_beta, 2.0, 0.0, "夹取: β 上限 2.0");
+        checkNear(bad.inflight_dead_time_ms, 1000.0, 0.0, "夹取: 死区时间上限 1000");
+        checkNear(bad.predict_lead_ms, 1000.0, 0.0, "夹取: 提前时间上限 1000");
+        checkNear(bad.predict_max_velocity_px_s, 100000.0, 0.0, "夹取: 速度上限上限 100000");
+        checkNear(bad.predict_max_lead_ratio, 100.0, 0.0, "夹取: 距离上限上限 100");
+        check(bad.max_output_counts == 1, "夹取: 单拍限幅 0 → 1 (不能为 0)");
+        check(bad.random_seed == 0, "夹取: 负随机种子 → 0");
+
+        // 默认档走同一份规则: 把越界值写进 ctl_*, 经 ctlParamsOf→clamp→applyCtlParams
+        HotkeyProfile rt;
+        rt.ctl_kp_x = -5.0;
+        rt.ctl_max_output_counts = 0;
+        rt.ctl_tau_unwind_sec = 0.0;
+        rt.ctl_random_seed = -3;
+        AimCtlParams p = ctlParamsOf(rt);
+        p.clamp();
+        applyCtlParams(rt, p);
+        checkNear(rt.ctl_kp_x, 0.0, 0.0, "★★ 默认档同样被夹: 负 kp → 0");
+        check(rt.ctl_max_output_counts == 1, "★★ 默认档同样被夹: 限幅 0 → 1");
+        checkNear(rt.ctl_tau_unwind_sec, 1e-4, 1e-12, "★★ 默认档同样被夹: tau_unwind → 1e-4");
+        check(rt.ctl_random_seed == 0, "★★ 默认档同样被夹: 负种子 → 0");
+        // 搬运不碰组外的字段
+        checkNear(rt.ctl_y_offset, 0.5, 0.0, "★ 搬运不动组外字段 (瞄点 Y)");
+        checkNear(rt.ctl_hysteresis_ratio, 1.3, 0.0, "★ 搬运不动组外字段 (滞回)");
+    }
+}
+
 int main()
 {
     std::printf("=== 控制器接线回归 ===\n");
@@ -671,6 +875,7 @@ int main()
     testBucketMerge();
     testNewlyExposedKnobs();
     testDtGate();
+    testScopeCtlSwitch();
 
     std::printf("\n%d 项断言, 失败 %d\n", g_checks, g_failures);
     if (g_failures == 0)

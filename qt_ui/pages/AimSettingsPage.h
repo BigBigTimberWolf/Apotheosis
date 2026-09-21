@@ -59,6 +59,9 @@ private:
     void showSensitivityCalibrateDialog(QDoubleSpinBox* spinK);
     void buildDynamicFovCard();
     void buildTriggerCard();
+    void buildScopeCtlCard();
+    void applyScopeCtlVisibility();
+    void rebuildScopeCopyCombo();
     void buildTrajectoryCard();
 
     static QLabel* makeHint(const QString& text);
@@ -92,6 +95,18 @@ private:
     std::vector<QSpinBox*>       m_triggerInts;
     std::vector<QSpinBox*>       m_pathInts;
     std::vector<QDoubleSpinBox*> m_pathDoubles;
+
+    // ── 开镜档 (自动开镜生效期间取代「瞄准控制器」整组参数) ──────────────
+    // ★ 这两条管道【必须】与 m_ctlDoubles/m_ctlInts 分开: 后两者被
+    //   buildControllerCard 的 commit 捕获, 会把值写进 hp.ctl_*; 开镜档写的是
+    //   hp.ctl_scope。
+    std::vector<QDoubleSpinBox*> m_scopeDoubles;
+    std::vector<QSpinBox*>       m_scopeInts;
+    QComboBox* m_scopeModeCombo = nullptr;   // 「自动开镜」卡里的跟随/独立开关
+    QComboBox* m_scopeCopyCombo = nullptr;   // 一键复制的来源热键
+    QLabel*    m_scopeCopyHint  = nullptr;   // 复制结果反馈
+    QLabel*    m_scopeOffHint   = nullptr;   // 「跟随热键」时显示的提示
+    std::vector<QWidget*> m_scopeParamRows;  // 随开关显隐的行(含分段标题)
 
     // 轨迹卡片按模式显隐用的句柄（见 buildTrajectoryCard 的 applyMode）。
     QLabel* m_pathSectionBezier = nullptr;

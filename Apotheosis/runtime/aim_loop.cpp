@@ -14,6 +14,7 @@
 #include "detector/detection_buffer.h"
 #include "mouse/mouse.h"
 #include "runtime/active_hotkey.h"
+#include "runtime/aim_telemetry.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/latency_probe.h"
 
@@ -78,6 +79,18 @@ boss::AimPathDriver      g_path;
 boss::TriggerFsm         g_trigger;
 boss::ScopeController    g_scope;
 boss::AutoStopController g_autoStop;
+
+// 上一拍是否在用【开镜档】—— 只为"切档时打一行日志", 不参与控制。
+// ★ 必须在 reset() 里归位, 否则新会话的第一拍会漏打/误打那行。
+bool g_scopeCtlLast = false;
+
+// 自动开镜【点按档(mode 1)】的粘性状态: 按过一次右键之后, 游戏就一直在镜内
+// (该档不收镜, 由玩家自己负责), 所以"算不算在镜内"要粘到热键松开为止。
+//
+// ★ 为什么不能直接用它自己的 engaged(): 那一拍的 in_zone 一假就翻回 false,
+//   但游戏里镜头还开着 —— 参数会跟着命中区来回翻, 与实机状态对不上。
+// ★ mode 2(长按)不用它: 那种档右键真的按着才算在镜内, engaged() 就是真值。
+bool g_scopeTapped = false;
 
 boss::AimPathDriver::Params pathParamsFrom(const HotkeyProfile& hk)
 {
@@ -237,13 +250,20 @@ bool tick()
 
     const int activeIdx = runtime::g_active_hotkey_index.load();
     if (activeIdx < 0)
+    {
+        // 热键已松: 点按档的"在镜内"粘性状态到此为止。
+        g_scopeTapped = false;
         return false;
+    }
     if (activeIdx >= static_cast<int>(cfg.hotkeys.size()))
         return false;
     const HotkeyProfile& hk = cfg.hotkeys[static_cast<size_t>(activeIdx)];
 
     if (!hk.ctl_enabled)
+    {
+        g_scopeTapped = false;
         return false;
+    }
 
     std::vector<control::Candidate> candidates;
     bool detectionFresh = false;
@@ -281,6 +301,31 @@ bool tick()
     bool crossFresh = false;
     const control::Vec2 cross = resolveCrosshair(cfg, hk, crossFresh);
 
+    // ── 自动开镜是否生效 ──────────────────────────────────────────────────
+    //
+    // 自动开镜(自动扳机按住的右键)生效 + 热键仍被按住 ⇒ 控制器改用【开镜档】
+    // 那一整组参数, 而不是热键自己的默认档。
+    //
+    // ★ "算不算在镜内"按开镜方式分两种, 与实机镜头状态对齐:
+    //   · mode 1 点按(不收镜): 按过一次右键之后镜头一直开着 ⇒ 粘到热键松开;
+    //   · mode 2 长按:          右键真的按着才算 ⇒ 用开镜控制器自己的 engaged。
+    //   mode 0(关闭) 两边都为假, 永远不切档。
+    //
+    // ★ 为什么读的是【上一拍】的状态: 开镜判定要用本拍的目标框(命中区),
+    //   而目标框是控制器算完才有的 —— 本拍必然读不到本拍的判定。慢一拍 ≈ 几
+    //   毫秒, 对"镜内换一套增益"没有影响; 也不去改动扳机/开镜的既有相位。
+    const int scopeMode = std::clamp(hk.trigger_auto_scope, 0, 2);
+    if (scopeMode != 1)
+        g_scopeTapped = false;   // 换档/关掉 ⇒ 点按档的粘性状态作废
+    bool scopeEngaged = false;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        scopeEngaged = hk.trigger_enabled &&
+                       ((scopeMode == 1) ? g_scopeTapped : g_scope.engaged());
+    }
+    // 本拍是否真的在用【开镜档】那一组参数 (日志与预览都用它)。
+    const bool scopeCtlActive = scopeEngaged && hk.scope_ctl_enabled != 0;
+
     const auto now = std::chrono::steady_clock::now();
     double dtSec = 0.0;
     {
@@ -291,7 +336,9 @@ bool tick()
             g_first_tick = false;
             if (!g_controller)
                 g_controller = std::make_unique<control::AimController>();
-            g_controller->setConfig(toControllerConfig(flattenProfile(hk, cfg.detection_resolution, cfg.class_filters, cfg)));
+            g_controller->setConfig(toControllerConfig(
+                flattenProfile(hk, cfg.detection_resolution, cfg.class_filters, cfg,
+                               scopeEngaged)));
             g_controller->reset();
             return false;
         }
@@ -310,12 +357,25 @@ bool tick()
         g_last_tick = now;
     }
 
+    {
+        // 只在【切档那一刻】打一行, 不刷屏 —— 用户要能确认它真的切了。
+        if (scopeCtlActive != g_scopeCtlLast)
+        {
+            g_scopeCtlLast = scopeCtlActive;
+            std::cout << (scopeCtlActive
+                    ? "[scope] 自动开镜生效 -> 切到【开镜档】瞄准参数"
+                    : "[scope] 自动开镜结束 -> 切回热键【默认档】瞄准参数")
+                      << std::endl;
+        }
+    }
+
     control::ControlOutput out;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         if (!g_controller)
             g_controller = std::make_unique<control::AimController>();
-        g_controller->setConfig(toControllerConfig(flattenProfile(hk, cfg.detection_resolution, cfg.class_filters, cfg)));
+        g_controller->setConfig(toControllerConfig(
+            flattenProfile(hk, cfg.detection_resolution, cfg.class_filters, cfg, scopeEngaged)));
 
         control::ControlInput in;
         in.candidates = std::move(candidates);
@@ -326,6 +386,35 @@ bool tick()
         in.crosshairFresh = crossFresh;
 
         out = g_controller->update(in);
+    }
+
+    // ── 预览叠加: 把【稳定之后】的结果交给预览线程 ─────────────────────────
+    //
+    // 预览原来只画检测框(detectionBuffer 里的原始框) —— 那是稳定【之前】的东西:
+    // 稳定器判定、锁的是哪个目标、滤波压掉了多少抖动, 全都看不见。
+    // 这里把稳定器放行的框 + 滤波后的中心 + 最终瞄点发过去, 让调参能对着画面调。
+    //
+    // ★ 不管 engaged 都发: 没锁上的时候预览要能说出【为什么没锁】
+    //   (丢帧/找色失效/被稳定器丢掉), 那是调参时最需要看的信息。
+    // ★ 纯只读, 不参与控制。
+    {
+        runtime::AimOverlayState s;
+        s.valid           = out.hasTarget;
+        s.engaged         = out.engaged;
+        s.box             = cv::Rect(static_cast<int>(std::lround(out.targetBox.x)),
+                                     static_cast<int>(std::lround(out.targetBox.y)),
+                                     static_cast<int>(std::lround(out.targetBox.w)),
+                                     static_cast<int>(std::lround(out.targetBox.h)));
+        s.filtered_cx     = out.filteredCenter.x;
+        s.filtered_cy     = out.filteredCenter.y;
+        s.anchor_x        = out.anchor.x;
+        s.anchor_y        = out.anchor.y;
+        s.target_id       = out.targetId;
+        s.target_class_id = out.targetClassId;
+        s.verdict         = static_cast<int>(out.stabVerdict);
+        s.idle_reason     = static_cast<int>(out.idleReason);
+        s.scope_params    = scopeCtlActive;
+        runtime::publishAimOverlay(s);
     }
 
     logPredictor(out);
@@ -378,13 +467,19 @@ bool tick()
         const bool scopeAllowed = std::none_of(
             hk.keys.begin(), hk.keys.end(),
             [](const std::string& k) { return k == "RightMouseButton"; });
-        const int scopeMode = std::clamp(hk.trigger_auto_scope, 0, 2);
+        // scopeMode 已在上面(切档判定)算过, 这里复用同一个值。
         const int scopeDelay = std::max(0, hk.trigger_scope_delay_ms);
 
         {
             const auto scopeAct = g_scope.tick(inZone, scopeAllowed, scopeMode, scopeDelay, ms);
             if (scopeAct.release_right) mouse->releaseRightButton();
-            if (scopeAct.press_right)   mouse->pressRightButton();
+            if (scopeAct.press_right)
+            {
+                mouse->pressRightButton();
+                // 点按档不收镜: 这一次点按之后镜头一直开着, 粘到热键松开为止
+                // (下一拍起 scopeEngaged 才会看到它 —— 与"慢一拍"的口径一致)。
+                if (scopeMode == 1) g_scopeTapped = true;
+            }
 
             const bool scopeReady = g_scope.ready(scopeAllowed, scopeMode, scopeDelay, ms);
 
@@ -483,6 +578,8 @@ void reset()
         g_first_tick = true;
         g_frame_index = 0;
         g_last_tick = std::chrono::steady_clock::time_point{};
+        g_scopeCtlLast = false;
+        g_scopeTapped = false;
     }
     std::lock_guard<std::mutex> lk(g_mouse_mtx);
     if (g_mouse)

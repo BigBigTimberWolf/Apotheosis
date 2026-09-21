@@ -31,6 +31,11 @@ public:
     void setCaptureGpuDecode(bool v);
     int detectionResolution() const;
     void setDetectionResolution(int v);
+    // 引擎精度: "fp16" | "int8"
+    QString enginePrecision() const;
+    void setEnginePrecision(const QString& v);
+    QString int8CalibDir() const;
+    void setInt8CalibDir(const QString& v);
     bool circleMask() const;
     void setCircleMask(bool v);
     QString inputMethod() const;

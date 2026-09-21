@@ -45,6 +45,10 @@ private:
     nvjpegHandle_t handle_{ nullptr };
     nvjpegJpegState_t state_{ nullptr };
 
+    // 实际生效的后端。默认 GPU_HYBRID (GPU 辅助霍夫曼解码, 把熵解码从 CPU 搬到
+    // GPU); 该后端不可用时降级为 DEFAULT。initRoi() 必须与 handle 用同一个后端。
+    nvjpegBackend_t backend_{ NVJPEG_BACKEND_DEFAULT };
+
     static constexpr int ROI_RING = 3;
     bool roi_initialized_{ false };
     nvjpegJpegDecoder_t roi_decoder_{ nullptr };

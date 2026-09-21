@@ -128,29 +128,40 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
 
 FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
                           const std::vector<ClassFilterState>& classFilters,
-                          const Config& globalConfig)
+                          const Config& globalConfig,
+                          bool scopeEngaged)
 {
     FlatConfig flat;
-    flat.kpX = hk.ctl_kp_x;
-    flat.kpY = hk.ctl_kp_y;
-    flat.kiX = hk.ctl_ki_x;
-    flat.kiY = hk.ctl_ki_y;
-    flat.kdX = hk.ctl_kd_x;
-    flat.kdY = hk.ctl_kd_y;
-    flat.tauUnwindSec = hk.ctl_tau_unwind_sec;
-    flat.tauDerivSec = hk.ctl_tau_deriv_sec;
-    flat.iMax = hk.ctl_i_max;
-    flat.maxOutputCounts = hk.ctl_max_output_counts;
-    flat.pFullScalePx = hk.ctl_p_full_scale_px;
-    flat.kPxPerCount = hk.ctl_k_px_per_count;
-    flat.inflightBeta = hk.ctl_inflight_beta;
-    flat.inflightDeadTimeMs = hk.ctl_inflight_dead_time_ms;
-    flat.predictLeadMs = hk.ctl_predict_lead_ms;
-    flat.predictMaxVelocityPxPerSec = hk.ctl_predict_max_velocity_px_s;
-    flat.predictMaxLeadRatio = hk.ctl_predict_max_lead_ratio;
+
+    // ── 瞄准控制器参数组: 默认档 / 开镜档 ────────────────────────────────
+    // ★ 自动开镜生效期间, 若该热键开了独立开镜参数, 就用开镜档【整组】取代
+    //   默认档 —— 开镜后游戏内灵敏度被倍率放大, 镜前那套增益在镜内会过冲。
+    // ★ 没开(默认)时走的就是默认档, 逐位与从前一致。
+    const bool useScope = scopeEngaged && hk.scope_ctl_enabled != 0;
+    const AimCtlParams cp = useScope ? hk.ctl_scope : ctlParamsOf(hk);
+    flat.scopeCtlActive = useScope;
+
+    flat.kpX = cp.kp_x;
+    flat.kpY = cp.kp_y;
+    flat.kiX = cp.ki_x;
+    flat.kiY = cp.ki_y;
+    flat.kdX = cp.kd_x;
+    flat.kdY = cp.kd_y;
+    flat.tauUnwindSec = cp.tau_unwind_sec;
+    flat.tauDerivSec = cp.tau_deriv_sec;
+    flat.iMax = cp.i_max;
+    flat.maxOutputCounts = cp.max_output_counts;
+    flat.pFullScalePx = cp.p_full_scale_px;
+    flat.kPxPerCount = cp.k_px_per_count;
+    flat.inflightBeta = cp.inflight_beta;
+    flat.inflightDeadTimeMs = cp.inflight_dead_time_ms;
+    flat.predictLeadMs = cp.predict_lead_ms;
+    flat.predictMaxVelocityPxPerSec = cp.predict_max_velocity_px_s;
+    flat.predictMaxLeadRatio = cp.predict_max_lead_ratio;
+    flat.randomSeed = cp.random_seed;
+
     flat.yOffset = hk.ctl_y_offset;
     flat.yOffsetMax = hk.ctl_y_offset_max;
-    flat.randomSeed = hk.ctl_random_seed;
 
     // 全局选靶与稳定器
     flat.hysteresisRatio = globalConfig.target_hysteresis_ratio;

@@ -60,13 +60,24 @@ struct FlatConfig
 
     std::vector<std::pair<int, int>> classFilters;
     int detectionResolution = 320;
+
+    // 这一拍【是否在用开镜档】(自动开镜生效 且 该热键打开了独立开镜参数)。
+    // 供日志/回归断言读取; 不参与控制计算。
+    bool scopeCtlActive = false;
 };
 
 control::ControllerConfig toControllerConfig(const FlatConfig& flat);
 
+// 把热键 profile 摊平成控制器参数。
+//
+// ★ scopeEngaged = 自动开镜(自动扳机按住的右键)【当前生效】。它为 true 且
+//   profile 打开了 scope_ctl_enabled 时, 这一拍用【开镜档】(hk.ctl_scope)
+//   整组取代默认档 —— 开镜后游戏内灵敏度被倍率放大, 镜前那套增益会过冲。
+//   默认值 false ⇒ 不传该参数的老调用点逐位与从前一致。
 FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
                           const std::vector<ClassFilterState>& classFilters,
-                          const Config& globalConfig);
+                          const Config& globalConfig,
+                          bool scopeEngaged = false);
 
 std::vector<int> buildClassBuckets(const std::vector<int>& aimClassIds);
 

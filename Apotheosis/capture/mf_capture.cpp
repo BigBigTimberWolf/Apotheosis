@@ -1278,12 +1278,30 @@ void MFCapture::EnqueueJpegJob(const uint8_t* data, size_t size, int64_t capture
         return;
     DecodeJob job;
     job.capture_ns = capture_ns;
-    job.jpeg.assign(data, data + size);
     job.seq = ++job_seq_;
+
+    // 先从回收池里取一块已有缓冲, 避免每帧重新 malloc ~1MB (240fps 下这是
+    // 读循环线程上一笔可观的分配器/缺页开销)。
+    {
+        std::lock_guard<std::mutex> lock(job_mutex_);
+        if (!job_free_buffers_.empty())
+        {
+            job.jpeg = std::move(job_free_buffers_.back());
+            job_free_buffers_.pop_back();
+        }
+    }
+    job.jpeg.assign(data, data + size);
+
     {
         std::lock_guard<std::mutex> lock(job_mutex_);
         while (static_cast<int>(job_queue_.size()) >= MAX_JOB_QUEUE)
+        {
+            DecodeJob stale = std::move(job_queue_.front());
             job_queue_.pop();
+            // 被挤掉的旧帧缓冲回池, 不要直接扔掉再 malloc 一块新的。
+            if (job_free_buffers_.size() < static_cast<size_t>(MAX_JOB_QUEUE) + DECODE_WORKERS)
+                job_free_buffers_.push_back(std::move(stale.jpeg));
+        }
         job_queue_.push(std::move(job));
     }
     job_cv_.notify_one();
@@ -1353,14 +1371,35 @@ void MFCapture::DecodeWorkerLoop()
         const size_t slot = ringIdx;
         ringIdx = (ringIdx + 1) % RING;
         GpuImage& dst = outRing[slot];
-        if (!decoder.decodeCropped(job.jpeg.data(), job.jpeg.size(), out_side_, out_side_, dst, stream))
+        const bool decoded = decoder.decodeCropped(job.jpeg.data(), job.jpeg.size(),
+                                                   out_side_, out_side_, dst, stream);
+        if (!decoded)
+        {
+            // 缓冲同样要回池, 否则解码失败会持续泄漏分配。
+            std::lock_guard<std::mutex> lock(job_mutex_);
+            if (job_free_buffers_.size() < static_cast<size_t>(MAX_JOB_QUEUE) + DECODE_WORKERS)
+                job_free_buffers_.push_back(std::move(job.jpeg));
             continue;
+        }
 
         auto event = evRing.record(stream);
-        if (!event && cudaStreamSynchronize(stream) != cudaSuccess) continue;
+        if (!event && cudaStreamSynchronize(stream) != cudaSuccess)
+        {
+            std::lock_guard<std::mutex> lock(job_mutex_);
+            if (job_free_buffers_.size() < static_cast<size_t>(MAX_JOB_QUEUE) + DECODE_WORKERS)
+                job_free_buffers_.push_back(std::move(job.jpeg));
+            continue;
+        }
         GpuImage out = dst;
         out.setReadyEvent(std::move(event));
         EnqueueGpuOrdered(std::move(out), job.seq, job.capture_ns);
+
+        // JPEG 缓冲已经用完, 回回收池给读循环复用
+        {
+            std::lock_guard<std::mutex> lock(job_mutex_);
+            if (job_free_buffers_.size() < static_cast<size_t>(MAX_JOB_QUEUE) + DECODE_WORKERS)
+                job_free_buffers_.push_back(std::move(job.jpeg));
+        }
     }
 
     cudaStreamSynchronize(stream);
@@ -1373,13 +1412,20 @@ bool MFCapture::EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq, int64_t captur
         return false;
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        if (seq <= enqueued_seq_.load(std::memory_order_relaxed))
+        // 两个解码 worker 的完成顺序会随机颠倒。原实现是"seq 比已投递的小就丢",
+        // 于是每次乱序都白扔一帧 —— 实测这是消费/投递只有 8x% 的主要原因之一。
+        // 对瞄准来说"最新帧优先"是对的, 所以被更新的帧超越时仍然丢弃;
+        // 但如果输出队列此刻是空的(消费者已经取走, 没有任何更新的帧可用),
+        // 就没有理由再扔 —— 补发它只会提高产帧率, 不会引入陈旧帧。
+        const bool superseded = (seq <= enqueued_seq_.load(std::memory_order_relaxed));
+        if (superseded && !gpu_frame_queue_.empty())
             return false;
-        enqueued_seq_.store(seq, std::memory_order_relaxed);
+        if (!superseded)
+            enqueued_seq_.store(seq, std::memory_order_relaxed);
+
         while (static_cast<int>(gpu_frame_queue_.size()) >= MAX_QUEUE_SIZE)
             gpu_frame_queue_.pop();
         gpu_frame_queue_.push({std::move(frame), capture_ns});
-
     }
     frame_cv_.notify_one();
     return true;

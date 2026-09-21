@@ -220,6 +220,10 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/OverviewPage.h"
     "${QT_UI_DIR}/pages/SessionPage.cpp"
     "${QT_UI_DIR}/pages/SessionPage.h"
+    # ★★ 稳定器页 (2026-09-20): 全局选靶 + 目标稳定器那 7 项, 从「目标」页搬来,
+    #   与「准星找色」并列在「控制」组 —— 它们都作用于控制器【之前】的输入。
+    "${QT_UI_DIR}/pages/StabilizerPage.cpp"
+    "${QT_UI_DIR}/pages/StabilizerPage.h"
     "${QT_UI_DIR}/pages/StatsPage.cpp"
     "${QT_UI_DIR}/pages/StatsPage.h"
     "${QT_UI_DIR}/pages/TargetPage.cpp"
@@ -417,6 +421,88 @@ add_custom_command(TARGET ai POST_BUILD
             "${QT_UI_DIR}/assets/tabler-icons.ttf"
             "$<TARGET_FILE_DIR:ai>/assets/tabler-icons.ttf"
     VERBATIM)
+
+# ── 采集链路 bench (独立 exe; 不进主程序, 也不进 logic-tests) ────────────────
+# 把「MF 投递速率」与「程序消费速率」分开量, 用来定位高帧率采集掉帧到底发生在
+# 读循环(MF 串行往返/每帧拷贝) 还是解码 worker/输出队列背压。
+# 参数与主程序对齐(crop_enabled=true), 用法见 tests/mfcap_bench.cpp 顶部注释。
+add_executable(mfcap_bench
+    "${SRC_DIR}/capture/tests/mfcap_bench.cpp"
+    "${SRC_DIR}/capture/mf_capture.cpp"
+    "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
+    "${SRC_DIR}/capture/gpu_color_ops.cu"
+    "${SRC_DIR}/mem/gpu_image.cpp")
+
+if(MSVC)
+    set_target_properties(mfcap_bench PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
+set_target_properties(mfcap_bench PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "75-real;86-real;86-virtual")
+
+target_compile_definitions(mfcap_bench PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN USE_CUDA)
+if(MSVC)
+    target_compile_options(mfcap_bench PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+
+target_include_directories(mfcap_bench PRIVATE
+    "${CMAKE_SOURCE_DIR}"
+    "${SRC_DIR}"
+    "${SRC_DIR}/capture"
+    "${SRC_DIR}/mem"
+    "${SRC_DIR}/runtime"
+    "${OPENCV_INCLUDE_DIR}")
+
+target_link_libraries(mfcap_bench PRIVATE
+    "${OPENCV_LIB}"
+    CUDA::cudart
+    CUDA::nvjpeg
+    CUDA::nppc
+    CUDA::nppicc
+    CUDA::nppidei
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
+    ole32
+    oleaut32
+    strmiids)
+
+copy_runtime(mfcap_bench "${OPENCV_DLL}")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nvjpeg64_12.dll")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nppc64_12.dll")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nppial64_12.dll")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nppicc64_12.dll")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nppidei64_12.dll")
+copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nppig64_12.dll")
+copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── nvJPEG 解码路径微基准 (独立 exe) ─────────────────────────────────────────
+# 用一张真实采集帧比较 split+ROI / nvjpegDecode / batched(DEFAULT|GPU_HYBRID|
+# HARDWARE) 的每帧主机开销。本机只有 4 核, host 时间是要害指标。
+add_executable(nvjpeg_bench "${SRC_DIR}/capture/tests/nvjpeg_bench.cpp")
+# 源码含中文注释/字符串: 必须 /utf-8, 否则 MSVC 按 GBK 解析, 尾字节 0x5C 会吃掉
+# 后面的转义符, 报出一堆莫名其妙的 "printf 重定义" / "缺少类型说明符"。
+if(MSVC)
+    target_compile_options(nvjpeg_bench PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_include_directories(nvjpeg_bench PRIVATE "${SRC_DIR}/capture" "${OPENCV_INCLUDE_DIR}")
+target_link_libraries(nvjpeg_bench PRIVATE CUDA::cudart CUDA::nvjpeg "${OPENCV_LIB}")
+copy_runtime(nvjpeg_bench "${OPENCV_DLL}")
+copy_runtime(nvjpeg_bench "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+copy_runtime(nvjpeg_bench "${CUDAToolkit_BIN_DIR}/nvjpeg64_12.dll")
+copy_runtime(nvjpeg_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(nvjpeg_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(nvjpeg_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")

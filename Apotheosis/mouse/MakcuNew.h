@@ -7,7 +7,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
 #include "makcu_proto.h"
 #include "serial/serial.h"
 
@@ -42,6 +41,17 @@ public:
     bool mask(int durationMs);
     bool maskOff();
 
+    // ---- 物理按键回读的保活 ----
+    //
+    // 固件在【按键状态变化时】才推一帧, 订阅丢失/单帧丢失后不会再补发,
+    // 表现为"硬件连上了、能移动, 但热键读不到按下"。这里提供一个保活接口,
+    // 由上层周期性调用: 距上次成功订阅超过 intervalMs 就重发一次订阅。
+    // 返回 true 表示本次真的重发了订阅。
+    bool keepButtonStreamAlive(int intervalMs);
+
+    // 最近一次订阅是否得到固件 ack。false = 按键回读链路不可信。
+    bool buttonStreamReady() const { return buttonStreamReady_.load(); }
+
 private:
     bool openSerial(unsigned int baudRate);
     void startReader();
@@ -59,6 +69,7 @@ private:
     void supervisorLoop();
     void tryReconnect();
     void subscribeAsync(bool on);
+    bool writeAsciiLine(const char* command);
     void applyPhysicalButtons(uint8_t mask);
     bool initializeProtocolSession();
 
@@ -85,6 +96,12 @@ private:
     std::atomic<uint8_t> outputButtons_{0};
     std::atomic<uint8_t> realButtons_{0};
     std::atomic<uint8_t> injectedButtons_{0};
+
+    // 按键回读保活: 最近一次成功发订阅的时刻 / 最近一次收到 0x84 或裸掩码的时刻。
+    std::atomic<bool> buttonStreamReady_{false};
+    std::atomic<int64_t> lastButtonSubscribeMs_{0};
+    std::atomic<int64_t> lastButtonFrameMs_{0};
+    std::atomic<bool> makcuButtonsModeOn_{false};
 
     std::mutex asciiMutex_;
     std::condition_variable asciiCv_;

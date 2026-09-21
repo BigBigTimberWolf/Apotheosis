@@ -39,6 +39,7 @@
 #include "pages/AiModelPage.h"
 
 #include "pages/CrosshairPage.h"
+#include "pages/StabilizerPage.h"
 #include "pages/StatsPage.h"
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
@@ -66,8 +67,10 @@ const QVector<GroupDef>& navGroups() {
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
           QStringLiteral("cpu")}},
         {QString::fromUtf8(u8"控制"),
-         {QString::fromUtf8(u8"瞄准设置"), QString::fromUtf8(u8"准星找色")},
-         {QStringLiteral("crosshair"), QStringLiteral("color-swatch")}},
+         {QString::fromUtf8(u8"瞄准设置"), QString::fromUtf8(u8"准星找色"),
+          QString::fromUtf8(u8"稳定器")},
+         {QStringLiteral("crosshair"), QStringLiteral("color-swatch"),
+          QStringLiteral("layers-intersect")}},
         {QString::fromUtf8(u8"监控"),
          {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
           QString::fromUtf8(u8"调试")},
@@ -575,6 +578,7 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
     if (name == QString::fromUtf8(u8"瞄准设置")) { m_hotkeyPage = new AimSettingsPage(); return m_hotkeyPage; }
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
+    if (name == QString::fromUtf8(u8"稳定器"))     return new StabilizerPage();
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }

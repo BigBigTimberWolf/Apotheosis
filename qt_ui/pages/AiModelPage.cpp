@@ -82,6 +82,51 @@ AiModelPage::AiModelPage(QWidget* parent)
     auto* modelComboRow = FormKit::fieldRow(QStringLiteral("模型文件"), m_modelCombo);
     modelCard->contentLayout()->addWidget(modelComboRow);
 
+    // ── 引擎精度 (FP16 / INT8) ──────────────────────────────────────────────
+    // FP8 故意不在列表里: 它需要 Ada(sm_89)/Hopper(sm_90)+, 本机 Turing(sm_75)
+    // 硬件不支持, 放进去只会让人以为能选。
+    m_precisionCombo = new QComboBox;
+    m_precisionCombo->addItem(QStringLiteral("FP16 (默认)"), QStringLiteral("fp16"));
+    m_precisionCombo->addItem(QStringLiteral("INT8 (需校准图集)"), QStringLiteral("int8"));
+    m_precisionCombo->setToolTip(
+        tr("导出 .engine 时使用的精度。\n"
+           "FP16: 现状, 稳。\n"
+           "INT8: Turing 的 INT8 tensor core 吞吐约为 FP16 的 2 倍, 但需要校准图集\n"
+           "      (读取 calib/ 目录), 且量化误差对小目标最敏感 —— 必须实测漏检率。\n"
+           "改完必须删掉 models/engines/ 下对应的旧 .engine 才会重新导出。\n"
+           "FP8 不提供: 需要 Ada/Hopper, 本机显卡不支持。"));
+    {
+        const int idx = m_precisionCombo->findData(cfg.enginePrecision());
+        m_precisionCombo->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+    modelCard->contentLayout()->addWidget(
+        FormKit::fieldRow(QStringLiteral("引擎精度"), m_precisionCombo));
+
+    m_calibHintLabel = new QLabel;
+    m_calibHintLabel->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
+    m_calibHintLabel->setWordWrap(true);
+    modelCard->contentLayout()->addWidget(m_calibHintLabel);
+
+    auto updateCalibHint = [this, &cfg]() {
+        const bool int8 = cfg.enginePrecision() == QLatin1String("int8");
+        m_calibHintLabel->setText(int8
+            ? tr("INT8 已选: 校准图会从 %1/ 读取 (jpg/png/bmp, 建议 100~200 张真实游戏画面)。\n"
+                 "没有校准图时导出会直接失败并报错, 不会悄悄退回 FP16。")
+                  .arg(cfg.int8CalibDir())
+            : QString());
+        m_calibHintLabel->setVisible(int8);
+    };
+    updateCalibHint();
+
+    connect(m_precisionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, &cfg, updateCalibHint](int index) {
+        if (index < 0) return;
+        cfg.setEnginePrecision(m_precisionCombo->currentData().toString());
+        emit cfg.configChanged();
+        updateCalibHint();
+        updateBackendStatus();
+    });
+
     m_fixedInputLabel = new QLabel;
     m_fixedInputLabel->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
     modelCard->contentLayout()->addWidget(m_fixedInputLabel);
@@ -331,7 +376,12 @@ void AiModelPage::updateModelInfo() {
 }
 
 void AiModelPage::updateBackendStatus() {
+    const bool int8 = ConfigManager::instance().enginePrecision() == QLatin1String("int8");
     m_backendStatusLabel->setText(QStringLiteral(
-        "TensorRT 引擎固定使用 FP16 I/O；ONNX 首次启动时自动构建并缓存引擎。\n"
-        "只支持 end2end 形态的模型(输出 [1,N,6]，即 NMS/解码已烘进图内)。"));
+        "TensorRT 引擎 I/O 固定为 FP16；计算精度可选 FP16 或 INT8(校准量化)。\n"
+        "%1\n"
+        "只支持 end2end 形态的模型(输出 [1,N,6]，即 NMS/解码已烘进图内)。")
+        .arg(int8
+            ? QStringLiteral("当前: INT8 —— 首次导出会对 calib/ 里的图做熵校准, 需要几分钟。")
+            : QStringLiteral("当前: FP16。")));
 }

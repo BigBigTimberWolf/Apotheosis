@@ -85,6 +85,10 @@ ControlOutput AimController::update(const ControlInput& in)
     const StabilizerResult stab = stabilize(chosen, cfg_.stabilizer, stabilizerState_);
     if (!stab.accepted)
     {
+        // ★ 判定要如实带出去: 预览窗据此打出 "STAB-REJECTED"。
+        //   这里已经做出了一次真实判定, 不能让它停在上一步的默认值上。
+        out.stabVerdict = stab.verdict;
+        out.targetClassId = sel.classId;
         out.idleReason = ControlOutput::IdleReason::RejectedByStabilizer;
         return out;
     }
@@ -101,6 +105,12 @@ ControlOutput AimController::update(const ControlInput& in)
     const Vec2 obsCenter = stab.box.center();
     filter_->observe(obsCenter, in.dtSec);
     const Vec2 filteredCenter = filter_->position();
+
+    // 给预览窗的三样东西(稳定器判定 / 稳定后的中心 / 类别)。
+    // ★ 只读用途, 不参与控制 —— 但有回归钉着它们, 免得悄悄变成没填的默认值。
+    out.filteredCenter = filteredCenter;
+    out.stabVerdict = stab.verdict;
+    out.targetClassId = sel.classId;
 
     hasLastBox_ = true;
     lastBox_ = stab.box;

@@ -23,6 +23,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <iterator>   // std::size (开镜档的行表)
 #include <mutex>
 
 #include "Apotheosis.h"          // config / configMutex
@@ -277,6 +278,7 @@ void AimSettingsPage::buildRightPanel(QWidget* parent)
     buildDynamicFovCard();
     buildControllerCard();
     buildTriggerCard();
+    buildScopeCtlCard();
     buildTrajectoryCard();
 
     m_rightLayout->addStretch();
@@ -1112,6 +1114,24 @@ void AimSettingsPage::buildTriggerCard()
         u8"★ 本项目有意与 AimMagic 不同：AM 是同一拍先左键再右键，\n"
         u8"  那第一枪其实没开镜。")));
 
+    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"开镜后的瞄准参数")));
+    auto* scopeCtlCombo = new QComboBox;
+    scopeCtlCombo->setObjectName("scopeCtlMode");
+    scopeCtlCombo->addItem(QStringLiteral("跟随热键（开镜前后同一套参数）"), 0);
+    scopeCtlCombo->addItem(QStringLiteral("用「开镜独立瞄准参数」那一套"), 1);
+    auto* scopeCtlRow = FormKit::fieldRow(QStringLiteral("开镜期间"), scopeCtlCombo);
+    attachTip(scopeCtlRow, QString::fromUtf8(
+        u8"自动开镜真的按下右键之后, 只要你还按着热键, 瞄准控制器就改用"
+        u8"「开镜独立瞄准参数」卡里的【整组参数】; 松开热键后切回热键自己的那套。\n"
+        u8"★ 长按开镜: 离开命中区会自动收镜 ⇒ 那一刻就切回(镜都收了, 参数也该回去)。\n"
+        u8"★ 点按开镜(不收镜): 镜头一直开着 ⇒ 一直粘到松开热键为止。\n"
+        u8"★ 为什么需要它: 开镜后游戏内灵敏度被【倍率】放大 —— 镜前调好的增益\n"
+        u8"  直接用在镜内必然过冲。瞬狙时「镜前一甩、进镜就飞」就是这个原因。\n"
+        u8"★ 跟随热键(默认) = 逐拍与没有这个功能时完全一致。\n"
+        u8"★ 热键本身绑了右键时本项不生效(自动开镜那时根本不会按下右键)。"));
+    cl->addWidget(scopeCtlRow);
+    m_scopeModeCombo = scopeCtlCombo;
+
     cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"自动急停")));
     auto* stopCombo = new QComboBox;
     stopCombo->setObjectName("triggerAutoStop");
@@ -1139,7 +1159,7 @@ void AimSettingsPage::buildTriggerCard()
         u8"★ 判定输入是【原始准星】，不是平滑过的值。"));
     cl->addWidget(note);
 
-    auto commit = [this, enable, scopeCombo, stopCombo]() {
+    auto commit = [this, enable, scopeCombo, stopCombo, scopeCtlCombo]() {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
         if (ri < 0) return;
@@ -1162,8 +1182,11 @@ void AimSettingsPage::buildTriggerCard()
         hp.trigger_scope_delay_ms     = i("triggerScopeDelay");
         hp.trigger_auto_stop          = stopCombo->currentData().toInt();
         hp.trigger_stop_ms            = i("triggerStopMs");
+        // 开镜期间是否用独立那一套 (与「开镜独立瞄准参数」卡联动显隐)。
+        hp.scope_ctl_enabled          = scopeCtlCombo->currentData().toInt();
 
         ConfigBridge::instance().markDirty();
+        applyScopeCtlVisibility();
     };
 
     connect(enable, &QCheckBox::toggled, this, [commit](bool) { commit(); });
@@ -1171,10 +1194,322 @@ void AimSettingsPage::buildTriggerCard()
             this, [commit](int) { commit(); });
     connect(stopCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [commit](int) { commit(); });
+    connect(scopeCtlCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [commit](int) { commit(); });
     for (auto* sp : m_triggerInts)
         connect(sp, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
 
     m_rightLayout->addWidget(card);
+}
+
+namespace
+{
+
+// ── 开镜档的行表 ────────────────────────────────────────────────────────────
+//
+// ★ 说明文字不在这里重写一遍: 建行时按 mainObj 去「瞄准控制器」卡里取那个控件
+//   已有的 tooltip(见 buildScopeCtlCard 的 tipFromMainCard)。文案只有一份,
+//   两张卡的说明不会各说各话。
+// ★ 量程/步长/默认值必须与「瞄准控制器」卡【逐条一致】—— 这里列的只是数值。
+// ★ decimals == 0 ⇒ 整数行(QSpinBox); > 0 ⇒ 浮点行(QDoubleSpinBox)。
+struct ScopeRowDesc
+{
+    const char* mainObj;    // 「瞄准控制器」卡里的控件名 (取说明用)
+    const char* scopeObj;   // 本卡控件名
+    const char* label;      // 行标签 (FormKit 标签宽 88, 太长会被截)
+    double lo, hi, step, def;
+    int    decimals;
+};
+
+const ScopeRowDesc kScopeGainRows[] = {
+    { "ctlKpX", "scopeKpX", "Kp · 水平", 0.0,   500.0, 0.5,   35.0, 3 },
+    { "ctlKpY", "scopeKpY", "Kp · 垂直", 0.0,   500.0, 0.5,   35.0, 3 },
+    { "ctlKiX", "scopeKiX", "Ki · 水平", 0.0,   100.0, 0.01,   0.0, 3 },
+    { "ctlKiY", "scopeKiY", "Ki · 垂直", 0.0,   100.0, 0.01,   0.0, 3 },
+    { "ctlKdX", "scopeKdX", "Kd · 水平", 0.0,   100.0, 0.01,   0.0, 3 },
+    { "ctlKdY", "scopeKdY", "Kd · 垂直", 0.0,   100.0, 0.01,   0.0, 3 },
+    { "ctlPFullScalePx", "scopePFullScalePx", "P 项饱和 (像素, 0=不限)",
+      0.0, 2000.0, 1.0, 0.0, 3 },
+    { "ctlTauUnwindSec", "scopeTauUnwindSec", "积分回吐时间常数 (秒)",
+      0.001, 5.0, 0.005, 0.030, 3 },
+    { "ctlTauDerivSec", "scopeTauDerivSec", "D 项低通时间常数 (秒)",
+      0.0, 5.0, 0.005, 0.020, 3 },
+    { "ctlIMax", "scopeIMax", "积分上限 (0=用输出限幅)", 0.0, 5000.0, 1.0, 0.0, 3 },
+};
+
+const ScopeRowDesc kScopeLimitRows[] = {
+    { "ctlMaxOutputCounts", "scopeMaxOutputCounts", "单拍最大位移 (计数)",
+      1.0, 1000.0, 1.0, 200.0, 0 },
+    { "ctlRandomSeed", "scopeRandomSeed", "瞄点随机种子 (0=固定)",
+      0.0, 999999.0, 1.0, 0.0, 0 },
+};
+
+const ScopeRowDesc kScopePredictRows[] = {
+    { "ctlPredictLeadMs", "scopePredictLeadMs", "预测提前时间 (毫秒, 0=关闭)",
+      0.0, 1000.0, 1.0, 0.0, 3 },
+    { "ctlPredictMaxVelocityPxPerSec", "scopePredictMaxVelocityPxPerSec",
+      "速度上限 (像素/秒, 0=不限)", 0.0, 100000.0, 10.0, 0.0, 3 },
+    { "ctlPredictMaxLeadRatio", "scopePredictMaxLeadRatio",
+      "预测距离上限 (框对角线倍数, 0=不限)", 0.0, 100.0, 0.05, 0.0, 3 },
+};
+
+const ScopeRowDesc kScopeSmithRows[] = {
+    { "ctlKPxPerCount", "scopeKPxPerCount", "灵敏度折算系数 k (像素/计数, 0=关)",
+      0.0, 10.0, 0.005, 0.0, 4 },
+    { "ctlInflightBeta", "scopeInflightBeta", "补偿阻尼系数 β (默认 0.8)",
+      0.0, 2.0, 0.05, 0.8, 3 },
+    { "ctlInflightDeadTimeMs", "scopeInflightDeadTimeMs",
+      "Smith 补偿死区时间 (毫秒, 默认 46.0)", 1.0, 500.0, 1.0, 46.0, 3 },
+};
+
+}
+
+// ── 开镜档: 自动开镜生效期间取代「瞄准控制器」的整组参数 ────────────────────
+//
+// ★ 为什么需要它: 开镜后游戏内灵敏度被倍率放大, 镜前调好的一套增益与灵敏度
+//   折算填进镜内必然过冲(瞬狙最典型: 镜前一甩、进镜就飞)。这里给镜内一套独立
+//   参数, 且只在【自动开镜真的按下了右键、并且你还按着热键】的期间生效 ——
+//   判定在 runtime/aim_loop.cpp。
+// ★ 开关是「自动扳机 → 自动开镜 → 开镜期间」那个下拉框。选「跟随热键」时这
+//   一整套不生效, 逐拍与没有这个功能时完全一致。
+void AimSettingsPage::buildScopeCtlCard()
+{
+    auto* card = new CardWidget(QString::fromUtf8(u8"开镜独立瞄准参数"),
+                                QStringLiteral("adjustments"));
+    auto* cl = card->contentLayout();
+
+    cl->addWidget(makeHint(QString::fromUtf8(
+        u8"这里的参数【整组取代】「瞄准控制器」卡里的同名参数, 只在「自动扳机 → "
+        u8"自动开镜」真的按下右键、并且你还按着热键的那几拍生效。\n"
+        u8"★ 开关在「自动扳机 → 自动开镜 → 开镜期间」。\n"
+        u8"★ 量程与默认值跟「瞄准控制器」卡逐条一致; 说明文字直接取那张卡的, 只有一份。")));
+
+    m_scopeOffHint = makeHint(QString::fromUtf8(
+        u8"当前是「跟随热键」：开镜前后用同一套参数, 下面这些【不生效】(已置灰)。\n"
+        u8"把「自动扳机 → 自动开镜 → 开镜期间」切到「用「开镜独立瞄准参数」那一套」"
+        u8"就会启用。"));
+    cl->addWidget(m_scopeOffHint);
+
+    // ── 一键复制 ─────────────────────────────────────────────────────────
+    auto* copyTitle = makeSectionTitle(QString::fromUtf8(u8"一键复制"));
+    cl->addWidget(copyTitle);
+    m_scopeParamRows.push_back(copyTitle);
+
+    m_scopeCopyCombo = new QComboBox;
+    m_scopeCopyCombo->setObjectName("scopeCopySource");
+    auto* copyBtn = new QPushButton(QString::fromUtf8(u8"复制它的默认参数"));
+    copyBtn->setObjectName("scopeCopyBtn");
+    copyBtn->setCursor(Qt::PointingHandCursor);
+
+    auto* copyRow = new QWidget;
+    {
+        auto* hl = new QHBoxLayout(copyRow);
+        hl->setContentsMargins(0, 0, 0, 0);
+        hl->setSpacing(10);
+        hl->addWidget(m_scopeCopyCombo, 1);
+        hl->addWidget(copyBtn);
+    }
+    attachTip(copyRow, QString::fromUtf8(
+        u8"把【指定热键的默认(未开镜)瞄准控制器参数】整套搬进本热键的开镜档。\n"
+        u8"★ 搬的是对方的【默认档】, 不是对方的开镜档 —— 所以可以先把某个热键在"
+        u8"镜内调好当模板, 再从别的热键一键搬过来。\n"
+        u8"★ 源热键选自己 = 把本热键的开镜档重置回自己的默认参数。"));
+    cl->addWidget(copyRow);
+    m_scopeParamRows.push_back(copyRow);
+
+    m_scopeCopyHint = makeHint(QString());
+    cl->addWidget(m_scopeCopyHint);
+
+    // 说明文字一律从主卡取: 主卡先建(buildRightPanel 的顺序), 控件已存在。
+    auto tipFromMainCard = [this](const char* obj) -> QString {
+        auto* w = findChild<QWidget*>(QString::fromUtf8(obj));
+        if (!w) return QString();
+        if (!w->toolTip().isEmpty()) return w->toolTip();
+        // 少数行(灵敏度折算系数 k —— 它那行是手搓的, 说明挂在标签上而不是控件上)
+        // 的说明在行内第一个标签里, 取它, 免得这里悄悄少一段说明。
+        if (QWidget* row = w->parentWidget())
+            if (auto* l = row->findChild<QLabel*>())
+                return l->toolTip();
+        return QString();
+    };
+
+    auto addGroup = [&](const char* title, const ScopeRowDesc* rows, size_t count) {
+        auto* t = makeSectionTitle(QString::fromUtf8(title));
+        cl->addWidget(t);
+        m_scopeParamRows.push_back(t);
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const ScopeRowDesc& d = rows[i];
+            QWidget* row = nullptr;
+
+            if (d.decimals <= 0)
+            {
+                auto* sp = new QSpinBox;
+                sp->setRange(static_cast<int>(d.lo), static_cast<int>(d.hi));
+                sp->setSingleStep(static_cast<int>(d.step));
+                sp->setObjectName(QString::fromUtf8(d.scopeObj));
+                sp->setValue(static_cast<int>(d.def));
+                m_scopeInts.push_back(sp);
+                row = FormKit::fieldRow(QString::fromUtf8(d.label), sp);
+            }
+            else
+            {
+                auto* sp = new QDoubleSpinBox;
+                sp->setRange(d.lo, d.hi);
+                sp->setSingleStep(d.step);
+                sp->setDecimals(d.decimals);
+                sp->setObjectName(QString::fromUtf8(d.scopeObj));
+                sp->setValue(d.def);
+                m_scopeDoubles.push_back(sp);
+                row = FormKit::fieldRow(QString::fromUtf8(d.label), sp);
+            }
+
+            attachTip(row, tipFromMainCard(d.mainObj));
+            cl->addWidget(row);
+            m_scopeParamRows.push_back(row);
+        }
+    };
+
+    addGroup("增益（水平 x = 跟枪 / 垂直 y = 压枪）",
+             kScopeGainRows, std::size(kScopeGainRows));
+    addGroup("输出限幅与随机化", kScopeLimitRows, std::size(kScopeLimitRows));
+    addGroup("在途补偿 (预测提前量)", kScopePredictRows, std::size(kScopePredictRows));
+    addGroup("Smith 在途自身位移补偿 (一帧拉枪)",
+             kScopeSmithRows, std::size(kScopeSmithRows));
+
+    cl->addWidget(makeHint(QString::fromUtf8(
+        u8"★ 选靶 / 稳定器 / 滞回倍数 / 瞄点 Y 这些【不属于控制器增益】的参数仍然"
+        u8"只有热键一份, 不随开镜切档 —— 它们管的是「瞄谁」, 不是「用多大力」。")));
+
+    auto commitScope = [this]() {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        if (ri < 0) return;
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri >= static_cast<int>(config.hotkeys.size())) return;
+        AimCtlParams& p = config.hotkeys[ri].ctl_scope;
+
+        auto d = [this](const char* n) { return findChild<QDoubleSpinBox*>(n)->value(); };
+        auto i = [this](const char* n) { return findChild<QSpinBox*>(n)->value(); };
+
+        p.kp_x             = d("scopeKpX");
+        p.kp_y             = d("scopeKpY");
+        p.ki_x             = d("scopeKiX");
+        p.ki_y             = d("scopeKiY");
+        p.kd_x             = d("scopeKdX");
+        p.kd_y             = d("scopeKdY");
+        p.tau_unwind_sec   = d("scopeTauUnwindSec");
+        p.tau_deriv_sec    = d("scopeTauDerivSec");
+        p.i_max            = d("scopeIMax");
+        p.max_output_counts= i("scopeMaxOutputCounts");
+        p.p_full_scale_px  = d("scopePFullScalePx");
+        p.predict_lead_ms  = d("scopePredictLeadMs");
+        p.predict_max_velocity_px_s = d("scopePredictMaxVelocityPxPerSec");
+        p.predict_max_lead_ratio    = d("scopePredictMaxLeadRatio");
+        p.k_px_per_count   = d("scopeKPxPerCount");
+        p.inflight_beta    = d("scopeInflightBeta");
+        p.inflight_dead_time_ms = d("scopeInflightDeadTimeMs");
+        p.random_seed      = i("scopeRandomSeed");
+
+        ConfigBridge::instance().markDirty();
+    };
+
+    for (auto* sp : m_scopeDoubles)
+        connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [commitScope](double) { commitScope(); });
+    for (auto* sp : m_scopeInts)
+        connect(sp, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, [commitScope](int) { commitScope(); });
+
+    connect(copyBtn, &QPushButton::clicked, this, [this]() {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        const int src = m_scopeCopyCombo ? m_scopeCopyCombo->currentData().toInt() : -1;
+        if (ri < 0 || src < 0) return;
+
+        QString srcLabel;
+        QString selfLabel;
+        {
+            std::lock_guard<std::recursive_mutex> lk(configMutex);
+            const int n = static_cast<int>(config.hotkeys.size());
+            if (ri >= n || src >= n) return;
+            // ★ 复制的是【源热键的默认档】, 不是它的开镜档。
+            config.hotkeys[ri].ctl_scope = ctlParamsOf(config.hotkeys[src]);
+            srcLabel  = QString::fromUtf8(config.hotkeys[src].name.c_str());
+            selfLabel = QString::fromUtf8(config.hotkeys[ri].name.c_str());
+        }
+        ConfigBridge::instance().markDirty();
+        reloadProfileToUi();   // 把新值回填到控件
+
+        if (m_scopeCopyHint)
+            m_scopeCopyHint->setText(QString::fromUtf8(
+                u8"✅ 已把「%1」的默认瞄准控制器参数整套复制到「%2」的开镜档。")
+                .arg(srcLabel, selfLabel));
+    });
+
+    m_rightLayout->addWidget(card);
+
+    rebuildScopeCopyCombo();
+    applyScopeCtlVisibility();
+}
+
+// 开镜档参数是否生效: 「开镜期间」选了「用独立那一套」。
+// ★ 用置灰而不是隐藏 —— 用户还能看见自己填进去的值, 只是明确"现在不生效"。
+void AimSettingsPage::applyScopeCtlVisibility()
+{
+    const bool on = m_scopeModeCombo && m_scopeModeCombo->currentData().toInt() != 0;
+    for (auto* w : m_scopeParamRows)
+        if (w) w->setEnabled(on);
+    if (m_scopeOffHint) m_scopeOffHint->setVisible(!on);
+}
+
+// 一键复制的来源下拉框: 列出【所有】热键(带组名与按键), 不限于当前组 ——
+// 镜内参数往往是在另一个组的某个热键上调出来的。
+void AimSettingsPage::rebuildScopeCopyCombo()
+{
+    if (!m_scopeCopyCombo) return;
+
+    const int prev = m_scopeCopyCombo->currentData().isValid()
+                         ? m_scopeCopyCombo->currentData().toInt()
+                         : -1;
+
+    m_scopeCopyCombo->blockSignals(true);
+    m_scopeCopyCombo->clear();
+    bool prevKept = false;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        for (int i = 0; i < static_cast<int>(config.hotkeys.size()); ++i)
+        {
+            const auto& hp = config.hotkeys[i];
+            QString text = QString::fromUtf8(hp.group.c_str()) + QStringLiteral(" / ") +
+                           QString::fromUtf8(hp.name.c_str());
+            if (!hp.keys.empty() && hp.keys.front() != "None")
+                text += QStringLiteral("  [") +
+                        QString::fromUtf8(hp.keys.front().c_str()) + QStringLiteral("]");
+            m_scopeCopyCombo->addItem(text, i);
+            if (i == prev) prevKept = true;
+        }
+    }
+
+    if (prevKept)
+    {
+        const int k = m_scopeCopyCombo->findData(prev);
+        if (k >= 0) m_scopeCopyCombo->setCurrentIndex(k);
+    }
+    else
+    {
+        // 默认挑【不是本热键】的第一个 —— 一键复制的常见用法是"从别的热键搬"。
+        const int self = currentRuntimeIndex();
+        int pick = -1;
+        for (int i = 0; i < m_scopeCopyCombo->count(); ++i)
+        {
+            if (m_scopeCopyCombo->itemData(i).toInt() != self) { pick = i; break; }
+        }
+        if (pick < 0 && m_scopeCopyCombo->count() > 0) pick = 0;
+        if (pick >= 0) m_scopeCopyCombo->setCurrentIndex(pick);
+    }
+    m_scopeCopyCombo->blockSignals(false);
 }
 
 void AimSettingsPage::buildTrajectoryCard()
@@ -1574,6 +1909,32 @@ void AimSettingsPage::reloadProfileToUi()
             si("triggerScopeDelay",       hp.trigger_scope_delay_ms);
             si("triggerStopMs",           hp.trigger_stop_ms);
 
+            // 开镜期间: 跟随热键 / 用独立那一套。
+            if (auto* c = findChild<QComboBox*>("scopeCtlMode"))
+            {
+                const int k = c->findData(hp.scope_ctl_enabled != 0 ? 1 : 0);
+                c->setCurrentIndex(k >= 0 ? k : 0);
+            }
+            // 开镜档的 18 项 (与「瞄准控制器」卡同一组参数)。
+            sd("scopeKpX",             hp.ctl_scope.kp_x);
+            sd("scopeKpY",             hp.ctl_scope.kp_y);
+            sd("scopeKiX",             hp.ctl_scope.ki_x);
+            sd("scopeKiY",             hp.ctl_scope.ki_y);
+            sd("scopeKdX",             hp.ctl_scope.kd_x);
+            sd("scopeKdY",             hp.ctl_scope.kd_y);
+            sd("scopeTauUnwindSec",    hp.ctl_scope.tau_unwind_sec);
+            sd("scopeTauDerivSec",     hp.ctl_scope.tau_deriv_sec);
+            sd("scopeIMax",            hp.ctl_scope.i_max);
+            sd("scopePFullScalePx",    hp.ctl_scope.p_full_scale_px);
+            sd("scopePredictLeadMs",   hp.ctl_scope.predict_lead_ms);
+            sd("scopePredictMaxVelocityPxPerSec", hp.ctl_scope.predict_max_velocity_px_s);
+            sd("scopePredictMaxLeadRatio",        hp.ctl_scope.predict_max_lead_ratio);
+            sd("scopeKPxPerCount",     hp.ctl_scope.k_px_per_count);
+            sd("scopeInflightBeta",    hp.ctl_scope.inflight_beta);
+            sd("scopeInflightDeadTimeMs", hp.ctl_scope.inflight_dead_time_ms);
+            si("scopeMaxOutputCounts", hp.ctl_scope.max_output_counts);
+            si("scopeRandomSeed",      hp.ctl_scope.random_seed);
+
             if (auto* c = findChild<QComboBox*>("aimPathMode"))
             {
                 const int k = c->findData(hp.aim_path_mode);
@@ -1600,6 +1961,12 @@ void AimSettingsPage::reloadProfileToUi()
     }
 
     m_loading = false;
+
+    // 开镜档: 来源下拉框(所有热键) + 生效与否的置灰/提示。
+    // ★ 放在锁外: 两者都会自己取锁 (configMutex 是递归锁, 但没必要套着)。
+    rebuildScopeCopyCombo();
+    if (m_scopeCopyHint) m_scopeCopyHint->clear();
+    applyScopeCtlVisibility();
 }
 
 void AimSettingsPage::reloadFromRuntime()

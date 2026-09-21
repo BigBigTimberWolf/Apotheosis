@@ -221,6 +221,9 @@ void Config::writeDefaultsInPlace()
     small_target_area_frac = 0.012f;
     small_target_confidence = 0.06f;
     fixed_input_size = false;
+    engine_precision = "fp16";
+    int8_calib_dir = "calib";
+    int8_calib_images = 200;
 
     use_cuda_graph = true;
     use_spin_wait_sync = true;
@@ -330,6 +333,13 @@ bool Config::loadConfig(const std::string& filename)
     small_target_area_frac = static_cast<float>(get_double("", "small_target_area_frac", 0.012));
     small_target_confidence = static_cast<float>(get_double("", "small_target_confidence", 0.06));
     fixed_input_size = get_bool("", "fixed_input_size", false);
+    engine_precision = get_string("", "engine_precision", "fp16");
+    // 非法值不静默"替换成别的模式": 直接回落到 fp16, 并让上层能看出这是回落。
+    if (engine_precision != "fp16" && engine_precision != "int8")
+        engine_precision = "fp16";
+    int8_calib_dir = get_string("", "int8_calib_dir", "calib");
+    int8_calib_images = static_cast<int>(
+        std::clamp<long>(get_long("", "int8_calib_images", 200), 1L, 2000L));
 
     use_cuda_graph = get_bool("", "use_cuda_graph", true);
     use_spin_wait_sync = get_bool("", "use_spin_wait_sync", true);
@@ -570,6 +580,42 @@ bool Config::loadConfig(const std::string& filename)
             hk.ctl_random_seed =
                 static_cast<int>(get_double(sec, "ctl_random_seed", hk.ctl_random_seed));
 
+            // ── 开镜档 (自动开镜生效期间取代上面的默认档) ──────────────────
+            // ★ 缺键一律取结构体默认值(= 默认档的默认值), 所以老配置读进来
+            //   即使把开关打开, 也不会突然变成另一套参数。
+            hk.scope_ctl_enabled = static_cast<int>(
+                get_double(sec, "ctl_scope_enabled", hk.scope_ctl_enabled));
+            hk.ctl_scope.kp_x = get_double(sec, "ctl_scope_kp_x", hk.ctl_scope.kp_x);
+            hk.ctl_scope.kp_y = get_double(sec, "ctl_scope_kp_y", hk.ctl_scope.kp_y);
+            hk.ctl_scope.ki_x = get_double(sec, "ctl_scope_ki_x", hk.ctl_scope.ki_x);
+            hk.ctl_scope.ki_y = get_double(sec, "ctl_scope_ki_y", hk.ctl_scope.ki_y);
+            hk.ctl_scope.kd_x = get_double(sec, "ctl_scope_kd_x", hk.ctl_scope.kd_x);
+            hk.ctl_scope.kd_y = get_double(sec, "ctl_scope_kd_y", hk.ctl_scope.kd_y);
+            hk.ctl_scope.tau_unwind_sec =
+                get_double(sec, "ctl_scope_tau_unwind_sec", hk.ctl_scope.tau_unwind_sec);
+            hk.ctl_scope.tau_deriv_sec =
+                get_double(sec, "ctl_scope_tau_deriv_sec", hk.ctl_scope.tau_deriv_sec);
+            hk.ctl_scope.i_max = get_double(sec, "ctl_scope_i_max", hk.ctl_scope.i_max);
+            hk.ctl_scope.max_output_counts = static_cast<int>(get_double(
+                sec, "ctl_scope_max_output_counts", hk.ctl_scope.max_output_counts));
+            hk.ctl_scope.p_full_scale_px =
+                get_double(sec, "ctl_scope_p_full_scale_px", hk.ctl_scope.p_full_scale_px);
+            hk.ctl_scope.k_px_per_count =
+                get_double(sec, "ctl_scope_k_px_per_count", hk.ctl_scope.k_px_per_count);
+            hk.ctl_scope.inflight_beta =
+                get_double(sec, "ctl_scope_inflight_beta", hk.ctl_scope.inflight_beta);
+            hk.ctl_scope.inflight_dead_time_ms = get_double(
+                sec, "ctl_scope_inflight_dead_time_ms", hk.ctl_scope.inflight_dead_time_ms);
+            hk.ctl_scope.predict_lead_ms =
+                get_double(sec, "ctl_scope_predict_lead_ms", hk.ctl_scope.predict_lead_ms);
+            hk.ctl_scope.predict_max_velocity_px_s = get_double(
+                sec, "ctl_scope_predict_max_velocity_px_s",
+                hk.ctl_scope.predict_max_velocity_px_s);
+            hk.ctl_scope.predict_max_lead_ratio = get_double(
+                sec, "ctl_scope_predict_max_lead_ratio", hk.ctl_scope.predict_max_lead_ratio);
+            hk.ctl_scope.random_seed = static_cast<int>(
+                get_double(sec, "ctl_scope_random_seed", hk.ctl_scope.random_seed));
+
             hk.trigger_enabled = get_bool(sec, "trigger_enabled", false);
             hk.trigger_fire_delay = static_cast<int>(get_double(sec, "trigger_fire_delay", hk.trigger_fire_delay));
             hk.trigger_fire_duration = static_cast<int>(get_double(sec, "trigger_fire_duration", hk.trigger_fire_duration));
@@ -641,27 +687,18 @@ bool Config::loadConfig(const std::string& filename)
 
         hk.dynamic_fov_strength = std::clamp(hk.dynamic_fov_strength, 0.0f, 1.0f);
 
-        hk.ctl_kp_x = std::max(0.0, hk.ctl_kp_x);
-        hk.ctl_kp_y = std::max(0.0, hk.ctl_kp_y);
-        hk.ctl_ki_x = std::max(0.0, hk.ctl_ki_x);
-        hk.ctl_ki_y = std::max(0.0, hk.ctl_ki_y);
-        hk.ctl_kd_x = std::max(0.0, hk.ctl_kd_x);
-        hk.ctl_kd_y = std::max(0.0, hk.ctl_kd_y);
-        hk.ctl_tau_unwind_sec = std::clamp(hk.ctl_tau_unwind_sec, 1e-4, 10.0);
-        hk.ctl_tau_deriv_sec = std::clamp(hk.ctl_tau_deriv_sec, 0.0, 10.0);
-        hk.ctl_i_max = std::max(0.0, hk.ctl_i_max);
-        hk.ctl_p_full_scale_px = std::max(0.0, hk.ctl_p_full_scale_px);
-        hk.ctl_k_px_per_count = std::clamp(hk.ctl_k_px_per_count, 0.0, 10.0);
-        hk.ctl_inflight_beta = std::clamp(hk.ctl_inflight_beta, 0.0, 2.0);
-        hk.ctl_inflight_dead_time_ms = std::clamp(hk.ctl_inflight_dead_time_ms, 0.0, 1000.0);
-        // 在途补偿。三个参数都 >= 0，且 0 有明确含义（关闭/不限制），
-        // 所以只做下界与有限性保护；上界留宽，避免把用户合理的调参夹掉。
-        hk.ctl_predict_lead_ms = std::clamp(hk.ctl_predict_lead_ms, 0.0, 1000.0);
-        hk.ctl_predict_max_velocity_px_s =
-            std::clamp(hk.ctl_predict_max_velocity_px_s, 0.0, 100000.0);
-        hk.ctl_predict_max_lead_ratio =
-            std::clamp(hk.ctl_predict_max_lead_ratio, 0.0, 100.0);
-        hk.ctl_max_output_counts = std::clamp(hk.ctl_max_output_counts, 1, 1000);
+        // ── 瞄准控制器参数组 (默认档) ─────────────────────────────────────
+        // ★ 借道 AimCtlParams::clamp(): 默认档与开镜档共用【同一份】夹取规则,
+        //   不给同一组参数留两处会漂移的规则。
+        {
+            AimCtlParams p = ctlParamsOf(hk);
+            p.clamp();
+            applyCtlParams(hk, p);
+        }
+        // ── 瞄准控制器参数组 (开镜档) ─────────────────────────────────────
+        hk.ctl_scope.clamp();
+        hk.scope_ctl_enabled = std::clamp(hk.scope_ctl_enabled, 0, 1);
+
         hk.ctl_y_offset = std::clamp(hk.ctl_y_offset, 0.0, 1.0);
         hk.ctl_y_offset_max = std::clamp(hk.ctl_y_offset_max, 0.0, 1.0);
         if (hk.ctl_y_offset > hk.ctl_y_offset_max)
@@ -676,7 +713,6 @@ bool Config::loadConfig(const std::string& filename)
         hk.ctl_max_aspect = std::clamp(hk.ctl_max_aspect, 1e-3, 100.0);
         if (hk.ctl_min_aspect > hk.ctl_max_aspect)
             std::swap(hk.ctl_min_aspect, hk.ctl_max_aspect);
-        hk.ctl_random_seed = std::max(0, hk.ctl_random_seed);
 
         hk.trigger_fire_delay    = std::max(0, hk.trigger_fire_delay);
         hk.trigger_fire_duration = std::max(0, hk.trigger_fire_duration);
@@ -792,7 +828,11 @@ bool Config::saveConfig(const std::string& filename)
         << std::setprecision(2)
         << "small_target_confidence = " << small_target_confidence << "\n"
         << std::setprecision(0)
-        << "fixed_input_size = " << to_bool_str(fixed_input_size) << "\n\n";
+        << "fixed_input_size = " << to_bool_str(fixed_input_size) << "\n"
+        << "# 引擎精度: fp16 | int8  (int8 需要校准图集; 改完必须删旧 .engine)\n"
+        << "engine_precision = " << engine_precision << "\n"
+        << "int8_calib_dir = " << int8_calib_dir << "\n"
+        << "int8_calib_images = " << int8_calib_images << "\n\n";
 
     file << "# CUDA / system\n"
         << "use_cuda_graph = " << to_bool_str(use_cuda_graph) << "\n"
@@ -904,6 +944,32 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_min_aspect = "         << hk.ctl_min_aspect << "\n"
              << "ctl_max_aspect = "         << hk.ctl_max_aspect << "\n"
              << "ctl_random_seed = "        << hk.ctl_random_seed << "\n";
+
+        // ── 开镜档 (自动开镜生效期间取代上面的默认档) ────────────────────
+        // ★ 键名 = 默认档的键名前缀 "ctl_scope_", 一一对应, 方便手改与对照。
+        file << std::fixed << std::setprecision(4)
+             << "ctl_scope_enabled = "          << hk.scope_ctl_enabled << "\n"
+             << "ctl_scope_kp_x = "             << hk.ctl_scope.kp_x << "\n"
+             << "ctl_scope_kp_y = "             << hk.ctl_scope.kp_y << "\n"
+             << "ctl_scope_ki_x = "             << hk.ctl_scope.ki_x << "\n"
+             << "ctl_scope_ki_y = "             << hk.ctl_scope.ki_y << "\n"
+             << "ctl_scope_kd_x = "             << hk.ctl_scope.kd_x << "\n"
+             << "ctl_scope_kd_y = "             << hk.ctl_scope.kd_y << "\n"
+             << "ctl_scope_tau_unwind_sec = "   << hk.ctl_scope.tau_unwind_sec << "\n"
+             << "ctl_scope_tau_deriv_sec = "    << hk.ctl_scope.tau_deriv_sec << "\n"
+             << "ctl_scope_i_max = "            << hk.ctl_scope.i_max << "\n"
+             << "ctl_scope_p_full_scale_px = "  << hk.ctl_scope.p_full_scale_px << "\n"
+             << "ctl_scope_k_px_per_count = "   << hk.ctl_scope.k_px_per_count << "\n"
+             << "ctl_scope_inflight_beta = "    << hk.ctl_scope.inflight_beta << "\n"
+             << "ctl_scope_inflight_dead_time_ms = "
+             << hk.ctl_scope.inflight_dead_time_ms << "\n"
+             << "ctl_scope_predict_lead_ms = "  << hk.ctl_scope.predict_lead_ms << "\n"
+             << "ctl_scope_predict_max_velocity_px_s = "
+             << hk.ctl_scope.predict_max_velocity_px_s << "\n"
+             << "ctl_scope_predict_max_lead_ratio = "
+             << hk.ctl_scope.predict_max_lead_ratio << "\n"
+             << "ctl_scope_max_output_counts = " << hk.ctl_scope.max_output_counts << "\n"
+             << "ctl_scope_random_seed = "       << hk.ctl_scope.random_seed << "\n";
 
         file << "trigger_enabled = "        << to_bool_str(hk.trigger_enabled) << "\n"
              << "trigger_fire_delay = "     << hk.trigger_fire_delay << "\n"

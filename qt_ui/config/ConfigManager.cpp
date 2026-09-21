@@ -230,6 +230,27 @@ void ConfigManager::setAiModel(const QString& v) {
     emit configChanged();
 }
 
+QString ConfigManager::enginePrecision() const {
+    const QString v = m_settings->value("AI/engine_precision", "fp16").toString();
+    // 非法值一律回落到 fp16, 与 Config::loadConfig 里的行为保持一致。
+    return (v == QLatin1String("int8")) ? v : QStringLiteral("fp16");
+}
+
+void ConfigManager::setEnginePrecision(const QString& v) {
+    m_settings->setValue("AI/engine_precision",
+                         (v == QLatin1String("int8")) ? v : QStringLiteral("fp16"));
+    emit configChanged();
+}
+
+QString ConfigManager::int8CalibDir() const {
+    return m_settings->value("AI/int8_calib_dir", "calib").toString();
+}
+
+void ConfigManager::setInt8CalibDir(const QString& v) {
+    m_settings->setValue("AI/int8_calib_dir", v);
+    emit configChanged();
+}
+
 float ConfigManager::confidenceThreshold() const {
     return m_settings->value("AI/confidence_threshold", 0.15).toFloat();
 }

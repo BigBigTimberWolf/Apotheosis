@@ -80,8 +80,11 @@ void ConfigBridge::syncToRuntime() {
     config.kmbox_net_port     = qs(cm.kmboxNetPort());
     config.kmbox_net_uuid     = qs(cm.kmboxNetUuid());
     std::string oldModel = config.ai_model;
+    const std::string oldPrecision = config.engine_precision;
     config.backend              = "TRT";
     config.ai_model             = qs(cm.aiModel());
+    config.engine_precision     = qs(cm.enginePrecision());
+    config.int8_calib_dir       = qs(cm.int8CalibDir());
     config.confidence_threshold = cm.confidenceThreshold();
     config.nms_threshold        = cm.nmsThreshold();
     config.max_detections       = kFixedMaxDetections;
@@ -146,7 +149,8 @@ void ConfigBridge::syncToRuntime() {
         detection_resolution_changed = true;
     if (config.capture_fps != oldCaptureFps)
         capture_fps_changed = true;
-    if (config.ai_model != oldModel) {
+    if (config.ai_model != oldModel || config.engine_precision != oldPrecision) {
+        // 精度变了也要重建引擎 —— .engine 是按精度烘死的, 只换模型名不够。
         detector_model_changed = true;
         std::string model_path = "models/" + config.ai_model;
         runtime::preload_model_metadata(model_path, false);
@@ -186,6 +190,8 @@ void ConfigBridge::syncFromRuntime()
     cm.setKmboxNetPort(qstr(config.kmbox_net_port));
     cm.setKmboxNetUuid(qstr(config.kmbox_net_uuid));
     cm.setAiModel(qstr(config.ai_model));
+    cm.setEnginePrecision(qstr(config.engine_precision));
+    cm.setInt8CalibDir(qstr(config.int8_calib_dir));
     cm.setConfidenceThreshold(config.confidence_threshold);
     cm.setNmsThreshold(config.nms_threshold);
     cm.setMaxDetections(kFixedMaxDetections);

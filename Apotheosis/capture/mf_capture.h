@@ -163,10 +163,16 @@ private:
 
     struct DecodeJob { std::vector<uint8_t> jpeg; uint64_t seq = 0; int64_t capture_ns = 0; };
     static constexpr int DECODE_WORKERS = 2;
-    static constexpr int MAX_JOB_QUEUE = 3;
+    // 深度必须 >= worker 数, 否则 worker 会空转; 但每加一层排队就多一份延迟
+    // (实测: 3 -> 202fps/12.2ms, 6 -> 221fps/18.8ms)。2 个 worker 的合成耗时约
+    // 3.0ms/帧 < 240fps 的 4.17ms 预算, 所以 4 层足够吸收抖动而不白付延迟。
+    static constexpr int MAX_JOB_QUEUE = 4;
     std::mutex job_mutex_;
     std::condition_variable job_cv_;
     std::queue<DecodeJob> job_queue_;
+    // JPEG 缓冲回收池: 以前每帧 assign() 都重新 malloc ~1MB, 240fps 下是纯粹的
+    // 分配器/缺页开销, 而且这笔开销压在读循环线程上。
+    std::vector<std::vector<uint8_t>> job_free_buffers_;
     std::vector<std::thread> decode_workers_;
     std::atomic<bool> workers_stop_{ false };
     uint64_t job_seq_{ 0 };

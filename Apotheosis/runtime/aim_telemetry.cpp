@@ -67,4 +67,30 @@ size_t ReplayBuffer::size() const
     return frames_.size();
 }
 
+// ── 预览叠加状态 ────────────────────────────────────────────────────────────
+//
+// ★ 用一把小锁而不是无锁双缓冲: 写方是瞄准线程(每拍一次)、读方是预览线程
+//   (~60Hz), 两边临界区都只是几十字节的拷贝 —— 锁的开销远小于每拍本来就要做的
+//   检测框搬运。无锁在这里是没必要的复杂度。
+namespace
+{
+std::mutex g_overlay_mutex;
+AimOverlayState g_overlay;
+}
+
+void publishAimOverlay(const AimOverlayState& state)
+{
+    std::lock_guard<std::mutex> lk(g_overlay_mutex);
+    const uint64_t seq = g_overlay.seq;
+    g_overlay = state;
+    g_overlay.seq = seq + 1;
+    g_overlay.ts = std::chrono::steady_clock::now();
+}
+
+AimOverlayState readAimOverlay()
+{
+    std::lock_guard<std::mutex> lk(g_overlay_mutex);
+    return g_overlay;
+}
+
 }

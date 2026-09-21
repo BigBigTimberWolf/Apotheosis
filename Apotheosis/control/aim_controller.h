@@ -55,6 +55,17 @@ struct ControlOutput
     Box targetBox{};
     bool hasTarget = false;
     int targetId = -1;
+
+    // ── 供预览窗可视化「稳定之后是什么样」用的三样东西 ────────────────────
+    //
+    // ★ 稳定器本身【不改变框】(它只判定"还算不算同一个目标"并放行/丢弃),
+    //   真正把位置抖动压下去的是它下游的 α-β 滤波器。所以"稳定后的效果"=
+    //   稳定器放行的框 (targetBox) + 滤波后的中心 (filteredCenter);
+    //   把两者画在一起, 就能直接看见抖动被压掉了多少。
+    Vec2 filteredCenter{};                                  // α-β 滤波后的目标中心
+    StabilizerVerdict stabVerdict = StabilizerVerdict::NoHistory;  // 本拍稳定器判定
+    int targetClassId = -1;                                 // 锁定目标的类别 id
+
     enum class IdleReason
     {
         None = 0,

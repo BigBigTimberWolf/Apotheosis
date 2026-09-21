@@ -358,6 +358,153 @@ int main()
               "旧配置缺键盘波特率 -> 默认 6000000");
     }
 
+    // 开镜档: 自动开镜生效期间取代「瞄准控制器」的那一整组参数。
+    //
+    // 这里守住三件事:
+    //   1) 老配置(没有这些键)读进来 = 开关关、值与默认档的默认值一致
+    //      —— 打开开关也不会突然变成另一套参数;
+    //   2) 写了这些键 ⇒ 原样读回, 往返不丢;
+    //   3) 两档共用同一份夹取规则 (默认档现在借道 AimCtlParams::clamp())。
+    std::printf("\n[7] ★★ 开镜档 (自动开镜期间取代瞄准控制器参数)\n");
+    {
+        // 1) 缺键 ⇒ 开关关 + 默认值
+        const std::string p0 = write_config("scope_missing.ini");
+        Config c0;
+        check(c0.loadConfig(p0), "缺开镜档键的配置能加载");
+        if (!c0.hotkeys.empty())
+        {
+            const auto& hp = c0.hotkeys[0];
+            check(hp.scope_ctl_enabled == 0, "★★ 缺键 ⇒ 开镜档开关默认 0 (跟随热键)");
+            check(hp.ctl_scope.kp_x > 34.9 && hp.ctl_scope.kp_x < 35.1,
+                  "★★ 缺键 ⇒ 开镜档 kp_x 默认 35 (与默认档一致)");
+            check(hp.ctl_scope.kp_x == hp.ctl_kp_x,
+                  "★★ 缺键 ⇒ 开镜档与默认档逐位一致 (打开开关也不会突变)");
+            check(hp.ctl_scope.max_output_counts == hp.ctl_max_output_counts,
+                  "★★ 缺键 ⇒ 单拍限幅两档一致");
+            check(hp.ctl_scope.random_seed == hp.ctl_random_seed,
+                  "★★ 缺键 ⇒ 随机种子两档一致");
+            check(hp.ctl_scope.predict_lead_ms == hp.ctl_predict_lead_ms,
+                  "★★ 缺键 ⇒ 预测提前时间两档一致");
+        }
+
+        // 2) 写了就原样读回, 且与默认档互不干扰
+        const std::string p1 = write_config("scope.ini",
+            "ctl_kp_x = 40.0\n"
+            "ctl_max_output_counts = 180\n"
+            "ctl_scope_enabled = 1\n"
+            "ctl_scope_kp_x = 6.5\n"
+            "ctl_scope_kp_y = 7.5\n"
+            "ctl_scope_k_px_per_count = 0.211\n"
+            "ctl_scope_predict_lead_ms = 15\n"
+            "ctl_scope_predict_max_velocity_px_s = 800\n"
+            "ctl_scope_predict_max_lead_ratio = 0.25\n"
+            "ctl_scope_max_output_counts = 45\n"
+            "ctl_scope_random_seed = 99\n"
+            "ctl_scope_inflight_dead_time_ms = 33\n"
+            "ctl_scope_tau_unwind_sec = 0.021\n");
+
+        Config c1;
+        check(c1.loadConfig(p1), "开镜档配置能加载");
+        if (!c1.hotkeys.empty())
+        {
+            const auto& hp = c1.hotkeys[0];
+            check(hp.scope_ctl_enabled == 1, "★★ ctl_scope_enabled 读到 1");
+            check(hp.ctl_scope.kp_x > 6.49 && hp.ctl_scope.kp_x < 6.51,
+                  "★★ ctl_scope_kp_x 读到 6.5");
+            check(hp.ctl_scope.kp_y > 7.49 && hp.ctl_scope.kp_y < 7.51,
+                  "★★ ctl_scope_kp_y 读到 7.5");
+            check(hp.ctl_scope.k_px_per_count > 0.210 && hp.ctl_scope.k_px_per_count < 0.212,
+                  "★★ ctl_scope_k_px_per_count 读到 0.211");
+            check(hp.ctl_scope.predict_lead_ms > 14.9 && hp.ctl_scope.predict_lead_ms < 15.1,
+                  "★★ ctl_scope_predict_lead_ms 读到 15");
+            check(hp.ctl_scope.predict_max_velocity_px_s > 799.9 &&
+                  hp.ctl_scope.predict_max_velocity_px_s < 800.1,
+                  "★★ ctl_scope_predict_max_velocity_px_s 读到 800");
+            check(hp.ctl_scope.predict_max_lead_ratio > 0.249 &&
+                  hp.ctl_scope.predict_max_lead_ratio < 0.251,
+                  "★★ ctl_scope_predict_max_lead_ratio 读到 0.25");
+            check(hp.ctl_scope.max_output_counts == 45, "★★ ctl_scope_max_output_counts 读到 45");
+            check(hp.ctl_scope.random_seed == 99, "★★ ctl_scope_random_seed 读到 99");
+            check(hp.ctl_scope.inflight_dead_time_ms > 32.9 &&
+                  hp.ctl_scope.inflight_dead_time_ms < 33.1,
+                  "★★ ctl_scope_inflight_dead_time_ms 读到 33");
+            check(hp.ctl_scope.tau_unwind_sec > 0.0209 && hp.ctl_scope.tau_unwind_sec < 0.0211,
+                  "★★ ctl_scope_tau_unwind_sec 读到 0.021");
+
+            // ★ 两档必须互不干扰: 改开镜档不能动到默认档
+            check(hp.ctl_kp_x > 39.9 && hp.ctl_kp_x < 40.1,
+                  "★★ 开镜档的键没有污染默认档 (ctl_kp_x 仍是 40)");
+            check(hp.ctl_max_output_counts == 180,
+                  "★★ 开镜档的键没有污染默认档 (限幅仍是 180)");
+        }
+
+        // 3) 往返: 存 → 读, 开镜档必须原样回来
+        const std::string p2 = "scope_roundtrip.ini";
+        check(c1.saveConfig(p2), "开镜档配置能存档");
+        Config c2;
+        check(c2.loadConfig(p2), "存档能重新加载");
+        if (!c2.hotkeys.empty())
+        {
+            const auto& hp = c2.hotkeys[0];
+            check(hp.scope_ctl_enabled == 1, "往返: 开关仍是 1");
+            check(hp.ctl_scope.kp_x > 6.49 && hp.ctl_scope.kp_x < 6.51,
+                  "往返: 开镜档 kp_x 仍是 6.5");
+            check(hp.ctl_scope.max_output_counts == 45, "往返: 开镜档限幅仍是 45");
+            check(hp.ctl_scope.random_seed == 99, "往返: 开镜档种子仍是 99");
+            check(hp.ctl_kp_x > 39.9 && hp.ctl_kp_x < 40.1, "往返: 默认档 kp_x 仍是 40");
+        }
+
+        // 4) 两档共用同一份夹取规则
+        const std::string p3 = write_config("scope_clamp.ini",
+            "ctl_kp_x = -5\n"
+            "ctl_max_output_counts = 0\n"
+            "ctl_tau_unwind_sec = 0\n"
+            "ctl_random_seed = -7\n"
+            "ctl_scope_enabled = 9\n"
+            "ctl_scope_kp_x = -5\n"
+            "ctl_scope_max_output_counts = 0\n"
+            "ctl_scope_tau_unwind_sec = 0\n"
+            "ctl_scope_random_seed = -7\n"
+            "ctl_scope_inflight_beta = 9\n"
+            "ctl_scope_predict_lead_ms = 99999\n");
+
+        Config c3;
+        check(c3.loadConfig(p3), "越界开镜档配置能加载");
+        if (!c3.hotkeys.empty())
+        {
+            const auto& hp = c3.hotkeys[0];
+            check(hp.scope_ctl_enabled == 1, "★★ 越界的开关 9 被夹成 1");
+            check(hp.ctl_scope.kp_x >= 0.0, "★★ 开镜档负 kp 被夹到 >= 0");
+            check(hp.ctl_scope.max_output_counts == 1, "★★ 开镜档限幅 0 被夹到 1");
+            check(hp.ctl_scope.tau_unwind_sec > 0.0, "★★ 开镜档 tau_unwind 0 被夹到 1e-4");
+            check(hp.ctl_scope.random_seed == 0, "★★ 开镜档负种子被夹到 0");
+            check(hp.ctl_scope.inflight_beta <= 2.0, "★★ 开镜档 β 9 被夹到 2.0");
+            check(hp.ctl_scope.predict_lead_ms <= 1000.0, "★★ 开镜档提前时间 99999 被夹到 1000");
+            // 默认档在同一份规则下被夹 (改动前是手写的一组 clamp)
+            check(hp.ctl_kp_x >= 0.0, "★★ 默认档负 kp 同样被夹到 >= 0");
+            check(hp.ctl_max_output_counts == 1, "★★ 默认档限幅 0 同样被夹到 1");
+            check(hp.ctl_tau_unwind_sec > 0.0, "★★ 默认档 tau_unwind 0 同样被夹到 1e-4");
+            check(hp.ctl_random_seed == 0, "★★ 默认档负种子同样被夹到 0");
+        }
+
+        // 5) 组外的参数不随开镜档走 (只有一份, 不受开关影响)
+        const std::string p4 = write_config("scope_off.ini",
+            "ctl_y_offset = 0.31\n"
+            "ctl_hysteresis_ratio = 2.4\n"
+            "ctl_scope_enabled = 1\n"
+            "ctl_scope_kp_x = 6.5\n");
+        Config c4;
+        check(c4.loadConfig(p4), "组外参数配置能加载");
+        if (!c4.hotkeys.empty())
+        {
+            const auto& hp = c4.hotkeys[0];
+            check(hp.ctl_y_offset > 0.30 && hp.ctl_y_offset < 0.32,
+                  "★ 瞄点 Y 只有一份, 不随开镜档走");
+            check(hp.ctl_hysteresis_ratio > 2.39 && hp.ctl_hysteresis_ratio < 2.41,
+                  "★ 选靶滞回只有一份, 不随开镜档走");
+        }
+    }
+
     std::printf("\n=== %d 项失败 ===\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

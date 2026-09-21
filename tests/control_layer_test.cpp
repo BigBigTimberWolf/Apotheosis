@@ -907,6 +907,100 @@ static void testPerClassConfGate()
     }
 }
 
+// ── ★★ 预览叠加拿的那三样东西 (稳定之后的框 / 中心 / 判定) ──────────────────
+//
+// 预览窗现在画的是"稳定之后"的结果: 稳定器放行的框 + α-β 滤波后的中心 + 瞄点 +
+// 稳定器判定。这些值全部来自 ControlOutput —— 所以这里钉住它们【真的被填了】,
+// 而且语义正确。不钉的话最容易出的错是: 字段加了但忘了赋值, 预览里恒为 (0,0),
+// 看上去像"稳定器没工作"。
+static void testOverlayOutputs()
+{
+    section("★★ ControlOutput 的预览叠加字段 (稳定后的中心 / 判定 / 类别)");
+
+    ControllerConfig cfg;
+    cfg.buckets.byClassId.assign(8, Bucket::Aim);   // 类别 3 也要在瞄准桶里
+    cfg.selector.hysteresisRatio = 1.0;
+    cfg.stabilizer.matchCenterRatio = 0.5;
+    cfg.stabilizer.areaRatioTol = 2.0;
+    cfg.stabilizer.kSnapMult = 1.15;
+    cfg.stabilizer.minAspect = 0.2;
+    cfg.stabilizer.maxAspect = 5.0;
+    cfg.aimPoint.yOffset = 0.5;
+    cfg.aimPoint.yOffsetMax = 0.5;
+    cfg.pid.kpX = 35.0; cfg.pid.kpY = 35.0;
+
+    const double dt = 1.0 / 120.0;
+
+    AimController ac;
+    ac.setConfig(cfg);
+
+    ControlInput in;
+    in.dtSec = dt;
+    in.cross = Vec2{ 320, 240 };
+
+    // 目标框中心 (400, 340), 类别 3
+    Candidate c; c.box = Box{ 380, 300, 40, 80 }; c.classId = 3; c.confidence = 0.9;
+    in.candidates = { c };
+    in.frameIndex = 0;
+
+    // 第一帧: 没有历史 ⇒ 判定必须是 NoHistory, 且滤波器被直接采纳
+    const ControlOutput first = ac.update(in);
+    check(first.engaged, "首帧锁定");
+    check(first.stabVerdict == StabilizerVerdict::NoHistory,
+          "★★ 首帧判定 = NoHistory (预览据此标 NEW)");
+    check(first.targetClassId == 3, "★★ targetClassId 搬了 (预览用来显示 #3)");
+    checkNear(first.filteredCenter.x, 400.0, 1.0,
+              "★★ filteredCenter.x ≈ 框中心 400 (稳定后的位置, 不是 0)");
+    checkNear(first.filteredCenter.y, 340.0, 1.0, "★★ filteredCenter.y ≈ 340");
+
+    // 同一个框的第二帧: 应判 Ok (同一个目标)
+    in.frameIndex = 1;
+    const ControlOutput second = ac.update(in);
+    check(second.stabVerdict == StabilizerVerdict::Ok,
+          "★★ 同一个框的下一帧判定 = Ok (预览标 OK)");
+    checkNear(second.filteredCenter.x, 400.0, 1.0, "稳定后中心仍在 400");
+
+    // 目标在框内小幅抖动 ±6px(约 0.07 个对角线): 稳定器仍认同一个目标,
+    // 而【稳定后的中心】必须比原始中心更靠近真值 —— 这就是预览要展示的效果。
+    in.candidates = { [] { Candidate j; j.box = Box{ 386, 300, 40, 80 };
+                           j.classId = 3; j.confidence = 0.9; return j; }() };
+    in.frameIndex = 2;
+    const ControlOutput jitter = ac.update(in);
+    check(jitter.stabVerdict == StabilizerVerdict::Ok, "★ 小幅抖动仍是同一个目标");
+    const double rawCx = jitter.targetBox.x + jitter.targetBox.w * 0.5;   // 406
+    check(std::abs(jitter.filteredCenter.x - 400.0) <
+              std::abs(rawCx - 400.0) - 0.5,
+          "★★ 抖动被压掉: 滤波中心比原始框中心更靠近上一帧 (稳定器+滤波的实际效果)");
+
+    // 瞬移: 判定必须变 Snap (预览标 SNAP 并换色)
+    in.candidates = { [] { Candidate t; t.box = Box{ 900, 900, 40, 80 };
+                           t.classId = 3; t.confidence = 0.9; return t; }() };
+    in.frameIndex = 3;
+    const ControlOutput snap = ac.update(in);
+    check(snap.stabVerdict == StabilizerVerdict::Snap,
+          "★★ 瞬移判定 = Snap (预览据此换色, 也说明滤波/PID 被复位)");
+    checkNear(snap.filteredCenter.x, 920.0, 1.0,
+              "★ 复位后滤波中心直接采纳新位置 920");
+
+    // 被稳定器丢掉(宽高比离谱): 不 engage ⇒ 预览要能说出原因
+    {
+        AimController ac2;
+        ac2.setConfig(cfg);
+        ControlInput in2;
+        in2.dtSec = dt;
+        in2.cross = Vec2{ 320, 240 };
+        Candidate weird; weird.box = Box{ 300, 200, 800, 20 };
+        weird.classId = 3; weird.confidence = 0.9;
+        in2.candidates = { weird };
+        const ControlOutput rej = ac2.update(in2);
+        check(!rej.engaged, "★ 宽高比离谱 ⇒ 不 engage");
+        check(rej.idleReason == ControlOutput::IdleReason::RejectedByStabilizer,
+              "★★ idleReason = RejectedByStabilizer (预览据此打 STAB-REJECTED)");
+        check(rej.stabVerdict == StabilizerVerdict::Rejected,
+              "★★ 判定也如实标成 Rejected");
+    }
+}
+
 int main()
 {
     std::printf("=== 控制器层逻辑回归 ===\n");
@@ -919,6 +1013,7 @@ int main()
     testFullChain();
     testPerClassAimPoint();
     testPerClassConfGate();
+    testOverlayOutputs();
 
     std::printf("\n%d 项断言, 失败 %d\n", g_checks, g_failures);
     if (g_failures == 0)

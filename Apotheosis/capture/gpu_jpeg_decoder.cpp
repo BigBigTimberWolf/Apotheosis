@@ -50,7 +50,8 @@ bool GpuJpegDecoder::initRoi()
     if (roi_initialized_) return true;
     if (!initialized_) return false;
 
-    nvjpegStatus_t st = nvjpegDecoderCreate(handle_, NVJPEG_BACKEND_DEFAULT, &roi_decoder_);
+    // 必须与 handle 用同一个后端: GPU_HYBRID 时熵解码走 GPU, DEFAULT 时走 CPU。
+    nvjpegStatus_t st = nvjpegDecoderCreate(handle_, backend_, &roi_decoder_);
     if (st != NVJPEG_STATUS_SUCCESS) { cleanupRoi(); return false; }
 
     st = nvjpegDecodeParamsCreate(handle_, &roi_params_);
@@ -148,10 +149,28 @@ bool GpuJpegDecoder::init()
 {
     if (initialized_) return true;
 
-    nvjpegStatus_t st = nvjpegCreateSimple(&handle_);
+    // ★ 后端选择: 优先 GPU_HYBRID (GPU 辅助霍夫曼解码)。
+    //   实测 (build\diag\live_frame.jpg, 924KB 1080p baseline, split+ROI 256x256):
+    //     DEFAULT   : host 8.06 ms/帧, host+sync 8.25 ms  (121 fps)
+    //     GPU_HYBRID: host 6.09 ms/帧, host+sync 6.69 ms  (150 fps)  ← 省 24%
+    //   两者输出校验和完全一致。本机只有 4 核且要和 TensorRT 推理抢核, 所以
+    //   "省 CPU" 和 "提吞吐" 在这里是同一件事。
+    //   不可用时静默降级, 保证换 GPU/驱动不会炸。
+    nvjpegStatus_t st = nvjpegCreateEx(NVJPEG_BACKEND_GPU_HYBRID, nullptr, nullptr, 0, &handle_);
+    if (st == NVJPEG_STATUS_SUCCESS)
+    {
+        backend_ = NVJPEG_BACKEND_GPU_HYBRID;
+    }
+    else
+    {
+        std::cerr << "[GpuJpegDecoder] GPU_HYBRID backend unavailable (status=" << st
+                  << "); falling back to DEFAULT." << std::endl;
+        st = nvjpegCreateSimple(&handle_);
+        backend_ = NVJPEG_BACKEND_DEFAULT;
+    }
     if (st != NVJPEG_STATUS_SUCCESS)
     {
-        std::cerr << "[GpuJpegDecoder] nvjpegCreateSimple failed: " << st << std::endl;
+        std::cerr << "[GpuJpegDecoder] nvjpegCreate failed: " << st << std::endl;
         cleanup();
         return false;
     }

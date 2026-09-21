@@ -95,3 +95,17 @@ out/
 /.codex/
 /Testing/
 /pelican_bicycle.svg
+
+# ── 固件 (firmware/) ──────────────────────────────────────────────────────
+# PlatformIO 工具链: ~4.8GB, 属于本机环境而非源码, 绝不入库。
+/firmware/piocore/
+/firmware/.piopkgs/
+/firmware/.pio-core/
+/firmware/**/.pio/
+# Python 缓存
+__pycache__/
+*.pyc
+# 构建中间产物 (merged_firmware/*.bin 是成品, 刻意保留)
+*.o
+*.obj
+*.d

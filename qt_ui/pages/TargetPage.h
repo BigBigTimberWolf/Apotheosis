@@ -22,7 +22,6 @@ public slots:
 
 private:
     void rebuildTable();
-    void buildStabilizerCard(QVBoxLayout* layout);
     static size_t computeFilterFingerprint();
 
     QLabel* m_statusLabel{};
