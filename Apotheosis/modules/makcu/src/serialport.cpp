@@ -452,6 +452,18 @@ namespace makcu {
             }
             m_pendingCommands.erase(it);
         }
+        else {
+            // ★ 没有待处理命令 -> 这是设备【主动】打印的一行。
+            //
+            // 以前这里直接丢掉。但设备侧的关键故障都是这么报出来的:
+            //   · 固件 panic 重启: "Guru Meditation Error ... Core 0 panic'ed"
+            //     + 回溯 + "rst:0xc (RTC_SW_CPU_RST)" —— 被控机看到"鼠标弹出,
+            //     过几秒自己回来"就是它;
+            //   · "Serial0/Serial1 ring buffer overflow detected." —— 缓冲被打爆;
+            //   · "[USB] 握手超时(...)" / "re-enumerating" 等状态。
+            // 丢掉这些行等于把唯一的现场证据扔了, 排查只能靠猜。所以这里打出来。
+            std::cout << "[dev] " << content << std::endl;
+        }
     }
 
     void SerialPort::cleanupTimedOutCommands() {

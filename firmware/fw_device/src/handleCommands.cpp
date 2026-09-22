@@ -282,8 +282,25 @@ void handleKmMoveCommand(const char *command) {
     const bool isReal = (g_cmd_source.load() == SRC_REAL);
 
     if (isReal) {
-        moveXReal.fetch_add(x, std::memory_order_relaxed);
-        moveYReal.fetch_add(y, std::memory_order_relaxed);
+        // ★ 累加值必须封顶, 否则会滚雪球。
+        //
+        // 端点抖动 / USB 主机一时不收报告时, mouseMoveTask 消费不过来, 而真鼠标
+        // (常见 1000Hz) 仍在不停累加 —— 积压会指数式膨胀, 最终让 handleMove 的
+        // 分片循环转成百上千次, 把 IDLE 任务饿死 -> Task WDT -> 固件 panic 重启
+        // (被控机看到"鼠标弹出, 过几秒自己回来")。
+        //
+        // 上限取 ±2048 counts: 远超"正常一两拍内该补的量", 又能保证单次
+        // handleMove 最多 17 帧就发完, 不会出现长循环。
+        constexpr int kMaxPendingPerAxis = 2048;
+
+        int nx = moveXReal.load(std::memory_order_relaxed) + x;
+        int ny = moveYReal.load(std::memory_order_relaxed) + y;
+        if (nx >  kMaxPendingPerAxis) nx =  kMaxPendingPerAxis;
+        if (nx < -kMaxPendingPerAxis) nx = -kMaxPendingPerAxis;
+        if (ny >  kMaxPendingPerAxis) ny =  kMaxPendingPerAxis;
+        if (ny < -kMaxPendingPerAxis) ny = -kMaxPendingPerAxis;
+        moveXReal.store(nx, std::memory_order_relaxed);
+        moveYReal.store(ny, std::memory_order_relaxed);
     } else {
         std::lock_guard<std::mutex> lock(commandMutex);
         moveXInj = x;
@@ -562,13 +579,30 @@ void handleKmWheel(const char *command) {
 // 大位移拆分: kbdUsbSendMouse 每帧只吃 int8 (-127..127); 超出部分逐帧发。
 // 若 tud_hid_n_ready 返回 false, vTaskDelay(1ms) 让出 CPU 让 USB 端点恢复;
 // 上限 100 次重试(≈100ms) 后放弃, 剩余位移丢弃 —— 保护任务不被无限阻塞。
-// 这是与官方 Arduino Mouse.move(内部无超时) 相比的关键差别: 避免因为主机
-// USB 短暂 stall 导致 Serial 任务一起被拖垮。
+//
+// ★★ 2026-09-22 修复: 这个循环原来会【饿死 IDLE 任务, 触发 Task Watchdog,
+//    导致固件 panic 重启】—— 被控机会看到"鼠标突然弹出, 过几秒又自己回来"。
+//
+//    原因: 成功路径把 retries 归零, 所以只要端点一直是 ready, 循环就永不停,
+//    而且【一次都不 vTaskDelay】。本任务优先级 3, IDLE 是 0 —— IDLE 永远拿不到
+//    CPU -> ESP32 的 Task WDT 超时 -> panic -> 重启(重启要 1.1s+ 才重挂 USB,
+//    正好对应"过一会自己恢复")。
+//
+//    平时 x 只有 ±127 不足以出事; 但真鼠标位移改成【累加】之后(见 moveXReal),
+//    一旦累加值变大(端点抖动时很容易滚雪球), 循环次数就线性暴涨 -> 必炸。
+//
+//    双重防护:
+//      1) 每 kYieldEvery 帧主动让出一次 CPU -> IDLE 能跑, WDT 不会超时;
+//      2) 总迭代数硬上限 kMaxChunks -> 再怎么异常也不会转不出来。
 // ---------------------------------------------------------------------------
-
 void handleMove(int x, int y) {
-    int retries = 0;
-    while ((x != 0 || y != 0) && retries < 100) {
+    constexpr int kMaxChunks   = 512;   // 512 * 127 ≈ 65000 counts, 远超正常需要
+    constexpr int kYieldEvery  = 16;    // 每 16 帧让出一次
+
+    int retries     = 0;
+    int totalChunks = 0;
+
+    while ((x != 0 || y != 0) && retries < 100 && totalChunks < kMaxChunks) {
         int8_t sx = (x > 127) ? 127 : ((x < -127) ? -127 : (int8_t)x);
         int8_t sy = (y > 127) ? 127 : ((y < -127) ? -127 : (int8_t)y);
         uint8_t buttons = s_mouseBtnState.load();
@@ -582,6 +616,11 @@ void handleMove(int x, int y) {
         mouseX = (int16_t)(mouseX + sx);
         mouseY = (int16_t)(mouseY + sy);
         retries = 0;
+
+        // 让出 CPU: 否则高优先级任务会把 IDLE 饿死, Task WDT 直接 panic。
+        if (++totalChunks % kYieldEvery == 0) {
+            vTaskDelay(1);
+        }
     }
 }
 
