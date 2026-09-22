@@ -29,23 +29,11 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
 {
     unwound = false;
 
-    // ── Smith 在途自身位移补偿 (一帧拉枪) ──────────────────────────────────
-    // 画面是 deadTime 毫秒前拍的。在这段时间里发出的鼠标计数已经到达游戏，
-    // 但画面还没显现出来。真实误差 = 看到的目标误差 - 扣除这批位移。
-    double compensatedError = error;
-    if (cfg_.kPxPerCount > 0.0 && cfg_.deadTimeMs > 0.0)
-    {
-        const double windowSec = cfg_.deadTimeMs * 0.001;
-        const double pendingCounts = st.inFlightCounts(windowSec);
-        const double pendingPx = pendingCounts * cfg_.kPxPerCount * cfg_.inflightBeta;
-        compensatedError = error - pendingPx;
-    }
-
     const double kp = (axis == Axis::X) ? cfg_.kpX : cfg_.kpY;
     const double ki = (axis == Axis::X) ? cfg_.kiX : cfg_.kiY;
     const double kd = (axis == Axis::X) ? cfg_.kdX : cfg_.kdY;
 
-    if (st.hasPrev && compensatedError * st.prevError < 0.0)
+    if (st.hasPrev && error * st.prevError < 0.0)
     {
         const double decay = std::exp(-dtSec / std::max(cfg_.tauUnwindSec, 1e-6));
         st.integral *= decay;
@@ -54,7 +42,7 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
 
     if (ki != 0.0)
     {
-        st.integral += ki * compensatedError * dtSec;
+        st.integral += ki * error * dtSec;
 
         const double iMax = (cfg_.iMax > 0.0)
             ? cfg_.iMax
@@ -69,7 +57,7 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
     double deriv = 0.0;
     if (kd != 0.0)
     {
-        const double de = compensatedError - st.prevError;
+        const double de = error - st.prevError;
         if (cfg_.tauDerivSec > 0.0 && st.hasPrev)
         {
             const double a = 1.0 - std::exp(-dtSec / cfg_.tauDerivSec);
@@ -86,7 +74,7 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
         st.derivLp = 0.0;
     }
 
-    const double p = saturateForP(compensatedError, cfg_.pFullScalePx);
+    const double p = saturateForP(error, cfg_.pFullScalePx);
     const double u = dtSec * kp * (p + st.integral + kd * deriv);
 
     const double limited = std::clamp(
@@ -103,12 +91,11 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
 
     // 记录本拍发出的 counts 和 dt，供给后续拍做在途折算
     const int finalCounts = static_cast<int>(countsClamped);
-    st.recordCount(finalCounts, dtSec);
 
-    st.prevError = compensatedError;
+    st.prevError = error;
     st.hasPrev = true;
 
-    tm.error = compensatedError;
+    tm.error = error;
     tm.p = p;
     tm.i = st.integral;
     tm.d = kd * deriv;

@@ -34,9 +34,6 @@ struct FlatConfig
     double iMax = 0.0;
     int    maxOutputCounts = 200;
     double pFullScalePx = 0.0;
-    double kPxPerCount = 0.0;
-    double inflightBeta = 0.8;
-    double inflightDeadTimeMs = 46.0;
 
     // 在途补偿：提前时间（总开关，0=关闭）+ 速度上限 + 距离上限（对角线倍数）。
     double predictLeadMs = 0.0;

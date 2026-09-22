@@ -585,9 +585,6 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "ctl_i_max", static_cast<double>(data.ctlIMax));
     m_settings->setValue(prefix + "ctl_max_output_counts", data.ctlMaxOutputCounts);
     m_settings->setValue(prefix + "ctl_p_full_scale_px", static_cast<double>(data.ctlPFullScalePx));
-    m_settings->setValue(prefix + "ctl_k_px_per_count", static_cast<double>(data.ctlKPxPerCount));
-    m_settings->setValue(prefix + "ctl_inflight_beta", static_cast<double>(data.ctlInflightBeta));
-    m_settings->setValue(prefix + "ctl_inflight_dead_time_ms", static_cast<double>(data.ctlInflightDeadTimeMs));
     m_settings->setValue(prefix + "ctl_predict_lead_ms", static_cast<double>(data.ctlPredictLeadMs));
     m_settings->setValue(prefix + "ctl_predict_max_velocity_px_s", static_cast<double>(data.ctlPredictMaxVelocityPxPerSec));
     m_settings->setValue(prefix + "ctl_predict_max_lead_ratio", static_cast<double>(data.ctlPredictMaxLeadRatio));
@@ -628,9 +625,6 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.ctlIMax = m_settings->value(prefix + "ctl_i_max", 0.0).toDouble();
     data.ctlMaxOutputCounts = m_settings->value(prefix + "ctl_max_output_counts", 200).toInt();
     data.ctlPFullScalePx = m_settings->value(prefix + "ctl_p_full_scale_px", 0.0).toDouble();
-    data.ctlKPxPerCount = m_settings->value(prefix + "ctl_k_px_per_count", 0.0).toDouble();
-    data.ctlInflightBeta = m_settings->value(prefix + "ctl_inflight_beta", 0.8).toDouble();
-    data.ctlInflightDeadTimeMs = m_settings->value(prefix + "ctl_inflight_dead_time_ms", 46.0).toDouble();
     data.ctlPredictLeadMs = m_settings->value(prefix + "ctl_predict_lead_ms", 0.0).toDouble();
     data.ctlPredictMaxVelocityPxPerSec =
         m_settings->value(prefix + "ctl_predict_max_velocity_px_s", 0.0).toDouble();

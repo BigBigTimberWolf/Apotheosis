@@ -158,9 +158,6 @@ public:
         double ctlIMax = 0.0;
         int    ctlMaxOutputCounts = 200;
         double ctlPFullScalePx = 0.0;
-        double ctlKPxPerCount = 0.0;
-        double ctlInflightBeta = 0.8;
-        double ctlInflightDeadTimeMs = 46.0;
 
         // 在途补偿（预测提前量）。leadMs == 0 ⇒ 预测整体关闭，
         // 另两个参数不生效（0 = 不限制）。

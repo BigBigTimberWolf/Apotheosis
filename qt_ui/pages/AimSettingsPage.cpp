@@ -1,6 +1,5 @@
 #include "pages/AimSettingsPage.h"
 
-#include "control/sensitivity_calibrator.h"
 
 #include <QCheckBox>
 #include <QProgressBar>
@@ -832,61 +831,6 @@ void AimSettingsPage::buildControllerCard()
         u8"  固定的像素数在近处（框大）会显得太小、远处（框小）会显得太大。\n"
         u8"★ 它是最后一道保险：异常速度估计不会把准星甩出去。")));
 
-    // ── Smith 在途自身位移补偿（一帧拉枪）─────────────────────────────────
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"Smith 在途自身位移补偿 (一帧拉枪)")));
-    cl->addWidget(makeHint(QString::fromUtf8(
-        u8"★ 核心原理：消除 46ms 链路盲区导致的过冲！\n"
-        u8"将最近发出去、但画面还没显现出来的鼠标计数按灵敏度折算扣除，\n"
-        u8"让控制器敢开大 Kp 起手瞬甩拉枪，到了目标瞬间定格吸死、不回弹不抽搐。\n"
-        u8"死区时间自动联动上面的「预测提前时间」（填 0 则默认用实测 46ms）。")));
-
-    {
-        auto* row = new QWidget;
-        auto* hl = new QHBoxLayout(row);
-        hl->setContentsMargins(0, 0, 0, 0);
-
-        auto* spinK = new QDoubleSpinBox;
-        spinK->setObjectName("ctlKPxPerCount");
-        spinK->setRange(0.0, 10.0);
-        spinK->setSingleStep(0.005);
-        spinK->setDecimals(4);
-        spinK->setValue(0.0);
-        m_ctlDoubles.push_back(spinK);
-
-        auto* lbl = new QLabel(QString::fromUtf8(u8"灵敏度折算系数 k (像素/计数, 0=关):"));
-        lbl->setToolTip(QString::fromUtf8(
-            u8"发 1 个鼠标计数，准星在画面上移动多少像素。\n"
-            u8"★ 填入你本机的实测值（例如 0.593），即开启一帧拉枪补偿。\n"
-            u8"★ 不知道填多少？点击右侧「🎯 测算灵敏度」一键自动标定。"));
-
-        auto* btnCalib = new QPushButton(QString::fromUtf8(u8"🎯 测算灵敏度"));
-        btnCalib->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 4px 12px; border-radius: 4px;");
-
-        hl->addWidget(lbl);
-        hl->addWidget(spinK, 1);
-        hl->addWidget(btnCalib);
-        cl->addWidget(row);
-
-        connect(btnCalib, &QPushButton::clicked, this, [this, spinK]() {
-            showSensitivityCalibrateDialog(spinK);
-        });
-    }
-
-    cl->addWidget(makeDoubleRowTip("ctlInflightBeta",
-        "补偿阻尼系数 β (默认 0.8)", 0.0, 2.0, 0.05, 0.8,
-        QString::fromUtf8(
-        u8"在途位移扣除的比例系数。\n"
-        u8"★ 默认 0.8（补偿 80%）：兼顾暴力一帧拉枪与末端极致贴合（最丝滑）。\n"
-        u8"★ 1.0 = 100% 完全死区消除；若觉得刹车过猛可适当调低到 0.7~0.8。")));
-
-    cl->addWidget(makeDoubleRowTip("ctlInflightDeadTimeMs",
-        "Smith 补偿死区时间 (毫秒, 默认 46.0)", 1.0, 500.0, 1.0, 46.0,
-        QString::fromUtf8(
-        u8"独立于目标预测的自身下发死区时间（毫秒）。\n"
-        u8"即鼠标移动指令从发出到在画面上产生位移的纯延迟窗口。\n"
-        u8"★ 实测硬件死区基准为 46ms，建议保持 40~50ms。")));
-
-
     auto* note = makeHint(QString::fromUtf8(
         u8"★ 「稳定器」那 5 项与滞回倍数目前都是【占位值】，没有实测依据，"
         u8"默认值只保证「程序能跑」。\n"
@@ -920,9 +864,6 @@ void AimSettingsPage::buildControllerCard()
         hp.ctl_predict_lead_ms  = d("ctlPredictLeadMs");
         hp.ctl_predict_max_velocity_px_s = d("ctlPredictMaxVelocityPxPerSec");
         hp.ctl_predict_max_lead_ratio    = d("ctlPredictMaxLeadRatio");
-        hp.ctl_k_px_per_count   = d("ctlKPxPerCount");
-        hp.ctl_inflight_beta    = d("ctlInflightBeta");
-        hp.ctl_inflight_dead_time_ms = d("ctlInflightDeadTimeMs");
         hp.ctl_random_seed      = i("ctlRandomSeed");
 
         ConfigBridge::instance().markDirty();
@@ -935,113 +876,6 @@ void AimSettingsPage::buildControllerCard()
         connect(sp, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
 
     m_rightLayout->addWidget(card);
-}
-
-void AimSettingsPage::showSensitivityCalibrateDialog(QDoubleSpinBox* spinK)
-{
-    auto* dlg = new QDialog(this);
-    dlg->setWindowTitle(QString::fromUtf8(u8"🎯 灵敏度折算系数 (k) 在线测算"));
-    dlg->resize(440, 260);
-
-    auto* layout = new QVBoxLayout(dlg);
-
-    auto* guide = new QLabel(QString::fromUtf8(
-        u8"<b>测算指引：</b><br>"
-        u8"1. 在游戏训练场中，将准星对准一个<b>静止的假人 / 靶子</b>。<br>"
-        u8"2. 点击下方的「开始采集」。<br>"
-        u8"3. 按住热键，<b>左右甩动鼠标 2 ~ 3 次</b>（产生画面目标相对位移）。<br>"
-        u8"4. 进度条跑满并出现计算结果后，点击「应用回填」即可！"));
-    guide->setWordWrap(true);
-    layout->addWidget(guide);
-
-    auto* statusLbl = new QLabel(QString::fromUtf8(u8"状态：等待开始..."));
-    statusLbl->setStyleSheet("font-weight: bold; color: #4da3ff; margin-top: 8px;");
-    layout->addWidget(statusLbl);
-
-    auto* pbar = new QProgressBar;
-    pbar->setRange(0, 100);
-    pbar->setValue(0);
-    layout->addWidget(pbar);
-
-    auto* resultLbl = new QLabel(QString::fromUtf8(u8"当前估算 k: -- px/count"));
-    resultLbl->setStyleSheet("font-size: 15px; font-weight: bold; color: #3fb950; margin: 6px 0;");
-    layout->addWidget(resultLbl);
-
-    auto* btnRow = new QWidget;
-    auto* hl = new QHBoxLayout(btnRow);
-    hl->setContentsMargins(0, 0, 0, 0);
-
-    auto* btnToggle = new QPushButton(QString::fromUtf8(u8"开始采集"));
-    btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
-
-    auto* btnApply = new QPushButton(QString::fromUtf8(u8"应用回填"));
-    btnApply->setEnabled(false);
-    btnApply->setStyleSheet("padding: 6px 16px;");
-
-    auto* btnCancel = new QPushButton(QString::fromUtf8(u8"关闭"));
-    btnCancel->setStyleSheet("padding: 6px 16px;");
-
-    hl->addWidget(btnToggle);
-    hl->addWidget(btnApply);
-    hl->addWidget(btnCancel);
-    layout->addWidget(btnRow);
-
-    auto* timer = new QTimer(dlg);
-
-    connect(btnToggle, &QPushButton::clicked, dlg, [btnToggle, timer]() {
-        auto& calib = control::globalSensitivityCalibrator();
-        if (!calib.isRunning())
-        {
-            calib.start();
-            btnToggle->setText(QString::fromUtf8(u8"停止采集"));
-            btnToggle->setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 6px 16px;");
-            timer->start(50);
-        }
-        else
-        {
-            calib.stop();
-            btnToggle->setText(QString::fromUtf8(u8"开始采集"));
-            btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
-            timer->stop();
-        }
-    });
-
-    connect(timer, &QTimer::timeout, dlg, [statusLbl, pbar, resultLbl, btnApply]() {
-        auto& calib = control::globalSensitivityCalibrator();
-        auto st = calib.status();
-        statusLbl->setText(QString::fromUtf8(u8"状态：%1").arg(QString::fromUtf8(st.hint)));
-        pbar->setValue(static_cast<int>(st.progress * 100.0));
-        if (st.estimatedK > 0.0)
-        {
-            resultLbl->setText(QString::fromUtf8(u8"当前估算 k: %1 px/count").arg(st.estimatedK, 0, 'f', 4));
-        }
-        if (st.ready)
-        {
-            btnApply->setEnabled(true);
-            btnApply->setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 6px 16px;");
-        }
-    });
-
-    connect(btnApply, &QPushButton::clicked, dlg, [dlg, spinK]() {
-        auto& calib = control::globalSensitivityCalibrator();
-        if (calib.estimatedK() > 0.0)
-        {
-            spinK->setValue(calib.estimatedK());
-        }
-        calib.stop();
-        dlg->accept();
-    });
-
-    connect(btnCancel, &QPushButton::clicked, dlg, [dlg]() {
-        control::globalSensitivityCalibrator().stop();
-        dlg->reject();
-    });
-
-    connect(dlg, &QDialog::finished, dlg, []() {
-        control::globalSensitivityCalibrator().stop();
-    });
-
-    dlg->exec();
 }
 
 void AimSettingsPage::buildTriggerCard()
@@ -1136,22 +970,22 @@ void AimSettingsPage::buildTriggerCard()
     auto* stopCombo = new QComboBox;
     stopCombo->setObjectName("triggerAutoStop");
     stopCombo->addItem(QStringLiteral("关闭"), 0);
-    stopCombo->addItem(QStringLiteral("开启（开火时补反方向键）"), 1);
+    stopCombo->addItem(QStringLiteral("开启（开火时屏蔽真实键盘）"), 1);
     auto* stopRow = FormKit::fieldRow(QStringLiteral("开关"), stopCombo);
     attachTip(stopRow, QString::fromUtf8(
-        u8"开火那一拍如果你正按着 WASD，就往盒子里补一个【反方向键】的短按\n"
-        u8"（W→S / S→W / A→D / D→A）。多数 FPS 里相反方向键同时存在 = 抵消 = 立刻停住，\n"
-        u8"这一枪才是站定打的。\n"
-        u8"★ 是「补键」不是「抢键」 —— 盒子没有屏蔽你物理按键的能力。\n"
-        u8"★ 只有带键盘通道的输入方式支持（MAKCUNEW / KMBOXNET）；\n"
-        u8"  其它输入方式会自动跳过并在日志里记为 unsupported。\n"
-        u8"★ 一次只补一个键，斜向移动（W+A）只会抵消掉前后轴那一半。"));
+        u8"开火那一拍，把【真实键盘输入】整段屏蔽掉一段时间。\n"
+        u8"屏蔽期间你按的 W/A/S/D 不会进入被控机，角色凭游戏自身的停止行为停住，\n"
+        u8"不注入任何按键 —— 没有任何残余反向位移，也不干扰你的真实操作。\n"
+        u8"★ 只从【接键盘那台硬件】下发屏蔽命令，绝不落到鼠标硬件上，\n"
+        u8"  否则会连带把真实鼠标输入一起屏蔽。\n"
+        u8"★ 需要接键盘硬件（MAKCU + 键盘板 / MAKCUNEW / KMBOXNET）；\n"
+        u8"  没接的输入方式自动跳过，不影响鼠标的任何行为。"));
     cl->addWidget(stopRow);
 
-    cl->addWidget(makeIntRow("triggerStopMs", "反方向键短按时长 (ms)", 20, 300, 5, 60,
-        QString::fromUtf8(u8"补的那个反方向键按住多久。\n"
-        u8"★ 用固件定时弹起（KEY_TAP），是自清的 —— 就算上位机崩了键也会被放开。\n"
-        u8"★ 太短：固件来不及弹起；太长：你被推着倒退一段。范围 20~300。")));
+    cl->addWidget(makeIntRow("triggerStopMs", "急停屏蔽键盘时长 (ms)", 20, 300, 5, 60,
+        QString::fromUtf8(u8"屏蔽真实键盘多久。\n"
+        u8"★ 固件侧带硬超时自解除 —— 就算上位机崩了，时间一到输入也会自己回来。\n"
+        u8"★ 太短：停不下来；太长：屏蔽期间你会觉得键盘没反应。范围 20~300。")));
 
     auto* note = makeHint(QString::fromUtf8(
         u8"★ 扳机用的是【以框为基准】的命中区，和瞄点解耦 —— 换瞄点（胸口/头部）"
@@ -1253,14 +1087,6 @@ const ScopeRowDesc kScopePredictRows[] = {
       "预测距离上限 (框对角线倍数, 0=不限)", 0.0, 100.0, 0.05, 0.0, 3 },
 };
 
-const ScopeRowDesc kScopeSmithRows[] = {
-    { "ctlKPxPerCount", "scopeKPxPerCount", "灵敏度折算系数 k (像素/计数, 0=关)",
-      0.0, 10.0, 0.005, 0.0, 4 },
-    { "ctlInflightBeta", "scopeInflightBeta", "补偿阻尼系数 β (默认 0.8)",
-      0.0, 2.0, 0.05, 0.8, 3 },
-    { "ctlInflightDeadTimeMs", "scopeInflightDeadTimeMs",
-      "Smith 补偿死区时间 (毫秒, 默认 46.0)", 1.0, 500.0, 1.0, 46.0, 3 },
-};
 
 }
 
@@ -1375,8 +1201,6 @@ void AimSettingsPage::buildScopeCtlCard()
              kScopeGainRows, std::size(kScopeGainRows));
     addGroup("输出限幅与随机化", kScopeLimitRows, std::size(kScopeLimitRows));
     addGroup("在途补偿 (预测提前量)", kScopePredictRows, std::size(kScopePredictRows));
-    addGroup("Smith 在途自身位移补偿 (一帧拉枪)",
-             kScopeSmithRows, std::size(kScopeSmithRows));
 
     cl->addWidget(makeHint(QString::fromUtf8(
         u8"★ 选靶 / 稳定器 / 滞回倍数 / 瞄点 Y 这些【不属于控制器增益】的参数仍然"
@@ -1407,9 +1231,6 @@ void AimSettingsPage::buildScopeCtlCard()
         p.predict_lead_ms  = d("scopePredictLeadMs");
         p.predict_max_velocity_px_s = d("scopePredictMaxVelocityPxPerSec");
         p.predict_max_lead_ratio    = d("scopePredictMaxLeadRatio");
-        p.k_px_per_count   = d("scopeKPxPerCount");
-        p.inflight_beta    = d("scopeInflightBeta");
-        p.inflight_dead_time_ms = d("scopeInflightDeadTimeMs");
         p.random_seed      = i("scopeRandomSeed");
 
         ConfigBridge::instance().markDirty();
@@ -1880,9 +1701,6 @@ void AimSettingsPage::reloadProfileToUi()
             sd("ctlPredictLeadMs", hp.ctl_predict_lead_ms);
             sd("ctlPredictMaxVelocityPxPerSec", hp.ctl_predict_max_velocity_px_s);
             sd("ctlPredictMaxLeadRatio", hp.ctl_predict_max_lead_ratio);
-            sd("ctlKPxPerCount", hp.ctl_k_px_per_count);
-            sd("ctlInflightBeta", hp.ctl_inflight_beta);
-            sd("ctlInflightDeadTimeMs", hp.ctl_inflight_dead_time_ms);
             si("ctlMaxOutputCounts", hp.ctl_max_output_counts);
             si("ctlRandomSeed", hp.ctl_random_seed);
 
@@ -1929,9 +1747,6 @@ void AimSettingsPage::reloadProfileToUi()
             sd("scopePredictLeadMs",   hp.ctl_scope.predict_lead_ms);
             sd("scopePredictMaxVelocityPxPerSec", hp.ctl_scope.predict_max_velocity_px_s);
             sd("scopePredictMaxLeadRatio",        hp.ctl_scope.predict_max_lead_ratio);
-            sd("scopeKPxPerCount",     hp.ctl_scope.k_px_per_count);
-            sd("scopeInflightBeta",    hp.ctl_scope.inflight_beta);
-            sd("scopeInflightDeadTimeMs", hp.ctl_scope.inflight_dead_time_ms);
             si("scopeMaxOutputCounts", hp.ctl_scope.max_output_counts);
             si("scopeRandomSeed",      hp.ctl_scope.random_seed);
 

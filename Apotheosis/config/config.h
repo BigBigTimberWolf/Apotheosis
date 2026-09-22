@@ -58,10 +58,6 @@ struct AimCtlParams
     int    max_output_counts = 200;
     double p_full_scale_px = 0.0;
 
-    // Smith 在途自身位移补偿 (一帧拉枪)
-    double k_px_per_count = 0.0;
-    double inflight_beta = 0.8;
-    double inflight_dead_time_ms = 46.0;
 
     // 在途补偿 (预测提前量)。lead_ms == 0 时预测整体不生效。
     double predict_lead_ms = 0.0;
@@ -84,9 +80,6 @@ struct AimCtlParams
         tau_deriv_sec = std::clamp(tau_deriv_sec, 0.0, 10.0);
         i_max = std::max(0.0, i_max);
         p_full_scale_px = std::max(0.0, p_full_scale_px);
-        k_px_per_count = std::clamp(k_px_per_count, 0.0, 10.0);
-        inflight_beta = std::clamp(inflight_beta, 0.0, 2.0);
-        inflight_dead_time_ms = std::clamp(inflight_dead_time_ms, 0.0, 1000.0);
         // 下面三个 0 都有明确含义(关闭/不限制), 所以只做下界与有限性保护,
         // 上界留宽, 避免把用户合理的调参夹掉。
         predict_lead_ms = std::clamp(predict_lead_ms, 0.0, 1000.0);
@@ -126,14 +119,7 @@ struct HotkeyProfile
     int    ctl_max_output_counts = 200;
     double ctl_p_full_scale_px = 0.0;
 
-    // ── Smith 在途自身位移补偿 (一帧拉枪) ──────────────────────────────────
     // 扣除链路死区内已下发但画面尚未显现的自身位移，避免重复下令导致过冲振荡。
-    // k_px_per_count: 灵敏度折算系数 (像素/计数，0 = 关闭自身位移补偿)
-    // inflight_beta : 补偿阻尼系数 (默认 0.8，可配置范围 0.0 ~ 2.0)
-    // inflight_dead_time_ms: Smith 补偿专用的死区时间 (ms，默认 46.0ms 实测死区)
-    double ctl_k_px_per_count = 0.0;
-    double ctl_inflight_beta  = 0.8;
-    double ctl_inflight_dead_time_ms = 46.0;
 
     // ── 在途补偿（预测提前量）─────────────────────────────────────────────
     // 链路（采集→推理→瞄准→下发→游戏渲染）有几十毫秒延迟，等这一拍算完
@@ -236,9 +222,6 @@ inline AimCtlParams ctlParamsOf(const HotkeyProfile& hk)
     p.i_max = hk.ctl_i_max;
     p.max_output_counts = hk.ctl_max_output_counts;
     p.p_full_scale_px = hk.ctl_p_full_scale_px;
-    p.k_px_per_count = hk.ctl_k_px_per_count;
-    p.inflight_beta = hk.ctl_inflight_beta;
-    p.inflight_dead_time_ms = hk.ctl_inflight_dead_time_ms;
     p.predict_lead_ms = hk.ctl_predict_lead_ms;
     p.predict_max_velocity_px_s = hk.ctl_predict_max_velocity_px_s;
     p.predict_max_lead_ratio = hk.ctl_predict_max_lead_ratio;
@@ -259,9 +242,6 @@ inline void applyCtlParams(HotkeyProfile& hk, const AimCtlParams& p)
     hk.ctl_i_max = p.i_max;
     hk.ctl_max_output_counts = p.max_output_counts;
     hk.ctl_p_full_scale_px = p.p_full_scale_px;
-    hk.ctl_k_px_per_count = p.k_px_per_count;
-    hk.ctl_inflight_beta = p.inflight_beta;
-    hk.ctl_inflight_dead_time_ms = p.inflight_dead_time_ms;
     hk.ctl_predict_lead_ms = p.predict_lead_ms;
     hk.ctl_predict_max_velocity_px_s = p.predict_max_velocity_px_s;
     hk.ctl_predict_max_lead_ratio = p.predict_max_lead_ratio;

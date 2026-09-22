@@ -112,9 +112,6 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
     cfg.pid.iMax = flat.iMax;
     cfg.pid.maxOutputCounts = flat.maxOutputCounts;
     cfg.pid.pFullScalePx = flat.pFullScalePx;
-    cfg.pid.kPxPerCount = flat.kPxPerCount;
-    cfg.pid.inflightBeta = flat.inflightBeta;
-    cfg.pid.deadTimeMs = (flat.inflightDeadTimeMs > 0.0) ? flat.inflightDeadTimeMs : control::kLoopDeadTimeMs;
 
     cfg.predictor.leadMs = flat.predictLeadMs;
     cfg.predictor.maxVelocityPxPerSec = flat.predictMaxVelocityPxPerSec;
@@ -152,9 +149,6 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     flat.iMax = cp.i_max;
     flat.maxOutputCounts = cp.max_output_counts;
     flat.pFullScalePx = cp.p_full_scale_px;
-    flat.kPxPerCount = cp.k_px_per_count;
-    flat.inflightBeta = cp.inflight_beta;
-    flat.inflightDeadTimeMs = cp.inflight_dead_time_ms;
     flat.predictLeadMs = cp.predict_lead_ms;
     flat.predictMaxVelocityPxPerSec = cp.predict_max_velocity_px_s;
     flat.predictMaxLeadRatio = cp.predict_max_lead_ratio;

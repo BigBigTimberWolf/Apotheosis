@@ -1,7 +1,6 @@
 #include "runtime/aim_loop.h"
 
 #include "control/aim_controller.h"
-#include "control/sensitivity_calibrator.h"
 
 #include "mouse/aim_path.h"
 #include "mouse/auto_stop.h"
@@ -511,7 +510,8 @@ bool tick()
             if (tAct.fired)
             {
                 const auto snap = runtime_config::read();
-                const bool methodOk = snap && (snap->input_method == "MAKCUNEW" ||
+                const bool methodOk = snap && (snap->input_method == "MAKCU" ||
+                                               snap->input_method == "MAKCUNEW" ||
                                                snap->input_method == "KMBOXNET");
 
                 // 自动急停需要【真的能屏蔽真实键盘】。光看 input_method 不够:
@@ -555,9 +555,7 @@ bool tick()
         return false;
 
     // 馈送标定器 (如果用户正在前台测算灵敏度 k)
-    if (control::globalSensitivityCalibrator().isRunning() && out.hasTarget)
     {
-        control::globalSensitivityCalibrator().feed(out.anchor.x, move_x, dtSec);
     }
 
     if (MouseThread* mouse = ensureMouse())

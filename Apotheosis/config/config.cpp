@@ -561,9 +561,6 @@ bool Config::loadConfig(const std::string& filename)
             hk.ctl_max_output_counts =
                 static_cast<int>(get_double(sec, "ctl_max_output_counts", hk.ctl_max_output_counts));
             hk.ctl_p_full_scale_px = get_double(sec, "ctl_p_full_scale_px", hk.ctl_p_full_scale_px);
-            hk.ctl_k_px_per_count = get_double(sec, "ctl_k_px_per_count", hk.ctl_k_px_per_count);
-            hk.ctl_inflight_beta  = get_double(sec, "ctl_inflight_beta",  hk.ctl_inflight_beta);
-            hk.ctl_inflight_dead_time_ms = get_double(sec, "ctl_inflight_dead_time_ms", hk.ctl_inflight_dead_time_ms);
             hk.ctl_predict_lead_ms =
                 get_double(sec, "ctl_predict_lead_ms", hk.ctl_predict_lead_ms);
             hk.ctl_predict_max_velocity_px_s =
@@ -603,12 +600,6 @@ bool Config::loadConfig(const std::string& filename)
                 sec, "ctl_scope_max_output_counts", hk.ctl_scope.max_output_counts));
             hk.ctl_scope.p_full_scale_px =
                 get_double(sec, "ctl_scope_p_full_scale_px", hk.ctl_scope.p_full_scale_px);
-            hk.ctl_scope.k_px_per_count =
-                get_double(sec, "ctl_scope_k_px_per_count", hk.ctl_scope.k_px_per_count);
-            hk.ctl_scope.inflight_beta =
-                get_double(sec, "ctl_scope_inflight_beta", hk.ctl_scope.inflight_beta);
-            hk.ctl_scope.inflight_dead_time_ms = get_double(
-                sec, "ctl_scope_inflight_dead_time_ms", hk.ctl_scope.inflight_dead_time_ms);
             hk.ctl_scope.predict_lead_ms =
                 get_double(sec, "ctl_scope_predict_lead_ms", hk.ctl_scope.predict_lead_ms);
             hk.ctl_scope.predict_max_velocity_px_s = get_double(
@@ -930,9 +921,6 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_tau_deriv_sec = "    << hk.ctl_tau_deriv_sec << "\n"
              << "ctl_i_max = "            << hk.ctl_i_max << "\n"
              << "ctl_p_full_scale_px = "  << hk.ctl_p_full_scale_px << "\n"
-             << "ctl_k_px_per_count = "   << hk.ctl_k_px_per_count << "\n"
-             << "ctl_inflight_beta = "    << hk.ctl_inflight_beta << "\n"
-             << "ctl_inflight_dead_time_ms = " << hk.ctl_inflight_dead_time_ms << "\n"
              << "ctl_predict_lead_ms = "  << hk.ctl_predict_lead_ms << "\n"
              << "ctl_predict_max_velocity_px_s = " << hk.ctl_predict_max_velocity_px_s << "\n"
              << "ctl_predict_max_lead_ratio = "    << hk.ctl_predict_max_lead_ratio << "\n"
@@ -962,10 +950,6 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_scope_tau_deriv_sec = "    << hk.ctl_scope.tau_deriv_sec << "\n"
              << "ctl_scope_i_max = "            << hk.ctl_scope.i_max << "\n"
              << "ctl_scope_p_full_scale_px = "  << hk.ctl_scope.p_full_scale_px << "\n"
-             << "ctl_scope_k_px_per_count = "   << hk.ctl_scope.k_px_per_count << "\n"
-             << "ctl_scope_inflight_beta = "    << hk.ctl_scope.inflight_beta << "\n"
-             << "ctl_scope_inflight_dead_time_ms = "
-             << hk.ctl_scope.inflight_dead_time_ms << "\n"
              << "ctl_scope_predict_lead_ms = "  << hk.ctl_scope.predict_lead_ms << "\n"
              << "ctl_scope_predict_max_velocity_px_s = "
              << hk.ctl_scope.predict_max_velocity_px_s << "\n"

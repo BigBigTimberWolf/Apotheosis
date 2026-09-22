@@ -287,9 +287,6 @@ void ConfigBridge::syncFromRuntime()
         hd.ctlIMax             = hp.ctl_i_max;
         hd.ctlMaxOutputCounts  = hp.ctl_max_output_counts;
         hd.ctlPFullScalePx     = hp.ctl_p_full_scale_px;
-        hd.ctlKPxPerCount      = hp.ctl_k_px_per_count;
-        hd.ctlInflightBeta     = hp.ctl_inflight_beta;
-        hd.ctlInflightDeadTimeMs = hp.ctl_inflight_dead_time_ms;
         hd.ctlPredictLeadMs             = hp.ctl_predict_lead_ms;
         hd.ctlPredictMaxVelocityPxPerSec = hp.ctl_predict_max_velocity_px_s;
         hd.ctlPredictMaxLeadRatio       = hp.ctl_predict_max_lead_ratio;

@@ -23,10 +23,6 @@ struct PidConfig
 
     double pFullScalePx = 0.0;
 
-    // Smith 在途自身位移补偿 (一帧拉枪)
-    double kPxPerCount = 0.0;     // 0 = 关闭
-    double inflightBeta = 0.8;    // 补偿阻尼 (默认 0.8)
-    double deadTimeMs = 46.0;     // 死区时间 (ms)
 };
 
 struct AxisState
@@ -37,38 +33,6 @@ struct AxisState
     double derivLp = 0.0;
     bool hasPrev = false;
 
-    // 在途位移环形缓冲区 (记录最近发出的 counts 和 dt)
-    static constexpr int kRingCap = 128;
-    struct StepSample {
-        int counts = 0;
-        double dt = 0.0;
-    };
-    StepSample ring[kRingCap]{};
-    int ringHead = 0;
-    int ringCount = 0;
-
-    void recordCount(int counts, double dt)
-    {
-        ring[ringHead] = { counts, dt };
-        ringHead = (ringHead + 1) % kRingCap;
-        if (ringCount < kRingCap) ringCount++;
-    }
-
-    double inFlightCounts(double windowSec) const
-    {
-        if (windowSec <= 0.0 || ringCount == 0) return 0.0;
-        double totalCounts = 0.0;
-        double accumulatedTime = 0.0;
-        for (int i = 0; i < ringCount; ++i)
-        {
-            int idx = (ringHead - 1 - i + kRingCap) % kRingCap;
-            accumulatedTime += ring[idx].dt;
-            totalCounts += ring[idx].counts;
-            if (accumulatedTime >= windowSec) break;
-        }
-        return totalCounts;
-    }
-
     void reset()
     {
         integral = 0.0;
@@ -76,8 +40,6 @@ struct AxisState
         prevError = 0.0;
         derivLp = 0.0;
         hasPrev = false;
-        ringHead = 0;
-        ringCount = 0;
     }
 };
 
@@ -126,7 +88,6 @@ private:
     ControlTelemetry telemetry_;
 };
 
-inline constexpr double kLoopDeadTimeMs = 46.0;
 inline constexpr double kCriticalGain = 0.2602;
 inline constexpr double kCountsPerPixel = 0.593;
 

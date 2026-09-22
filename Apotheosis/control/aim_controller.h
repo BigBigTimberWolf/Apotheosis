@@ -117,7 +117,6 @@ private:
 
     bool hasLastBox_ = false;
     Box lastBox_;
-    Counts lastSentCounts_{ 0, 0 };
 
     int targetIdCounter_ = 0;
 };
