@@ -16,11 +16,13 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <mutex>
 
 #include "mouse/Makcu.h"
@@ -41,6 +43,63 @@ QString zh(const char* text)
 // KMBOXNET   : 网络盒子。
 constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET"};
 constexpr int kInputMethodCount = 3;
+
+// ── 串口枚举 ──────────────────────────────────────────────────────────────
+//
+// 与 makcu SDK 的 SerialPort::getAvailablePorts() 同源(读同一份注册表键)。
+// 这里自己读而不去调 SDK: MAKCU_API 在本工程里解析成 __declspec(dllimport)
+// (MAKCU_EXPORTS 未定义), 从 UI 文件去调它有链接风险; 而我们只要一份端口名字。
+QStringList enumerateComPorts()
+{
+    QStringList out;
+#ifdef Q_OS_WIN
+    QSettings reg(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
+                  QSettings::NativeFormat);
+    for (const QString& key : reg.allKeys())
+    {
+        const QString name = reg.value(key).toString().trimmed();
+        if (!name.isEmpty())
+            out << name;
+    }
+#endif
+    out.removeDuplicates();
+
+    // 自然排序: COM2 要排在 COM10 前面(纯字典序会反过来)。
+    const auto portNum = [](const QString& s) {
+        int i = 0;
+        while (i < s.size() && !s.at(i).isDigit()) ++i;
+        return s.mid(i).toInt();
+    };
+    std::sort(out.begin(), out.end(), [&](const QString& a, const QString& b) {
+        const int na = portNum(a), nb = portNum(b);
+        return na != nb ? na < nb : a < b;
+    });
+    return out;
+}
+
+// 波特率候选档位。
+//   MAKCU(SDK): 建链固定 115200, 成功后 SDK 自己切高速; 这里选的是随后 setBaudRate 的目标。
+//   MAKCUNEW  : 固件上电固定 115200, 由固件协商到目标速率。
+constexpr int kBaudPresets[] = {
+    115200, 921600, 1000000, 1500000, 2000000, 3000000, 4000000, 6000000
+};
+
+// 串口下拉。真值放在 itemData 里 —— "未检测到"的保留项显示文本带后缀,
+// 但取值必须干净, 否则会把后缀写进配置。
+QComboBox* makePortCombo()
+{
+    auto* box = new QComboBox;
+    box->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    return box;
+}
+
+QComboBox* makeBaudCombo()
+{
+    auto* box = new QComboBox;
+    for (int b : kBaudPresets)
+        box->addItem(QString::number(b), b);
+    return box;
+}
 
 }
 
@@ -70,6 +129,17 @@ HardwarePage::HardwarePage(QWidget* parent)
     });
     inputCard->contentLayout()->addWidget(
         FormKit::fieldRow(zh(u8"方式"), m_inputMethodCombo));
+
+    // 串口/波特率现在都是下拉。如果设备是插好之后才打开本界面的, 点这里重新枚举。
+    {
+        auto* refreshRow = new QHBoxLayout;
+        m_refreshPortsBtn = new QPushButton(zh(u8"刷新串口列表"));
+        m_refreshPortsBtn->setFixedHeight(28);
+        m_refreshPortsBtn->setCursor(Qt::PointingHandCursor);
+        refreshRow->addWidget(m_refreshPortsBtn);
+        refreshRow->addStretch();
+        inputCard->contentLayout()->addLayout(refreshRow);
+    }
     layout->addWidget(inputCard);
 
     auto* statusCard = new CardWidget(zh(u8"连接状态"), QStringLiteral("wifi"));
@@ -116,11 +186,9 @@ HardwarePage::HardwarePage(QWidget* parent)
         kbdPanel->setContentsMargins(0, 0, 0, 0);
         kbdPanel->setSpacing(10);
 
-        m_makcuNewPortKbd = new QLineEdit;
-        m_makcuNewPortKbd->setPlaceholderText(QStringLiteral("COM9"));
+        m_makcuNewPortKbd = makePortCombo();
         kbdPanel->addWidget(FormKit::fieldRow(zh(u8"串口"), m_makcuNewPortKbd));
-        m_makcuNewBaudKbd = new QSpinBox;
-        m_makcuNewBaudKbd->setRange(1200, 6000000);
+        m_makcuNewBaudKbd = makeBaudCombo();
         kbdPanel->addWidget(FormKit::fieldRow(zh(u8"波特率"), m_makcuNewBaudKbd));
     };
 
@@ -135,10 +203,9 @@ HardwarePage::HardwarePage(QWidget* parent)
         mouseTitle->setStyleSheet("font-weight:600; font-size:13px;");
         panel->addWidget(mouseTitle);
 
-        m_makcuPort = new QLineEdit;
+        m_makcuPort = makePortCombo();
         panel->addWidget(FormKit::fieldRow(zh(u8"串口"), m_makcuPort));
-        m_makcuBaud = new QSpinBox;
-        m_makcuBaud->setRange(1200, 921600);
+        m_makcuBaud = makeBaudCombo();
         panel->addWidget(FormKit::fieldRow(zh(u8"波特率"), m_makcuBaud));
 
         ensureKbdWidgets();
@@ -157,11 +224,9 @@ HardwarePage::HardwarePage(QWidget* parent)
         mouseTitle->setStyleSheet("font-weight:600; font-size:13px;");
         panel->addWidget(mouseTitle);
 
-        m_makcuNewPort = new QLineEdit;
-        m_makcuNewPort->setPlaceholderText(QStringLiteral("COM7"));
+        m_makcuNewPort = makePortCombo();
         panel->addWidget(FormKit::fieldRow(zh(u8"串口"), m_makcuNewPort));
-        m_makcuNewBaud = new QSpinBox;
-        m_makcuNewBaud->setRange(1200, 6000000);
+        m_makcuNewBaud = makeBaudCombo();
         panel->addWidget(FormKit::fieldRow(zh(u8"波特率"), m_makcuNewBaud));
 
         ensureKbdWidgets();
@@ -206,32 +271,37 @@ HardwarePage::HardwarePage(QWidget* parent)
     }
     layout->addWidget(m_kbdCard);
 
+    // 顺序很重要: 先把串口列表灌进下拉, 再 loadFieldsFromConfig 去选中配置值。
+    refreshPortLists();
     loadFieldsFromConfig();
 
     connect(m_inputMethodCombo, &QComboBox::currentIndexChanged,
             this, &HardwarePage::onInputMethodChanged);
-    connect(m_makcuPort, &QLineEdit::textChanged, this, [](const QString& value) {
-        ConfigManager::instance().setMakcuPort(value);
+    connect(m_refreshPortsBtn, &QPushButton::clicked, this, [this] {
+        refreshPortLists();   // 只重灌下拉, 不自动重连(避免每次刷新都重开串口)
     });
-    connect(m_makcuBaud, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
-        ConfigManager::instance().setMakcuBaudrate(value);
+    connect(m_makcuPort, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setMakcuPort(comboText(m_makcuPort));
     });
-    connect(m_makcuNewPort, &QLineEdit::textChanged, this, [](const QString& value) {
-        ConfigManager::instance().setMakcuNewPort(value);
+    connect(m_makcuBaud, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setMakcuBaudrate(comboNumber(m_makcuBaud));
     });
-    connect(m_makcuNewBaud, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
-        ConfigManager::instance().setMakcuNewBaudrate(value);
+    connect(m_makcuNewPort, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setMakcuNewPort(comboText(m_makcuNewPort));
     });
-    connect(m_makcuNewPortKbd, &QLineEdit::textChanged, this, [](const QString& value) {
-        ConfigManager::instance().setMakcuNewPortKbd(value);
+    connect(m_makcuNewBaud, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setMakcuNewBaudrate(comboNumber(m_makcuNewBaud));
     });
-    connect(m_makcuNewBaudKbd, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
-        ConfigManager::instance().setMakcuNewBaudrateKbd(value);
+    connect(m_makcuNewPortKbd, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setMakcuNewPortKbd(comboText(m_makcuNewPortKbd));
+    });
+    connect(m_makcuNewBaudKbd, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setMakcuNewBaudrateKbd(comboNumber(m_makcuNewBaudKbd));
     });
     // 勾选/取消"接入键盘硬件": 显示或隐藏下面的串口行, 并立即重连生效。
     connect(m_kbdUnitEnabled, &QCheckBox::toggled, this, [this](bool on) {
         m_kbdUnitPanel->setVisible(on);
-        ConfigManager::instance().setMakcuNewPortKbd(on ? m_makcuNewPortKbd->text() : QString());
+        ConfigManager::instance().setMakcuNewPortKbd(on ? comboText(m_makcuNewPortKbd) : QString());
         reconnectDevice();
     });
     connect(m_kmboxNetIp, &QLineEdit::textChanged, this, [](const QString& value) {
@@ -282,12 +352,20 @@ void HardwarePage::loadFieldsFromConfig()
     m_inputMethodCombo->blockSignals(false);
     updateKbdCardVisibility(index);
 
-    m_makcuPort->setText(cm.makcuPort());
-    m_makcuBaud->setValue(cm.makcuBaudrate());
-    m_makcuNewPort->setText(cm.makcuNewPort());
-    m_makcuNewBaud->setValue(cm.makcuNewBaudrate());
-    m_makcuNewPortKbd->setText(cm.makcuNewPortKbd());
-    m_makcuNewBaudKbd->setValue(cm.makcuNewBaudrateKbd());
+    // 下拉按【值】选中, 不按文本 —— "未检测到"的保留项显示文本带后缀, 与配置值不同。
+    const auto selectByValue = [](QComboBox* box, const QVariant& value) {
+        if (!box) return;
+        QSignalBlocker block(box);          // 加载时不触发回写
+        const int idx = box->findData(value);
+        box->setCurrentIndex(idx >= 0 ? idx : 0);
+    };
+
+    selectByValue(m_makcuPort, cm.makcuPort());
+    selectByValue(m_makcuBaud, cm.makcuBaudrate());
+    selectByValue(m_makcuNewPort, cm.makcuNewPort());
+    selectByValue(m_makcuNewBaud, cm.makcuNewBaudrate());
+    selectByValue(m_makcuNewPortKbd, cm.makcuNewPortKbd());
+    selectByValue(m_makcuNewBaudKbd, cm.makcuNewBaudrateKbd());
     // 有端口即视为"接了键盘硬件"。空端口表示没有第二台 -> 不勾选, 面板隐藏。
     {
         const bool on = !cm.makcuNewPortKbd().isEmpty();
@@ -298,6 +376,62 @@ void HardwarePage::loadFieldsFromConfig()
     m_kmboxNetIp->setText(cm.kmboxNetIp());
     m_kmboxNetPort->setText(cm.kmboxNetPort());
     m_kmboxNetUuid->setText(cm.kmboxNetUuid());
+}
+
+QString HardwarePage::comboText(const QComboBox* box)
+{
+    if (!box) return QString();
+    const QVariant v = box->currentData();
+    return v.isValid() ? v.toString() : box->currentText();
+}
+
+int HardwarePage::comboNumber(const QComboBox* box)
+{
+    if (!box) return 0;
+    bool ok = false;
+    const int n = (box->currentData().isValid() ? box->currentData() : box->currentText())
+                      .toString().toInt(&ok);
+    return ok ? n : 0;
+}
+
+void HardwarePage::refreshPortLists()
+{
+    const QStringList ports = enumerateComPorts();
+
+    // 灌一个串口下拉: 首项空(=不配置), 然后列出检测到的口, 最后把"配置里有但当前
+    // 没检测到"的值也补上 —— 否则设备没插时打开界面, 会把用户配好的串口冲成空。
+    const auto fill = [&](QComboBox* box, const QString& configured) {
+        if (!box) return;
+        const QString keep = configured.isEmpty() ? comboText(box) : configured;
+
+        QSignalBlocker block(box);
+        box->clear();
+        box->addItem(zh(u8"(不配置)"), QString());
+        for (const QString& p : ports)
+            box->addItem(p, p);
+
+        if (!keep.isEmpty() && box->findData(keep) < 0)
+            box->addItem(keep + zh(u8"  (未检测到)"), keep);
+
+        const int idx = box->findData(keep);
+        box->setCurrentIndex(idx >= 0 ? idx : 0);
+    };
+
+    auto& cm = ConfigManager::instance();
+    fill(m_makcuPort,       cm.makcuPort());
+    fill(m_makcuNewPort,    cm.makcuNewPort());
+    fill(m_makcuNewPortKbd, cm.makcuNewPortKbd());
+
+    // 波特率: 档位是固定的, 但配置值可能不在档位里(手改过 ini) —— 补进去, 避免被冲掉。
+    const auto ensureBaud = [&](QComboBox* box, int value) {
+        if (!box || value <= 0) return;
+        QSignalBlocker block(box);
+        if (box->findData(value) < 0)
+            box->addItem(QString::number(value), value);
+    };
+    ensureBaud(m_makcuBaud,        cm.makcuBaudrate());
+    ensureBaud(m_makcuNewBaud,     cm.makcuNewBaudrate());
+    ensureBaud(m_makcuNewBaudKbd,  cm.makcuNewBaudrateKbd());
 }
 
 void HardwarePage::onInputMethodChanged(int index)
