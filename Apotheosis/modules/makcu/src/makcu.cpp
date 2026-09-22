@@ -173,26 +173,41 @@ namespace makcu {
                 return false;
             }
 
-            // Create MAKCU baud rate change command
-            // Protocol: 0xDE 0xAD [size_u16] 0xA5 [baud_u32]
-            std::vector<uint8_t> baudChangeCommand = {
-                0xDE, 0xAD,                                    // Standard header
-                0x05, 0x00,                                    // Size (5 bytes: command + 4-byte baud rate)
-                0xA5,                                          // Baud rate change command
-                static_cast<uint8_t>(baudRate & 0xFF),         // Baud rate bytes (little-endian)
-                static_cast<uint8_t>((baudRate >> 8) & 0xFF),
-                static_cast<uint8_t>((baudRate >> 16) & 0xFF),
-                static_cast<uint8_t>((baudRate >> 24) & 0xFF)
-            };
-
-            // Send the baud rate change command
-            if (!serialPort->write(baudChangeCommand)) {
-                return false;
+            // ★ 用 ASCII 形式 "SERIAL_<baud>" 请求切速 —— 这是【新旧两代固件都认】的形式。
+            //
+            // 【为什么不能再用下面那个二进制帧】
+            //   这里原来只发 DE AD 05 00 A5 <u32>。老固件有 proto_parser.cpp 解析它
+            //   (注释原话: "兼容 Apotheosis 高速切波特率"), 但新固件(对齐官方 ASCII
+            //   骨架那次重写)把整个 proto_parser.cpp 删了 —— 这条命令在新固件上被
+            //   静默忽略, 设备仍然停在 115200。
+            //
+            //   而本函数紧接着就 close() 再以 4000000 重开, 于是变成
+            //     主机 4Mbps  <->  设备 115200bps
+            //   全程乱码; connect() 末尾那句 km.version() 活性校验必然超时, 直接
+            //   return false。现象就是"点连接完全连不上"。
+            //
+            // 【为什么 ASCII 形式是安全的】
+            //   "SERIAL_" 在两代固件的 serial0CommandTable 里【都存在】
+            //   (新: handleCommands.cpp; 老: handleCommands.cpp 同表),
+            //   而且它排在 processCommand 的前段、不受 USB 握手门控影响。
+            //   实测: 发 SERIAL_115200 后设备回 "Serial0 speed change successful."
+            {
+                const std::string asciiCmd =
+                    "SERIAL_" + std::to_string(baudRate) + "\r\n";
+                if (!serialPort->write(asciiCmd)) {
+                    return false;
+                }
+                if (!serialPort->flush()) {
+                    return false;
+                }
             }
 
-            if (!serialPort->flush()) {
-                return false;
-            }
+            // ★ 必须等够。
+            //   固件侧的实现是: 打印 -> Serial0.end() -> vTaskDelay(1000ms)
+            //   -> Serial0.begin(新速率) -> 重新注册 onReceive。
+            //   也就是说它要整整 1 秒才切过去。等太短就重开, 主机切了设备没切,
+            //   照样是乱码; 而且会打断固件自己的切换流程。
+            std::this_thread::sleep_for(std::chrono::milliseconds(1400));
 
             // Close and reopen at new baud rate
             std::string portName = serialPort->getPortName();
