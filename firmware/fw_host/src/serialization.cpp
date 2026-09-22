@@ -184,6 +184,15 @@ void EspUsbHost::sendRawHidDescriptors()
         // 给下行链路留出发送间隙, 避免一次灌 8 行把 Serial1 缓冲打满
         delay(2);
     }
+
+    // ★ 流结束标记 —— 必须在最后无条件发出。
+    //
+    // 上面是【可变行数】(只发有原始描述符的接口, 一个都没有就一行都不发),
+    // 左板无法从内容判断流何时结束。没有这个终结符, 左板的
+    // handleReceiveRawHidDescriptor 永远不会调用 sendNextCommand(),
+    // 描述符克隆握手就停在这一步, 进而把左板的整个 km.* 命令表永久门控掉
+    // (现象: 鼠标能移动, 但点击/滚轮/侧键全部没反应)。
+    Serial1.println("USB_sendRawHidDescriptors:done");
 }
 
 void EspUsbHost::sendDescriptorconfig()

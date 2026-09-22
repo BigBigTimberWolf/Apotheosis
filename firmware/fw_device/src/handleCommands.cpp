@@ -83,8 +83,25 @@ const char *commandQueue[] = {
 
 // 接收真设备原始 HID 报告描述符 —— 格式: USB_sendRawHidDescriptors:<iface>:<hex>
 // (fw_host 逐接口发一行, 见 fw_host/serialization.cpp:sendRawHidDescriptors)
+//
+// ★ 必须显式推进握手 (sendNextCommand)。
+//
+// 右板是按【有原始描述符的接口数】发行的 (d.len == 0 的接口跳过), 行数可变
+// (0 ~ kMaxIface), 且没有天然的结束标记 —— 所以右板在流末尾补发一行
+// "USB_sendRawHidDescriptors:done" 作为终结符, 这里见到它就推进队列。
+//
+// 历史 bug: 本函数此前既不判终结符也不调 sendNextCommand, 于是队列永远停在
+// 这一步 (currentCommandIndex 到不了 10), processingUsbCommands 永久为 true ——
+// 那会把整个 km.* 命令表门控掉, 表现为"能移动但点击/滚轮全失效"。
 static void handleReceiveRawHidDescriptor(const char *command) {
     const char *p = command + strlen("USB_sendRawHidDescriptors:");
+
+    // 流结束标记: 推进握手。
+    if (strncmp(p, "done", 4) == 0) {
+        sendNextCommand();
+        return;
+    }
+
     char *end = nullptr;
     long iface = strtol(p, &end, 10);
     if (!end || *end != ':') return;
@@ -320,12 +337,26 @@ void processCommand(const char *command) {
             return;
         }
     }
-    if (!processingUsbCommands) {
-        for (const auto &entry : normalCommandTable) {
-            if (strncmp(command, entry.command, strlen(entry.command)) == 0) {
-                entry.handler(command);
-                return;
-            }
+    // ★ 不再用 processingUsbCommands 门控 km.* 命令。
+    //
+    // 原实现把 normalCommandTable 压在 !processingUsbCommands 之后, 名义理由是
+    // "握手期间不要处理普通命令"。但那个理由站不住:
+    //   · USB_* 应答走 usbCommandTable, 它在这段【之前】且顺序优先, 不受影响;
+    //   · Serial0(上位机) 与 Serial1(板间) 是两条独立 UART, 处理一条来自上位机的
+    //     km.* 命令不会干扰板间的握手时序。
+    //
+    // 而这道门控的代价是灾难性的: 只要握手因为任何原因没走完 10 步,
+    // processingUsbCommands 就【永久停在 true】, 于是所有 km.* 命令全部失效 ——
+    // 唯一还能用的只剩 km.move (它在 serial0RX 里被特判, 绕过了 processCommand)。
+    // 表现为"鼠标能移动, 但点击/滚轮/侧键全部没反应", 且固件不报任何错
+    // (未识别的命令会落到 handleDebugcommand 被原样回显, 看起来像"命令发出去了")。
+    //
+    // 触发实例: commandQueue 的 sendRawHidDescriptors 一步, 右板回包后左板的
+    // 接收函数没有调用 sendNextCommand(), 队列永远停在索引 6, 永远到不了 10。
+    for (const auto &entry : normalCommandTable) {
+        if (strncmp(command, entry.command, strlen(entry.command)) == 0) {
+            entry.handler(command);
+            return;
         }
     }
     handleDebugcommand(command);
