@@ -25,6 +25,12 @@
 #include <algorithm>
 #include <mutex>
 
+// 串口枚举用的原生 API。放在 Qt 头之后包含, 避免 windows.h 的宏污染 Qt/标准库。
+// (工程已在 CMake 里全局定义 WIN32_LEAN_AND_MEAN 与 NOMINMAX)
+#ifdef _WIN32
+#  include <windows.h>
+#endif
+
 #include "mouse/Makcu.h"
 #include "mouse/MakcuNew.h"
 #include "mouse/kmboxNetConnection.h"
@@ -46,20 +52,42 @@ constexpr int kInputMethodCount = 3;
 
 // ── 串口枚举 ──────────────────────────────────────────────────────────────
 //
-// 与 makcu SDK 的 SerialPort::getAvailablePorts() 同源(读同一份注册表键)。
-// 这里自己读而不去调 SDK: MAKCU_API 在本工程里解析成 __declspec(dllimport)
-// (MAKCU_EXPORTS 未定义), 从 UI 文件去调它有链接风险; 而我们只要一份端口名字。
+// ★ 必须用原生 RegEnumValue, 不能用 QSettings。
+//
+//   SERIALCOMM 这个键的【值名】形如 "\Device\Serial2" —— 自带反斜杠。
+//   QSettings 把反斜杠当子键分隔符, 于是 allKeys() 返回的名字会被它当路径去解析,
+//   取回来是空值; 结果枚举恒为空, 界面上表现为"串口一直显示(未检测到)"。
+//   这里与 makcu SDK 的 SerialPort::getAvailablePorts() 用同一套原生 API,
+//   它是被验证过能工作的。
 QStringList enumerateComPorts()
 {
     QStringList out;
 #ifdef Q_OS_WIN
-    QSettings reg(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
-                  QSettings::NativeFormat);
-    for (const QString& key : reg.allKeys())
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DEVICEMAP\\SERIALCOMM",
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
-        const QString name = reg.value(key).toString().trimmed();
-        if (!name.isEmpty())
-            out << name;
+        char valueName[256];
+        char data[256];
+        DWORD index = 0;
+        for (;;)
+        {
+            DWORD valueNameSize = sizeof(valueName);
+            DWORD dataSize      = sizeof(data);
+            DWORD dataType      = 0;
+
+            const LONG r = RegEnumValueA(hKey, index++, valueName, &valueNameSize,
+                                         nullptr, &dataType,
+                                         reinterpret_cast<BYTE*>(data), &dataSize);
+            if (r == ERROR_NO_MORE_ITEMS) break;
+            if (r == ERROR_SUCCESS && dataType == REG_SZ)
+            {
+                const QString name = QString::fromLatin1(data).trimmed();
+                if (!name.isEmpty())
+                    out << name;
+            }
+        }
+        RegCloseKey(hKey);
     }
 #endif
     out.removeDuplicates();
