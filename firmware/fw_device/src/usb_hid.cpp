@@ -14,6 +14,8 @@
 #include "tusb.h"
 #include "class/hid/hid_device.h"
 #include "usb_desc.h"
+#include "USBSetup.h"     // isCloneMouseActive / mouseLayout
+#include "ClonedHID.h"    // cloned::buildMouseReport
 
 // 取本板的报告描述符 (实现在 usb_desc.cpp, 恒为鼠标)
 extern "C" const uint8_t *descCurrentReport(uint16_t *lenOut);
@@ -110,6 +112,21 @@ static inline int8_t satI8(int16_t v)
 bool kbdUsbSendMouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel)
 {
     if (!waitEndpointReady()) return false;
+
+    // 若真设备的报告描述符已就绪, 按真描述符解析出的 layout 组装报文 ——
+    // 主机看到的描述符与字节流格式一致, 厂商专属驱动才有可能识别成对应产品。
+    // 兼容性兜底: layout 无效或未就绪时用内置 4 字节 Boot Mouse 报文。
+    if (isCloneMouseActive()) {
+        const ClonedReportLayout *L = mouseLayout();
+        if (L && L->valid && L->reportLen > 0 && L->reportLen <= 64) {
+            uint8_t rep[64];
+            cloned::buildMouseReport(*L, rep, L->reportLen,
+                                     (int)satI8(dx), (int)satI8(dy),
+                                     (int)wheel, buttons);
+            const uint8_t id = L->hasReportId ? L->reportId : 0;
+            return tud_hid_n_report(0, id, rep, L->reportLen);
+        }
+    }
 
     uint8_t rep[4];
     rep[0] = buttons & 0x1F;

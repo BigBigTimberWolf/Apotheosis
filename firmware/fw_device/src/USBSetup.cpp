@@ -270,6 +270,18 @@ void initClonedDevices()
     // 克隆实例由 ClonedHID.cpp 维护。此处无需额外动作。
 }
 
+// 供 usb_desc.cpp 使用的 accessor: 真设备描述符是否已就绪, 返回指针 + 长度。
+// 返回 nullptr 表示未就绪(应回落到本板内置 s_descMouse)。
+extern "C" const uint8_t *clonedMouseDesc(uint16_t *lenOut)
+{
+    if (!s_mouseDescReady) {
+        if (lenOut) *lenOut = 0;
+        return nullptr;
+    }
+    if (lenOut) *lenOut = s_mouseDescLen;
+    return s_mouseDesc;
+}
+
 // 报文发送: 本固件不替换报文格式(恒用内置 4 字节鼠标报文), 因此本函数
 // 返回 false 表示"未启用克隆发送", 调用方应回落到内置路径。
 bool sendClonedMouseReport(int, int, int, uint8_t) { return false; }

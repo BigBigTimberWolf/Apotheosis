@@ -220,6 +220,42 @@ private:
     MakcuNewConnection* conn_kbd_;
 };
 
+// 混合驱动: 鼠标动作走【官方 SDK / MakcuConnection】(纯 ASCII 协议), 键盘动作与
+// 屏蔽真实输入走【MakcuNewConnection】(二进制协议, 与 KBD_PASSTHROUGH 键盘固件对齐)。
+//
+// 为什么这么拆:
+//   · 鼠标那台的固件已经在本轮重写为纯 ASCII 命令 (km.move/km.left(1)/...), 官方 SDK
+//     内部发的正好是这套命令, 无缝对接。
+//   · 键盘那台的固件 (KBD_PASSTHROUGH) 本轮不动, 继续用 MakcuNewConnection 的
+//     二进制帧 (CMD_KEY_TAP / CMD_MASK 等) 发键盘 tap 与屏蔽命令。
+//
+// kbdConn 允许为 nullptr —— 只有鼠标那台时行为等价于 WrappedMakcuDriver, 键盘能力
+// 位不声明; tapKey/maskRealKeyboard 直接返回失败。
+class WrappedHybridDriver final : public IDriver
+{
+public:
+    WrappedHybridDriver(MakcuConnection* mouseConn, MakcuNewConnection* kbdConn);
+    const char* name() const override;
+    uint32_t capabilities() const override;
+    bool isOpen() const override;
+    std::string lastError() const override;
+    bool move(int dx, int dy) override;
+    bool leftDown() override;
+    bool leftUp() override;
+    bool rightDown() override;
+    bool rightUp() override;
+    bool middleDown() override;
+    bool middleUp() override;
+    bool wheel(int delta) override;
+    bool tapKey(int hidKey, int holdMs, int mod) override;
+    bool maskRealKeyboard(int durationMs) override;
+    int physicalButtonPressed(int button) const override;
+    MakcuNewConnection* keyboardConnection() const { return kbdConn_; }
+private:
+    MakcuConnection* mouseConn_;
+    MakcuNewConnection* kbdConn_;
+};
+
 class WrappedKmboxNetDriver final : public IDriver
 {
 public:

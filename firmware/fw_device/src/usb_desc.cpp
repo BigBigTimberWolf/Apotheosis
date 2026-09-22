@@ -101,15 +101,26 @@ static void buildDescriptors(void)
     s_deviceDesc.bNumConfigurations = 0x01;
 
     // ---- 配置描述符: 只有一个 Boot Mouse 接口 ----
+    //
+    // 报告描述符长度动态: 若真设备的报告描述符已经通过 USB_sendRawHidDescriptors
+    // 送到并解析成功(clonedMouseDesc != nullptr), 就在配置描述符里声明真长度,
+    // 主机 GET_DESCRIPTOR(REPORT) 时也会从 descCurrentReport() 拿真描述符。
+    // 未就绪时回落到内置 52 字节 Boot Mouse 描述符, 行为跟历史版本一致。
+    uint16_t reportLen = DESC_MOUSE_LEN;
+    if (clonedMouseDesc(&reportLen) == nullptr) {
+        reportLen = DESC_MOUSE_LEN;
+    }
+
     uint8_t cfg[TUD_CONFIG_DESC_LEN + 25] = {
         TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN,
                               TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 250),
 
         // 接口协议: Boot Mouse (SubClass 01 / Prot 02)
-        // 端点包大小: 4 字节 (无 Report ID)
+        // 端点包大小: 4 字节 (无 Report ID 时通常够; 若真描述符更大 TinyUSB 会
+        // 自动分包传输, 但影响枚举兼容性 —— 极端情况下可以在这里也动态)
         TUD_HID_DESCRIPTOR(0, 4,
                            HID_ITF_PROTOCOL_MOUSE,
-                           DESC_MOUSE_LEN,
+                           reportLen,
                            EPNUM_HID_IN,
                            4,
                            1),
@@ -179,6 +190,17 @@ extern "C" uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t lang
 // ---------------------------------------------------------------------------
 extern "C" const uint8_t *descCurrentReport(uint16_t *lenOut)
 {
+    // 优先返回真设备的报告描述符 (若已通过 USB_sendRawHidDescriptors 送到并
+    // 解析成功)。这样主机 GET_DESCRIPTOR(REPORT) 拿到的是真设备格式, 更容易
+    // 被厂商驱动/系统正确识别为鼠标 (或触发厂商专属驱动的加载)。
+    // 未就绪时回落到本板内置 52 字节 Boot Mouse 描述符 —— 保证首次开机、
+    // 真描述符尚未到达时也能作为基础鼠标出现在被控机的设备列表里。
+    uint16_t realLen = 0;
+    const uint8_t *real = clonedMouseDesc(&realLen);
+    if (real && realLen > 0) {
+        if (lenOut) *lenOut = realLen;
+        return real;
+    }
     if (lenOut) *lenOut = DESC_MOUSE_LEN;
     return s_descMouse;
 }

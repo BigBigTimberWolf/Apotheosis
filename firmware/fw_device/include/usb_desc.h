@@ -44,4 +44,15 @@ bool kbdUsbReady(void);
 // 发送鼠标报文 (按键 + 相对位移 + 滚轮)
 bool kbdUsbSendMouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel);
 
+// 由 USBSetup.cpp 提供: 真设备的 HID 报告描述符 (fw_host 通过
+// USB_sendRawHidDescriptors 送来, receiveRealHidDescriptor 解析并存下)。
+// 返回 nullptr 表示未就绪 -> 走内置 s_descMouse (52 字节 Boot Mouse)。
+#ifdef __cplusplus
+extern "C" {
+#endif
+const uint8_t *clonedMouseDesc(uint16_t *lenOut);
+#ifdef __cplusplus
+}
+#endif
+
 #endif // USB_DESC_H

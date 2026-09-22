@@ -2,29 +2,27 @@
 #define MAIN_H
 
 #include <Arduino.h>
-#include <USB.h>
-#include <USBHIDMouse.h>
 #include "handleCommands.h"
 #include "InitSettings.h"
 #include "USBSetup.h"
+#include "usb_desc.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// Declare task handles using extern to avoid redefinition errors
+// Task handles (extern, 定义在 tasks.cpp)
 extern TaskHandle_t serial1TaskHandle;
 extern TaskHandle_t serial0TaskHandle;
 extern TaskHandle_t mouseMoveTaskHandle;
+extern TaskHandle_t ledFlashTaskHandle;
 
-// Function prototypes for tasks and ISRs
+// Task / ISR / helper prototypes
 void serial0Task(void *pvParameters);
 void serial1Task(void *pvParameters);
 void mouseMoveTask(void *pvParameters);
-
-// ISR declarations
+void ledFlashTask(void *pvParameters);
 void IRAM_ATTR serial0ISR();
 void IRAM_ATTR serial1ISR();
 
-// Other function prototypes
 void tasks();
 void serial0RX();
 void serial1RX();

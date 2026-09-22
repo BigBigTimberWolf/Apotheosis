@@ -226,6 +226,83 @@ void WrappedMakcuNewDriver::cancelMove()
 
 bool WrappedMakcuNewDriver::directSend() const { return true; }
 
+// =============================================================================
+// WrappedHybridDriver: 鼠标(官方 SDK / MakcuConnection) + 键盘(MakcuNewConnection)
+// =============================================================================
+
+WrappedHybridDriver::WrappedHybridDriver(MakcuConnection* mouseConn, MakcuNewConnection* kbdConn)
+    : mouseConn_(mouseConn), kbdConn_(kbdConn) {}
+
+const char* WrappedHybridDriver::name() const { return kBackendMakcu; }
+
+uint32_t WrappedHybridDriver::capabilities() const
+{
+    uint32_t caps = kCapMove | kCapButtonLeft | kCapButtonRight | kCapButtonMiddle |
+                    kCapButtonSide | kCapWheel | kCapPhysicalRead;
+    // 键盘能力只在键盘那台真实存在时声明 (跟 WrappedMakcuNewDriver 的判断一致)。
+    if (kbdConn_ != nullptr) caps |= kCapKeyboard;
+    return caps;
+}
+
+bool WrappedHybridDriver::isOpen() const
+{
+    return mouseConn_ != nullptr && mouseConn_->isOpen();
+}
+
+std::string WrappedHybridDriver::lastError() const
+{
+    return u8"[Hybrid] 鼠标(MAKCU/ASCII)串口未打开或设备未响应";
+}
+
+bool WrappedHybridDriver::move(int dx, int dy)
+{
+    if (!isOpen()) return false;
+    mouseConn_->move(dx, dy);
+    return mouseConn_->isOpen();
+}
+
+bool WrappedHybridDriver::leftDown()   { if (!isOpen()) return false; mouseConn_->press(1);   return true; }
+bool WrappedHybridDriver::leftUp()     { if (!isOpen()) return false; mouseConn_->release(1); return true; }
+bool WrappedHybridDriver::rightDown()  { if (!isOpen()) return false; mouseConn_->press(2);   return true; }
+bool WrappedHybridDriver::rightUp()    { if (!isOpen()) return false; mouseConn_->release(2); return true; }
+bool WrappedHybridDriver::middleDown() { if (!isOpen()) return false; mouseConn_->press(3);   return true; }
+bool WrappedHybridDriver::middleUp()   { if (!isOpen()) return false; mouseConn_->release(3); return true; }
+
+bool WrappedHybridDriver::wheel(int delta)
+{
+    if (!isOpen()) return false;
+    mouseConn_->wheel(delta);
+    return true;
+}
+
+bool WrappedHybridDriver::tapKey(int hidKey, int holdMs, int mod)
+{
+    // 键盘 tap 必须走键盘那台硬件 —— 送错设备就是空操作。
+    if (kbdConn_ == nullptr || !kbdConn_->isOpen()) return false;
+    return kbdConn_->tapKey(hidKey, holdMs, mod);
+}
+
+bool WrappedHybridDriver::maskRealKeyboard(int durationMs)
+{
+    if (kbdConn_ == nullptr || !kbdConn_->isOpen()) return false;
+    return (durationMs > 0) ? kbdConn_->mask(durationMs) : kbdConn_->maskOff();
+}
+
+int WrappedHybridDriver::physicalButtonPressed(int button) const
+{
+    if (!isOpen()) return -1;
+    // 鼠标物理按键回读来自官方 SDK 的按键回调 —— shooting_active 等成员。
+    switch (button)
+    {
+    case 1: return mouseConn_->shooting_active ? 1 : 0;
+    case 2: return mouseConn_->zooming_active  ? 1 : 0;
+    case 3: return mouseConn_->middle_active   ? 1 : 0;
+    case 4: return mouseConn_->side1_active    ? 1 : 0;
+    case 5: return mouseConn_->side2_active    ? 1 : 0;
+    default: return -1;
+    }
+}
+
 WrappedKmboxNetDriver::WrappedKmboxNetDriver(KmboxNetConnection* conn) : conn_(conn) {}
 
 const char* WrappedKmboxNetDriver::name() const { return kBackendKmboxNet; }

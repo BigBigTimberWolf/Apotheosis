@@ -271,7 +271,16 @@ void MouseThread::refreshDriver()
     driver_owned_.reset();
     driver_ = nullptr;
 
-    if (makcu_)
+    if (makcu_ && makcu_new_kbd_)
+    {
+        // 混合模式: 鼠标那台走【官方 SDK / MakcuConnection】(纯 ASCII, 对齐本轮
+        // 重写的新鼠标固件); 键盘那台继续走【MakcuNewConnection】(二进制,
+        // 对齐 KBD_PASSTHROUGH 键盘固件, 本轮未动)。
+        driver_owned_ = std::make_unique<mouse_driver::WrappedHybridDriver>(
+            makcu_, makcu_new_kbd_);
+        driver_ = driver_owned_.get();
+    }
+    else if (makcu_)
     {
         driver_owned_ = std::make_unique<mouse_driver::WrappedMakcuDriver>(makcu_);
         driver_ = driver_owned_.get();
