@@ -534,6 +534,20 @@ void mouseMoveTask(void *pvParameters) {
         }
 
         checkClickReleases();
+
+        // ★ 每 iteration 无条件让出 1 tick, 防止 Task WDT panic 导致鼠标断连。
+        //
+        // 0aa8427 修的是 handleMove 内部"每 16 chunk vTaskDelay(1)", 但 aim assist
+        // 单次 move 通常只有几十 counts (< 127) = 1 个 chunk, 永远命中不到 16, 于是
+        // 单次 handleMove 一次都不 yield. 而本任务 prio 3 (最高), aim_loop 一触发
+        // 就高频 notify (真鼠标 1000Hz + aim 200-500Hz 叠加), ulTaskNotifyTake 每次
+        // 立刻返回, 循环体又不 yield -> IDLE (prio 0) 5s 内一次都排不上 -> ESP32
+        // Task WDT panic -> 固件重启, 主板 setup 里 delay(1100) + USB 重挂 ≈ 1.1s ->
+        // 被控机看到"鼠标突然断开, 过一会又自愈". 键盘那台是独立板独立跑, 不受影响,
+        // 正好对应用户描述.
+        //
+        // 单帧 +1ms 延迟对 aim assist 无感 (200Hz 反应时间 5ms -> 6ms, 差异不可察).
+        vTaskDelay(1);
     }
 }
 
