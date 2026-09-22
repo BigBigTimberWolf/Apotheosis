@@ -268,11 +268,7 @@ namespace makcu {
 
         // Unified write and flush operation
         ssize_t bytesWritten = platformWrite(fullCommand.c_str(), fullCommand.length());
-        if (bytesWritten == static_cast<ssize_t>(fullCommand.length())) {
-            return platformFlush();
-        }
-
-        return false;
+        return bytesWritten == static_cast<ssize_t>(fullCommand.length());
     }
 
     void SerialPort::listenerLoop() {

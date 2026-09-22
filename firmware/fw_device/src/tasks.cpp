@@ -17,17 +17,17 @@ void tasks() {
         Serial0.println("Failed to create Serial1Task");
     }
 
-    xReturned = xTaskCreate(serial0Task, "Serial0Task", 2160, NULL, 2, &serial0TaskHandle);
+    xReturned = xTaskCreate(serial0Task, "Serial0Task", 4096, NULL, 2, &serial0TaskHandle);
     if (xReturned != pdPASS) {
         Serial0.println("Failed to create Serial0Task");
     }
 
-    xReturned = xTaskCreate(mouseMoveTask, "MouseMoveTask", 1536, NULL, 3, &mouseMoveTaskHandle);
+    xReturned = xTaskCreate(mouseMoveTask, "MouseMoveTask", 4096, NULL, 3, &mouseMoveTaskHandle);
     if (xReturned != pdPASS) {
         Serial0.println("Failed to create MouseMoveTask");
     }
 
-    xReturned = xTaskCreate(ledFlashTask, "LEDFlashTask", 1536, NULL, 1, &ledFlashTaskHandle);
+    xReturned = xTaskCreate(ledFlashTask, "LEDFlashTask", 4096, NULL, 1, &ledFlashTaskHandle);
     if (xReturned != pdPASS) {
         Serial0.println("Failed to create LEDFlashTask");
     }

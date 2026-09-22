@@ -16,6 +16,8 @@
 #include "usb_desc.h"
 #include "USBSetup.h"     // isCloneMouseActive / mouseLayout
 #include "ClonedHID.h"    // cloned::buildMouseReport
+#include <mutex>
+static std::mutex s_hidSendMutex;
 
 // 取本板的报告描述符 (实现在 usb_desc.cpp, 恒为鼠标)
 extern "C" const uint8_t *descCurrentReport(uint16_t *lenOut);
@@ -111,6 +113,7 @@ static inline int8_t satI8(int16_t v)
 
 bool kbdUsbSendMouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel)
 {
+    std::lock_guard<std::mutex> lock(s_hidSendMutex);
     if (!waitEndpointReady()) return false;
 
     // 若真设备的报告描述符已就绪, 按真描述符解析出的 layout 组装报文 ——
