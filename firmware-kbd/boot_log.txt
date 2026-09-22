@@ -1,0 +1,7 @@
+﻿E (97) psram: PSRAM ID read error: 0x00ffffff, PSRAM chip not found or not supported, or wrong PSRAM line mode
+MAKCU-PASSTHROUGH CUSTOM_V1_0
+
+[  1204][E][esp32-hal-cpu.c:182] setCpuFrequencyMhz(): Bad frequency: 260 MHz! Options are: 240, 160, 80, 40, 20 and 10 MHz
+[USB] exposing: mouse=1 kbd=0 (realMouse=0 realKbd=0 proto=2 ifaces=3)
+[USB] ????????????????????????, ??????=?????? (VID=249A PID=5C2F)
+

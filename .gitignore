@@ -102,6 +102,11 @@ out/
 /firmware/.piopkgs/
 /firmware/.pio-core/
 /firmware/**/.pio/
+# 键盘透传固件 (firmware-kbd/) 同理
+/firmware-kbd/piocore/
+/firmware-kbd/.piopkgs/
+/firmware-kbd/.pio-core/
+/firmware-kbd/**/.pio/
 # Python 缓存
 __pycache__/
 *.pyc

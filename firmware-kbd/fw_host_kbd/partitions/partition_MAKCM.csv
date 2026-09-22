@@ -1,0 +1,43 @@
+# ============================================================================
+# RIGHT board partition table -- must match the OFFICIAL firmware layout.
+# ============================================================================
+#
+# NOTE: keep this file ASCII-only. PlatformIO's checkprogsize reads it using the
+#       system codepage (GBK on this machine), so non-ASCII bytes crash the build
+#       with "UnicodeDecodeError: 'gbk' codec can't decode byte ...".
+#
+# WHY THIS LAYOUT (parsed straight out of the official V3.4_RIGHT.bin at 0x8000):
+#
+#   The official release uses only 1.38MB of flash (max offset 0x160000) for a
+#   4MB chip, and declares 2MB in its image header. We copy both, so that our
+#   right-board image is structurally identical to the firmware that is known to
+#   boot on this hardware.
+#
+#   This layout is NOT the fix for the "new MAKCU won't boot" bug -- that bug is
+#   the flash read mode, see boards/MAKCM.json (memory_type).
+#
+#   It does matter for a different reason: the table must fit inside the flash
+#   size that the bootloader believes it has. With the old table (max offset
+#   0x360000 = 3.38MB) plus a 2MB declaration the bootloader refused to boot and
+#   just reset in a loop (rst:0x3, no panic output -- much harder to spot than
+#   the rst:0xc assert). Keep max offset under the declared size.
+#
+# The old table was:
+#   nvs 0x9000/0x5000, otadata 0xE000/0x2000, app0 0x10000/0x1A0000,
+#   app1 0x1B0000/0x1A0000, coredump 0x350000/0x10000   (max 0x360000)
+#
+# Do NOT trust the partition_MAKCM.csv shipped in the firmware source repo: it
+# does NOT match the officially released binaries.
+#
+# The row MUST stay named "app0" because scripts/merge.py scans this file for
+# name == "app0" to decide where to write the application image.
+#
+# app partition is 1MB here; our right-board image is about 0.64MB, so it fits.
+# ============================================================================
+
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+app0,     app,  factory, 0x10000,  0x100000,
+coredump, data, coredump,0x110000, 0x10000,
+storage,  data, nvs,     0x120000, 0x40000,
