@@ -168,6 +168,34 @@ namespace makcu {
         ~Impl() = default;
 
         // Private static method for the core baud rate change protocol
+        // ------------------------------------------------------------------
+        // 冲掉固件行缓冲里的脏行。
+        //
+        // 固件 serial0RX 是【按 '\n' 切行】的。任何"没有 \n 的残留字节"都会一直
+        // 躺在 serial0RingBuffer(620 字节) 里, 等下一条命令到达时粘在它前面:
+        //     "\xff\xff\xea\xff" + "SERIAL_4000000"
+        // 于是 strncmp(command, "SERIAL_", 7) 从行首比较必然不匹配 ->
+        // 【之后每一条命令全部失效】。而且不会自愈, 只有板子断电重上电才清得掉。
+        //
+        // 脏字节的来源有两个, 实测都碰到过:
+        //   1) 固件切波特率时 Serial0.end()/begin() 之间那 1 秒引脚浮空;
+        //   2) PC 打开串口时 DTR/RTS 抖动 / 上一次会话遗留。
+        //
+        // 补几个 \r\n: 固件会把那行脏数据当一条(未知)命令处理掉(原样回显到
+        // Serial0, 我们丢弃), 缓冲随即干净, 后续命令才能正常匹配。
+        // ------------------------------------------------------------------
+        static void flushDeviceLineBuffer(SerialPort* serialPort) {
+            if (!serialPort || !serialPort->isOpen()) return;
+            for (int i = 0; i < 3; ++i) {
+                serialPort->write(std::string("\r\n"));
+                serialPort->flush();
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            }
+            // 把回显/噪声读掉, 免得污染紧随其后的命令应答。
+            serialPort->read(4096);
+            serialPort->flush();
+        }
+
         static bool performBaudRateChange(SerialPort* serialPort, uint32_t baudRate) {
             if (!serialPort->isOpen()) {
                 return false;
@@ -218,6 +246,20 @@ namespace makcu {
             if (!serialPort->open(portName, baudRate)) {
                 return false;
             }
+
+            // ★★ 关键收尾: 在新速率下补发换行, 冲掉固件行缓冲里的脏行。
+            //
+            // 【为什么必须做】
+            //   固件 handleSerial0Speed 的实现是:
+            //       Serial0.end() -> vTaskDelay(1000ms) -> Serial0.begin(新速率)
+            //   那 1 秒里 UART 引脚是【浮空】的, 噪声字节会进入固件【自己的接收
+            //   环形缓冲】(serial0RingBuffer, 只有 620 字节)。实测抓到了
+            //   "Se\x00Serial0 speed change successful." 这种被截断+混入 \x00 的
+            //   输出, 就是这个窗口的证据。
+            //
+            //   不清掉的话, 脏字节会粘在下一条命令前面, 使【之后所有命令全部失效】,
+            //   上位机表现为"根本上连不上", 且只有断电重上电能恢复。
+            flushDeviceLineBuffer(serialPort);
 
             return true;
         }
@@ -549,6 +591,16 @@ namespace makcu {
             m_impl->status = ConnectionStatus::CONNECTION_ERROR;
             return false;
         }
+
+        // ★★ 先冲掉设备行缓冲里可能残留的脏行, 再发任何命令。
+        //
+        // 这一步是必须的, 而且踩过: 上一次会话切波特率时留下的脏字节会一直卡在
+        // 固件的 serial0RingBuffer 里(没有 '\n' 就永远不结算)。如果直接发
+        // "SERIAL_4000000", 那条命令【自己】就被脏前缀污染 -> 固件认不出 ->
+        // 波特率根本没切; 而主机紧接着按 4000000 重开 -> 主机 4M / 设备 115200
+        // -> 全程乱码 -> connect() 末尾的活性校验超时 -> "点连接完全连不上",
+        // 且只有给板子断电重上电才能恢复。
+        Impl::flushDeviceLineBuffer(m_impl->serialPort.get());
 
         // Switch to high-speed mode
         if (!Impl::performBaudRateChange(m_impl->serialPort.get(), HIGH_SPEED_BAUD_RATE)) {

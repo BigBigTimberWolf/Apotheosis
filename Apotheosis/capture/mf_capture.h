@@ -162,10 +162,21 @@ private:
     bool mjpg_cpu_fallback_{ false };
 
     struct DecodeJob { std::vector<uint8_t> jpeg; uint64_t seq = 0; int64_t capture_ns = 0; };
-    static constexpr int DECODE_WORKERS = 2;
+    // 实测 (build\diag\live_frame.jpg 924KB 真实帧, ROI 416, 本机 i5-4590 4 核,
+    // 见 build\cuda\Release\decode_workers_bench.exe):
+    //   worker 数    2 核 (0xC, 修复前)    4 核 (0xF, 修复后)
+    //      1             ~120 fps              ~133 fps
+    //      2             ~193 fps              ~236 fps
+    //      3             ~187 fps              ~331 fps   <- 选这个
+    //      4             ~190 fps              ~356 fps
+    //   注意旧注释里"2 worker 合成约 3.0ms/帧"是在**无信号占位帧 (40KB)** 上测的, 不成立:
+    //   真实帧单帧 host 就要 6.07ms。而且修复亲和性 bug 前进程只拿到 2 个核, 解码
+    //   天花板约 190fps —— 这正是检测器实测只有 ~180fps 的原因。
+    //   3 worker 在 4 核上到 331fps, 对 240fps 留 38% 余量, 同时给 TensorRT 推理与
+    //   MF 读循环留下约 2 个核。
+    static constexpr int DECODE_WORKERS = 3;
     // 深度必须 >= worker 数, 否则 worker 会空转; 但每加一层排队就多一份延迟
-    // (实测: 3 -> 202fps/12.2ms, 6 -> 221fps/18.8ms)。2 个 worker 的合成耗时约
-    // 3.0ms/帧 < 240fps 的 4.17ms 预算, 所以 4 层足够吸收抖动而不白付延迟。
+    // (实测: 3 -> 202fps/12.2ms, 6 -> 221fps/18.8ms)。4 层覆盖 3 个 worker, 且不白付延迟。
     static constexpr int MAX_JOB_QUEUE = 4;
     std::mutex job_mutex_;
     std::condition_variable job_cv_;

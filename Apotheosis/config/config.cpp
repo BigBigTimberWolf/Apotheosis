@@ -226,7 +226,10 @@ void Config::writeDefaultsInPlace()
     int8_calib_images = 200;
 
     use_cuda_graph = true;
-    use_spin_wait_sync = true;
+    // 自旋等待 GPU 事件会把 CPU 空转掉。实测 (spin_vs_block_bench, i5-4590 4 核,
+    // 5ms 等待): 自旋 98% CPU/墙钟 -> 240fps 下约 1.2 个核; 阻塞 2% -> 0.03 个核。
+    // 代价仅墙钟 +0.1ms/次。本机解码已占约 2 个核, 这 1.2 个核更值钱, 故默认关闭。
+    use_spin_wait_sync = false;
     spin_wait_timeout_ms = 50;
     use_process_boost = true;
     use_mmcss = true;
@@ -342,7 +345,7 @@ bool Config::loadConfig(const std::string& filename)
         std::clamp<long>(get_long("", "int8_calib_images", 200), 1L, 2000L));
 
     use_cuda_graph = get_bool("", "use_cuda_graph", true);
-    use_spin_wait_sync = get_bool("", "use_spin_wait_sync", true);
+    use_spin_wait_sync = get_bool("", "use_spin_wait_sync", false);
     spin_wait_timeout_ms = static_cast<int>(std::clamp<long>(get_long("", "spin_wait_timeout_ms", 50), 1L, 1000L));
     use_process_boost = get_bool("", "use_process_boost", true);
     use_mmcss = get_bool("", "use_mmcss", true);

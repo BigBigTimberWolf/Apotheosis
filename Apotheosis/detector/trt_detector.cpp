@@ -295,6 +295,13 @@ void TrtDetector::waitForEvent(cudaEvent_t ev)
     const bool spin = cfg.use_spin_wait_sync;
     const int  timeoutMs = cfg.spin_wait_timeout_ms;
 
+    // ★ 实测结论 (build\cuda\Release\spin_vs_block_bench.exe, 本机 i5-4590 4 核):
+    //   自旋等待在 240fps 下约吃掉 1.2 个核, 换来的是每次等待少 ~0.1 ms 墙钟。
+    //   本机只有 4 个核, 而解码(CPU 熵解码)就要用掉约 2 个 —— 用 1.2 个核去换
+    //   0.1 ms 不划算, 因此 use_spin_wait_sync 的默认值已改为 false。
+    //   要用回自旋 (最低延迟、最高 CPU 占用): 把配置里 use_spin_wait_sync 设为 true。
+    //   前提: copyCompleteEvent 必须带 cudaEventBlockingSync, 否则下面的
+    //   cudaEventSynchronize 分支同样会自旋 (实测 102% CPU/墙钟), 白关。
     const auto t0 = std::chrono::steady_clock::now();
 
     if (spin)
@@ -912,7 +919,18 @@ bool TrtDetector::initialize(const std::string& model_path)
         cudaEventCreate(&preprocessStartEvent[s]);
         cudaEventCreate(&inferenceStartEvent[s]);
         cudaEventCreate(&inferenceCompleteEvent[s]);
-        cudaEventCreate(&copyCompleteEvent[s]);
+        // ★ copyCompleteEvent 是每帧热路径上唯一真正被等待的事件
+        //   (waitForEvent(copyCompleteEvent[slot]), 见下面两处调用)。
+        //   必须加 cudaEventBlockingSync, 否则"关闭自旋"根本不起作用 ——
+        //   实测 (build\cuda\Release\spin_vs_block_bench.exe, 5ms 等待, 本机 i5-4590):
+        //     自旋 cudaEventQuery + _mm_pause : 5.10 ms CPU / 5.20 ms 墙钟 =  98%
+        //     裸 cudaEventSynchronize         : 5.31 ms CPU / 5.19 ms 墙钟 = 102%  <- 也在自旋!
+        //     cudaEventSynchronize+BlockingSync: 0.10 ms CPU / 5.32 ms 墙钟 =   2%
+        //   换算到 240fps: 自旋要吃掉约 1.2 个核, 阻塞只占 0.03 个核。
+        //   本机共 4 核, 解码已用约 2 核 —— 这 1.2 个核直接决定采集能不能跑满 240。
+        //   代价: 墙钟多约 0.1 ms/次 (唤醒延迟), 相对 ~4.5ms 的端到端链路可忽略。
+        //   注意保留 timing: 下面 copyMs 那行要用 cudaEventElapsedTime。
+        cudaEventCreateWithFlags(&copyCompleteEvent[s], cudaEventBlockingSync);
     }
 
     useCudaGraph = runtime_config::read()->use_cuda_graph;

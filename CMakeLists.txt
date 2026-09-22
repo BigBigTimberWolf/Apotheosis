@@ -504,6 +504,125 @@ copy_runtime(nvjpeg_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
 copy_runtime(nvjpeg_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
 copy_runtime(nvjpeg_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
 
+# ── 采集卡原生媒体类型枚举 (独立 exe) ────────────────────────────────────────
+# 列出卡在每种格式下真实声明的分辨率/帧率, 用来判断"降 MJPG 画质换解码速度"
+# 到底有没有可选的模式。不写死设备名 —— 按序号枚举。
+add_executable(mjpg_modes_dump "${SRC_DIR}/capture/tests/mjpg_modes_dump.cpp")
+if(MSVC)
+    target_compile_options(mjpg_modes_dump PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_link_libraries(mjpg_modes_dump PRIVATE mfplat mfreadwrite mfuuid mf)
+copy_runtime(mjpg_modes_dump "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(mjpg_modes_dump "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(mjpg_modes_dump "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── NV12 高帧率真伪探针 (独立 exe) ───────────────────────────────────────────
+# 判定卡是否真的在 240fps 出【内容不同】的帧, 还是 120fps 出帧被驱动复制成 240。
+# 三条独立判据: 到达率 / 相邻帧内容差异 / 设备时间戳间隔。
+add_executable(nv12_truth_probe "${SRC_DIR}/capture/tests/nv12_truth_probe.cpp")
+if(MSVC)
+    target_compile_options(nv12_truth_probe PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_link_libraries(nv12_truth_probe PRIVATE mfplat mfreadwrite mfuuid mf)
+copy_runtime(nv12_truth_probe "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(nv12_truth_probe "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(nv12_truth_probe "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── NV12 原始帧落盘 (独立 exe) ───────────────────────────────────────────────
+# 把连续若干帧原样写盘, 用外部工具比较文件差异, 不依赖自制哈希/队列逻辑。
+add_executable(nv12_dump_frames "${SRC_DIR}/capture/tests/nv12_dump_frames.cpp")
+if(MSVC)
+    target_compile_options(nv12_dump_frames PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_link_libraries(nv12_dump_frames PRIVATE mfplat mfreadwrite mfuuid mf)
+copy_runtime(nv12_dump_frames "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(nv12_dump_frames "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(nv12_dump_frames "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── MJPG 帧体积探针 (独立 exe) ───────────────────────────────────────────────
+# 量采集卡当前实际吐出的 JPEG 体积。解码耗时随体积线性增长, 所以"解码能不能
+# 扛住 240fps"必须先知道真实体积 (无信号小帧会给出误导性的乐观结论)。
+add_executable(mjpg_size_probe "${SRC_DIR}/capture/tests/mjpg_size_probe.cpp")
+if(MSVC)
+    target_compile_options(mjpg_size_probe PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_link_libraries(mjpg_size_probe PRIVATE mfplat mfreadwrite mfuuid mf)
+copy_runtime(mjpg_size_probe "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(mjpg_size_probe "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(mjpg_size_probe "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── MJPEG 解码耗时 vs 体积 多点扫描 (独立 exe) ───────────────────────────────
+# 用同一张真实帧重编码出多个体积档位, 多点回归判断"固定开销"是否真实存在。
+# 两个样本点拟合出的截距不是证据。
+add_executable(mjpg_sweep "${SRC_DIR}/capture/tests/mjpg_sweep.cpp")
+if(MSVC)
+    target_compile_options(mjpg_sweep PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_include_directories(mjpg_sweep PRIVATE "${SRC_DIR}/capture" "${OPENCV_INCLUDE_DIR}")
+target_link_libraries(mjpg_sweep PRIVATE CUDA::cudart CUDA::nvjpeg "${OPENCV_LIB}")
+copy_runtime(mjpg_sweep "${OPENCV_DLL}")
+copy_runtime(mjpg_sweep "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+copy_runtime(mjpg_sweep "${CUDAToolkit_BIN_DIR}/nvjpeg64_12.dll")
+copy_runtime(mjpg_sweep "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(mjpg_sweep "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(mjpg_sweep "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── CPU 亲和性修复验证 (独立 exe) ────────────────────────────────────────────
+# 直接调用 CPUAffinityManager 并用 GetProcessAffinityMask 读回真实生效的核,
+# 确认"请求 N 个核"确实拿到 N 个 (旧实现 4 核机器上请求 4 只得 2)。
+add_executable(affinity_check
+    "${SRC_DIR}/mem/tests/affinity_check.cpp"
+    "${SRC_DIR}/mem/cpu_affinity_manager.cpp")
+if(MSVC)
+    target_compile_options(affinity_check PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_include_directories(affinity_check PRIVATE "${SRC_DIR}/mem")
+target_link_libraries(affinity_check PRIVATE mfplat mfreadwrite mfuuid mf)
+copy_runtime(affinity_check "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(affinity_check "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(affinity_check "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── 解码 worker 池吞吐基准 (独立 exe) ────────────────────────────────────────
+# 扫 (worker 数 × 核数), 给出各组合实际吞吐, 对照 240fps 预算决定 DECODE_WORKERS。
+add_executable(decode_workers_bench "${SRC_DIR}/capture/tests/decode_workers_bench.cpp")
+if(MSVC)
+    target_compile_options(decode_workers_bench PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_link_libraries(decode_workers_bench PRIVATE CUDA::cudart CUDA::nvjpeg)
+copy_runtime(decode_workers_bench "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+copy_runtime(decode_workers_bench "${CUDAToolkit_BIN_DIR}/nvjpeg64_12.dll")
+copy_runtime(decode_workers_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(decode_workers_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(decode_workers_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# ── 自旋 vs 阻塞等待 CPU 代价 (独立 exe) ─────────────────────────────────────
+# 量化 use_spin_wait_sync 在 4 核机器上占用多少核, 以及改阻塞同步能省回多少。
+add_executable(spin_vs_block_bench "${SRC_DIR}/detector/tests/spin_wait_bench.cpp")
+if(MSVC)
+    target_compile_options(spin_vs_block_bench PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+target_link_libraries(spin_vs_block_bench PRIVATE CUDA::cudart)
+copy_runtime(spin_vs_block_bench "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+copy_runtime(spin_vs_block_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(spin_vs_block_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(spin_vs_block_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_DIR}")
