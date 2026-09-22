@@ -581,6 +581,11 @@ void reset()
         g_scopeCtlLast = false;
         g_scopeTapped = false;
     }
+    resetMouse();
+}
+
+void resetMouse()
+{
     std::lock_guard<std::mutex> lk(g_mouse_mtx);
     if (g_mouse)
     {

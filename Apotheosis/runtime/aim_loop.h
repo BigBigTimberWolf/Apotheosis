@@ -16,6 +16,7 @@ namespace runtime::aim_loop
 
 bool tick();
 void reset();
+void resetMouse();
 
 bool active();
 

@@ -179,9 +179,10 @@ HardwarePage::HardwarePage(QWidget* parent)
     m_statusText = new QLabel;
     m_statusText->setStyleSheet("font-size:13px;");
     statusRow->addWidget(m_statusText, 1);
-    m_connectBtn = new QPushButton(zh(u8"连接"));
+    m_connectBtn = new QPushButton(zh(u8"连接鼠标"));
     m_connectBtn->setFixedHeight(28);
     m_connectBtn->setCursor(Qt::PointingHandCursor);
+    m_connectBtn->setToolTip(zh(u8"只重连鼠标那台。键盘那台用下面键盘卡片里的按钮单独连。"));
     statusRow->addWidget(m_connectBtn);
     statusCard->contentLayout()->addLayout(statusRow);
     layout->addWidget(statusCard);
@@ -296,6 +297,25 @@ HardwarePage::HardwarePage(QWidget* parent)
 
         kbdLayout->addWidget(m_kbdUnitEnabled);
         kbdLayout->addWidget(m_kbdUnitPanel);
+
+        // ── 键盘独立连接状态 + 独立连接按钮 ─────────────────────────────
+        //
+        // 与鼠标分开: 两块板是各自独立的串口/固件, 一个连不上不该影响另一个的
+        // 重连操作, 状态也必须能分别显示。原来只有一个总的"连接"按钮, 一旦
+        // 键盘那台有问题, 用户无法判断是鼠标还是键盘挂了。
+        auto* kbdStatusRow = new QHBoxLayout;
+        kbdStatusRow->setSpacing(8);
+        m_kbdStatusDot = new QLabel(QString::fromUtf8(u8"●"));
+        m_kbdStatusDot->setFixedWidth(20);
+        kbdStatusRow->addWidget(m_kbdStatusDot);
+        m_kbdStatusText = new QLabel;
+        m_kbdStatusText->setStyleSheet("font-size:13px;");
+        kbdStatusRow->addWidget(m_kbdStatusText, 1);
+        m_connectKbdBtn = new QPushButton(zh(u8"连接键盘"));
+        m_connectKbdBtn->setFixedHeight(28);
+        m_connectKbdBtn->setCursor(Qt::PointingHandCursor);
+        kbdStatusRow->addWidget(m_connectKbdBtn);
+        kbdLayout->addLayout(kbdStatusRow);
     }
     layout->addWidget(m_kbdCard);
 
@@ -326,11 +346,11 @@ HardwarePage::HardwarePage(QWidget* parent)
     connect(m_makcuNewBaudKbd, &QComboBox::currentIndexChanged, this, [this](int) {
         ConfigManager::instance().setMakcuNewBaudrateKbd(comboNumber(m_makcuNewBaudKbd));
     });
-    // 勾选/取消"接入键盘硬件": 显示或隐藏下面的串口行, 并立即重连生效。
+    // 勾选/取消"接入键盘硬件": 显示或隐藏下面的串口行, 并立即重连键盘那一台。
     connect(m_kbdUnitEnabled, &QCheckBox::toggled, this, [this](bool on) {
         m_kbdUnitPanel->setVisible(on);
         ConfigManager::instance().setMakcuNewPortKbd(on ? comboText(m_makcuNewPortKbd) : QString());
-        reconnectDevice();
+        reconnectKbdOnly();
     });
     connect(m_kmboxNetIp, &QLineEdit::textChanged, this, [](const QString& value) {
         ConfigManager::instance().setKmboxNetIp(value);
@@ -341,7 +361,9 @@ HardwarePage::HardwarePage(QWidget* parent)
     connect(m_kmboxNetUuid, &QLineEdit::textChanged, this, [](const QString& value) {
         ConfigManager::instance().setKmboxNetUuid(value);
     });
-    connect(m_connectBtn, &QPushButton::clicked, this, &HardwarePage::reconnectDevice);
+    // 两个独立按钮: 鼠标一台、键盘一台, 互不影响。
+    connect(m_connectBtn, &QPushButton::clicked, this, &HardwarePage::reconnectMouseOnly);
+    connect(m_connectKbdBtn, &QPushButton::clicked, this, &HardwarePage::reconnectKbdOnly);
 
     connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
             this, &HardwarePage::loadFieldsFromConfig);
@@ -471,26 +493,49 @@ void HardwarePage::onInputMethodChanged(int index)
     reconnectDevice();
 }
 
-void HardwarePage::reconnectDevice()
+void HardwarePage::syncConfigToRuntime()
 {
     auto& cm = ConfigManager::instance();
-    {
-        std::lock_guard<std::recursive_mutex> lock(configMutex);
-        config.input_method = cm.inputMethod().toStdString();
-        config.makcu_port = cm.makcuPort().toStdString();
-        config.makcu_baudrate = cm.makcuBaudrate();
-        config.makcu_new_port = cm.makcuNewPort().toStdString();
-        config.makcu_new_baudrate = cm.makcuNewBaudrate();
-        config.makcu_new_port_kbd = cm.makcuNewPortKbd().toStdString();
-        config.makcu_new_baudrate_kbd = cm.makcuNewBaudrateKbd();
-        config.kmbox_net_ip = cm.kmboxNetIp().toStdString();
-        config.kmbox_net_port = cm.kmboxNetPort().toStdString();
-        config.kmbox_net_uuid = cm.kmboxNetUuid().toStdString();
-    }
+    std::lock_guard<std::recursive_mutex> lock(configMutex);
+    config.input_method = cm.inputMethod().toStdString();
+    config.makcu_port = cm.makcuPort().toStdString();
+    config.makcu_baudrate = cm.makcuBaudrate();
+    config.makcu_new_port = cm.makcuNewPort().toStdString();
+    config.makcu_new_baudrate = cm.makcuNewBaudrate();
+    config.makcu_new_port_kbd = cm.makcuNewPortKbd().toStdString();
+    config.makcu_new_baudrate_kbd = cm.makcuNewBaudrateKbd();
+    config.kmbox_net_ip = cm.kmboxNetIp().toStdString();
+    config.kmbox_net_port = cm.kmboxNetPort().toStdString();
+    config.kmbox_net_uuid = cm.kmboxNetUuid().toStdString();
+}
 
+void HardwarePage::reconnectDevice()
+{
+    syncConfigToRuntime();
     runtime_config::publish();
     createInputDevices();
     assignInputDevices();
+    input_method_changed.store(false);
+    refreshStatus();
+}
+
+void HardwarePage::reconnectMouseOnly()
+{
+    // 只重连鼠标那台: 键盘的串口/连接状态完全不动。
+    // 这是"分开连"的关键 —— 键盘那台有问题时, 重连鼠标不该把键盘也一起拆掉重来。
+    syncConfigToRuntime();
+    runtime_config::publish();
+    reconnectMouseDevice();
+    input_method_changed.store(false);
+    refreshStatus();
+}
+
+void HardwarePage::reconnectKbdOnly()
+{
+    // 只重连键盘那台。
+    syncConfigToRuntime();
+    runtime_config::publish();
+    reconnectKeyboardDevice();
     input_method_changed.store(false);
     refreshStatus();
 }
@@ -559,13 +604,49 @@ void HardwarePage::refreshStatus()
         m_statusDot->setStyleSheet("color:#22C55E; font-size:16px;");
         m_statusText->setText(deviceName + zh(u8" — 已连接"));
         m_statusText->setStyleSheet("color:#22C55E; font-size:13px;");
-        m_connectBtn->setText(zh(u8"重连"));
+        m_connectBtn->setText(zh(u8"重连鼠标"));
     } else {
         m_statusDot->setStyleSheet("color:#EF4444; font-size:16px;");
         m_statusText->setText(deviceName + (pointerExists
             ? zh(u8" — 连接失败(检查IP/端口/UUID或串口号)")
             : zh(u8" — 未初始化")));
         m_statusText->setStyleSheet("color:#EF4444; font-size:13px;");
-        m_connectBtn->setText(zh(u8"连接"));
+        m_connectBtn->setText(zh(u8"连接鼠标"));
+    }
+
+    // ── 键盘那台的状态, 独立显示在键盘卡片里 ─────────────────────────────
+    //
+    // 与鼠标完全分开: 两块板是独立串口/固件, 必须能单独看出是哪一台没连上。
+    // 之前只有一个总状态, 键盘挂了也只会显示在鼠标那一行上, 无法区分。
+    if (m_kbdStatusText)
+    {
+        const QString kbdPort = ConfigManager::instance().makcuNewPortKbd();
+        const bool kbdConfigured = !kbdPort.isEmpty();
+        const bool kbdOpen = (makcuNewSerialKbd != nullptr) && makcuNewSerialKbd->isOpen();
+
+        if (kbdOpen)
+        {
+            m_kbdStatusDot->setStyleSheet("color:#22C55E; font-size:16px;");
+            m_kbdStatusText->setText(kbdPort + zh(u8" — 已连接"));
+            m_kbdStatusText->setStyleSheet("color:#22C55E; font-size:13px;");
+            m_connectKbdBtn->setText(zh(u8"重连键盘"));
+            m_connectKbdBtn->setEnabled(true);
+        }
+        else if (kbdConfigured)
+        {
+            m_kbdStatusDot->setStyleSheet("color:#EF4444; font-size:16px;");
+            m_kbdStatusText->setText(kbdPort + zh(u8" — 连接失败(检查串口号/供电)"));
+            m_kbdStatusText->setStyleSheet("color:#EF4444; font-size:13px;");
+            m_connectKbdBtn->setText(zh(u8"连接键盘"));
+            m_connectKbdBtn->setEnabled(true);
+        }
+        else
+        {
+            m_kbdStatusDot->setStyleSheet("color:#9CA3AF; font-size:16px;");
+            m_kbdStatusText->setText(zh(u8"未配置串口 — 勾选上面的开关并选串口"));
+            m_kbdStatusText->setStyleSheet("color:#6B7280; font-size:13px;");
+            m_connectKbdBtn->setText(zh(u8"连接键盘"));
+            m_connectKbdBtn->setEnabled(false);
+        }
     }
 }

@@ -314,6 +314,13 @@ void MouseThread::setMakcuNewConnection(MakcuNewConnection* newMakcu)
     refreshDriver();
 }
 
+void MouseThread::setMakcuNewKbdConnection(MakcuNewConnection* newMakcuKbd)
+{
+    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+    makcu_new_kbd_ = newMakcuKbd;
+    refreshDriver();
+}
+
 void MouseThread::setKmboxNetConnection(KmboxNetConnection* newKmboxNet)
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);

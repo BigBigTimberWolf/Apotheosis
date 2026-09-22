@@ -76,6 +76,7 @@ public:
 
     void setMakcuConnection(MakcuConnection* makcu);
     void setMakcuNewConnection(MakcuNewConnection* makcuNew);
+    void setMakcuNewKbdConnection(MakcuNewConnection* makcuNewKbd);
     void setKmboxNetConnection(KmboxNetConnection* kmboxNet);
 
 private:

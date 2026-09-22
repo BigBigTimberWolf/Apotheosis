@@ -39,6 +39,7 @@
 #include "runtime/live_tune.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/aim_telemetry.h"
+#include "runtime/aim_loop.h"     // resetMouse() —— 换设备后丢弃旧的 MouseThread
 #include "runtime/sched_boost.h"
 #include "auth/auth_state.h"
 
@@ -120,6 +121,15 @@ void createInputDevices()
     static std::mutex reconnectMutex;
     std::lock_guard<std::mutex> reconnect(reconnectMutex);
     const auto cfg = runtime_config::read();
+
+    // ★ 必须在【销毁旧连接之前】先丢掉 MouseThread。
+    //
+    // MouseThread 里持有 MakcuConnection*/MakcuNewConnection* 的裸指针, 而且它的
+    // 析构/复位路径会去调 driver_->leftUp()/rightUp()。如果先 destroy 旧连接再
+    // 调 resetMouse(), 这一步就会解引用【已释放】的对象 —— use-after-free。
+    // 之前把 resetMouse() 放在函数末尾就是这个错误顺序。
+    runtime::aim_loop::resetMouse();
+
     std::unique_ptr<MakcuConnection> oldMakcu;
     std::unique_ptr<MakcuNewConnection> oldNew;
     std::unique_ptr<MakcuNewConnection> oldNewKbd;
@@ -218,6 +228,109 @@ void createInputDevices()
         makcuNewSerialKbd = nextNewKbd.release();
         kmboxNetSerial = nextKmboxNet.release();
     }
+    // 注意: 这里【不再】调用 resetMouse() —— 它已经在函数开头、销毁旧连接之前调过了。
+    // 放在这里会造成"旧连接已释放、MouseThread 还指着它"的释放后使用。
+}
+
+void reconnectMouseDevice()
+{
+    static std::mutex reconnectMtx;
+    std::lock_guard<std::mutex> reconnect(reconnectMtx);
+    const auto cfg = runtime_config::read();
+
+    // 同 createInputDevices: 先丢 MouseThread(此时旧连接仍有效), 再销毁旧连接。
+    runtime::aim_loop::resetMouse();
+
+    std::unique_ptr<MakcuConnection> oldMakcu;
+    std::unique_ptr<MakcuNewConnection> oldNew;
+    std::unique_ptr<KmboxNetConnection> oldKmboxNet;
+    {
+        std::lock_guard<std::mutex> lock(inputDeviceMutex);
+        oldMakcu.reset(makcuSerial);
+        oldNew.reset(makcuNewSerial);
+        oldKmboxNet.reset(kmboxNetSerial);
+        makcuSerial = nullptr;
+        makcuNewSerial = nullptr;
+        kmboxNetSerial = nullptr;
+    }
+    oldMakcu.reset();
+    oldNew.reset();
+    oldKmboxNet.reset();
+
+    std::unique_ptr<MakcuConnection> nextMakcu;
+    std::unique_ptr<MakcuNewConnection> nextNew;
+    std::unique_ptr<KmboxNetConnection> nextKmboxNet;
+
+    if (cfg->input_method == "MAKCU")
+    {
+        nextMakcu = std::make_unique<MakcuConnection>(cfg->makcu_port, cfg->makcu_baudrate);
+        if (!nextMakcu->isOpen()) nextMakcu.reset();
+    }
+    else if (cfg->input_method == "MAKCUNEW")
+    {
+        nextNew = std::make_unique<MakcuNewConnection>(cfg->makcu_new_port, cfg->makcu_new_baudrate);
+        if (!nextNew->isOpen()) nextNew.reset();
+    }
+    else if (cfg->input_method == "KMBOXNET")
+    {
+        nextKmboxNet = std::make_unique<KmboxNetConnection>(
+            cfg->kmbox_net_ip, cfg->kmbox_net_port, cfg->kmbox_net_uuid);
+        if (!nextKmboxNet->isOpen()) nextKmboxNet.reset();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(inputDeviceMutex);
+        makcuSerial = nextMakcu.release();
+        makcuNewSerial = nextNew.release();
+        kmboxNetSerial = nextKmboxNet.release();
+    }
+    // 注意: resetMouse() 已在函数开头调过(那时旧连接仍有效)。
+    // 绝不能放在这里 —— 旧连接已经释放, 而 MouseThread 的驱动还指着它们。
+}
+
+void reconnectKeyboardDevice()
+{
+    static std::mutex reconnectMtx;
+    std::lock_guard<std::mutex> reconnect(reconnectMtx);
+    const auto cfg = runtime_config::read();
+
+    // ★ 同理, 而且这里更危险: HybridDriver 内部持有 kbdConn_ 裸指针。
+    //   如果先销毁键盘连接、再 resetMouse(), 那么任何一次 tapKey/maskRealKeyboard
+    //   都会解引用已释放的对象 —— 表现为"一触发瞄准(自动急停要发屏蔽命令)就出事"。
+    //   顺序必须是: 先丢 MouseThread, 再销毁旧键盘连接。
+    runtime::aim_loop::resetMouse();
+
+    std::unique_ptr<MakcuNewConnection> oldNewKbd;
+    {
+        std::lock_guard<std::mutex> lock(inputDeviceMutex);
+        oldNewKbd.reset(makcuNewSerialKbd);
+        makcuNewSerialKbd = nullptr;
+    }
+    oldNewKbd.reset();
+
+    std::unique_ptr<MakcuNewConnection> nextNewKbd;
+    if (!cfg->makcu_new_port_kbd.empty())
+    {
+        nextNewKbd = std::make_unique<MakcuNewConnection>(
+            cfg->makcu_new_port_kbd, cfg->makcu_new_baudrate_kbd);
+        if (!nextNewKbd->isOpen())
+        {
+            std::cerr << "[Apotheosis] keyboard device " << cfg->makcu_new_port_kbd
+                      << " failed to open." << std::endl;
+            nextNewKbd.reset();
+        }
+        else
+        {
+            std::cout << "[Apotheosis] Keyboard device connected on "
+                      << cfg->makcu_new_port_kbd << std::endl;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(inputDeviceMutex);
+        makcuNewSerialKbd = nextNewKbd.release();
+    }
+    // 新键盘连接已装好; 下一拍 aim_loop 的 ensureMouse() 会用新指针重建 MouseThread。
 }
 
 void assignInputDevices()

@@ -134,7 +134,7 @@ bool MakcuNewConnection::establishSession()
             if (!openSerial(candidate)) continue;
             startReader();
 
-            const bool alive = probeAscii("km.version", kVersionTag, 500);
+            const bool alive = probeAscii("km.version", kVersionTag, 1000);
             if (!alive)
             {
                 closeSession();
@@ -181,9 +181,9 @@ bool MakcuNewConnection::establishSession()
             }
 
             closeSession();
-            if (tryConnectAt(kBootBaud, ""))
+            if (tryConnectAt(kBootBaud, " (fallback)"))
             {
-                std::cerr << "[MakcuNew] Baud switch failed, fell back to 115200 bps."
+                std::cout << "[MakcuNew] Baud switch not supported, connected at 115200 bps."
                           << std::endl;
                 return true;
             }

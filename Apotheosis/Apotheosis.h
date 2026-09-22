@@ -34,5 +34,7 @@ extern std::mutex inputDeviceMutex;
 
 void createInputDevices();
 void assignInputDevices();
+void reconnectMouseDevice();
+void reconnectKeyboardDevice();
 
 #endif // APOTHEOSIS_H

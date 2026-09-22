@@ -23,9 +23,12 @@ private slots:
     void onInputMethodChanged(int index);
     void refreshStatus();
     void reconnectDevice();
+    void reconnectMouseOnly();
+    void reconnectKbdOnly();
     void loadFieldsFromConfig();
 
 private:
+    void syncConfigToRuntime();
     // 键盘硬件卡片只对 MAKCU(hybrid) 与 MAKCUNEW 有意义, KMBOXNET 下隐藏。
     void updateKbdCardVisibility(int methodIndex);
 
@@ -60,6 +63,9 @@ private:
     QWidget* m_kbdUnitPanel{};
     QComboBox* m_makcuNewPortKbd{};
     QComboBox* m_makcuNewBaudKbd{};
+    QPushButton* m_connectKbdBtn{};
+    QLabel* m_kbdStatusDot{};
+    QLabel* m_kbdStatusText{};
     CardWidget* m_kbdCard{};
 
     QLineEdit* m_kmboxNetIp{};
