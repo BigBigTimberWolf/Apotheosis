@@ -13,9 +13,27 @@
 // State
 // ---------------------------------------------------------------------------
 
-// km.move 通过 atomic 传给 mouseMoveTask 消费。moveX/moveY 是【当前挂着未处理】的位移。
-std::atomic<int> moveX(0);
-std::atomic<int> moveY(0);
+// km.move 通过单独累加器传给 mouseMoveTask 消费。
+//
+// ★ 为什么真鼠标与注入必须分成两组变量, 且累加语义不同:
+//
+//   真鼠标 (Serial1, 右板转发): 必须【累加】。
+//     透传设备的不变量是"被控机上光标的位置 == 物理鼠标的真实位置"。
+//     每丢一个增量, 光标就永久偏一点 —— 表现为"鼠标变慢/跟不上手"。
+//     而 xTaskNotifyGive / ulTaskNotifyTake(pdTRUE) 会把多次通知【合并成一次唤醒】,
+//     所以只要 mouseMoveTask 没来得及消费(例如 handleMove 在等 USB 端点时会阻塞
+//     最多 100ms), 期间到达的报告就会互相覆盖 —— 1000Hz 鼠标在 100ms 内会有
+//     约 100 个增量塌缩成 1 个, 99% 的位移凭空消失, 等端点恢复后才"恢复正常"。
+//     这正是"偶尔变慢几秒又恢复"的机制。
+//
+//   注入 (Serial0, 上位机): 保持【最新覆盖】。
+//     上位机每帧都按当前误差重新计算该发多少, 旧增量已经没有意义;
+//     若也累加, 一旦下发速率超过 USB 承载能力就会积压, 松手后光标还会继续漂(过冲)。
+//     所以注入侧刻意保留"最新赢"的丢帧策略。
+std::atomic<int> moveXReal(0);
+std::atomic<int> moveYReal(0);
+std::atomic<int> moveXInj(0);
+std::atomic<int> moveYInj(0);
 
 // 按键掩码 —— 真/注入分开维护。发到 HID 的是 merged = real | inj。
 // 位序与 usb_desc.cpp 的报告描述符对齐: bit0=L bit1=R bit2=M bit3=side1 bit4=side2
@@ -234,7 +252,14 @@ void serial1RX() {
             trimCommand(commandBuffer);
 
             g_cmd_source.store(SRC_REAL);   // Serial1 = 右板转发的真实鼠标
-            if (strncmp(commandBuffer, "km.move", 7) == 0 && !kmMoveCom.exchange(true)) {
+            if (strncmp(commandBuffer, "km.move", 7) == 0) {
+                // ★ 真鼠标位移【不】参与 kmMoveCom 互斥。
+                //
+                // 原来这里带了 && !kmMoveCom.exchange(true): 一旦 serial0Task 正持着
+                // 这个标志, 真鼠标的这一拍就竞争失败 -> 既丢位移, 又被甩进
+                // processCommand, 而 km.move 不在 normalCommandTable 里, 最终落到
+                // handleDebugcommand 被【原样回显到 Serial0】—— 白白污染日志还丢输入。
+                // handleKmMoveCommand 内部只用原子量与互斥锁, 从两个 RX 任务并发调用安全。
                 handleKmMoveCommand(commandBuffer);
             } else {
                 processCommand(commandBuffer);
@@ -251,10 +276,18 @@ void handleKmMoveCommand(const char *command) {
     int x = 0, y = 0;
     sscanf(command + strlen("km.move") + 1, "%d,%d", &x, &y);
 
-    {
+    // 按来源决定累加还是覆盖 —— 见 moveXReal 处的说明。
+    //   SRC_REAL   = 右板转发的真实鼠标 -> 累加(一个增量都不能丢)
+    //   SRC_INJECT = 上位机注入         -> 覆盖(最新赢, 避免积压过冲)
+    const bool isReal = (g_cmd_source.load() == SRC_REAL);
+
+    if (isReal) {
+        moveXReal.fetch_add(x, std::memory_order_relaxed);
+        moveYReal.fetch_add(y, std::memory_order_relaxed);
+    } else {
         std::lock_guard<std::mutex> lock(commandMutex);
-        moveX = x;
-        moveY = y;
+        moveXInj = x;
+        moveYInj = y;
     }
 
     if (mouseMoveTaskHandle != NULL) {
@@ -469,13 +502,15 @@ void mouseMoveTask(void *pvParameters) {
         // 10ms 超时兜底: 让 CLICK 定时弹起能被检查(即使没有位移事件)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
 
+        // 两级位移合并成一拍下发: 真鼠标(累加, 一个不丢) + 注入(最新值)。
+        // 真鼠标用 exchange(0) 取走并清零, 保证这期间新到的增量不会丢。
         int x, y;
         {
+            const int rx = moveXReal.exchange(0, std::memory_order_relaxed);
+            const int ry = moveYReal.exchange(0, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lock(commandMutex);
-            x = moveX;
-            y = moveY;
-            moveX = 0;
-            moveY = 0;
+            x = rx + moveXInj.exchange(0, std::memory_order_relaxed);
+            y = ry + moveYInj.exchange(0, std::memory_order_relaxed);
         }
         if (x != 0 || y != 0) {
             handleMove(x, y);
