@@ -36,8 +36,6 @@ MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate
             onButtonCallback(button, pressed);
         });
 
-        device_.enableButtonMonitoring(true);
-
         if (device_.connect(port))
         {
             if (baud_rate > 0)
@@ -47,6 +45,25 @@ MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate
                     std::cerr << "[Makcu] Failed to set baud rate to " << baud_rate
                         << ", continuing with current baud rate." << std::endl;
                 }
+            }
+
+            // ★ 必须在 connect() 之后才启用按键监控.
+            //
+            // Device::enableButtonMonitoring 内部一开始就检查 connected 标志, 未连接
+            // 就 early-return false 什么都不发. 老实现在 connect 之前调用它, 相当于
+            // no-op —— 固件从没收到 km.buttons(1), g_buttonMonitoringEnabled 保持
+            // false, 真按键掩码不推送 -> 上位机 shooting_active 等永远是 false ->
+            // 鼠标热键 (LeftMouseButton / RightMouseButton / ...) 判定不到按下 ->
+            // g_active_hotkey_index 永远是 -1 -> aim_loop 直接 return, 按热键完全
+            // 不移动.
+            //
+            // setBaudRate 之后调是因为切波特率会 close+reopen 串口, 期间任何命令
+            // 都是白发; 波特率稳定下来再开监控才可靠.
+            if (!device_.enableButtonMonitoring(true))
+            {
+                std::cerr << "[Makcu] Failed to enable button monitoring; mouse "
+                             "hotkeys (Left/Right/Middle/Side) will not work."
+                          << std::endl;
             }
 
             is_open_ = true;
