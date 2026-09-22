@@ -145,8 +145,39 @@ void createInputDevices()
     std::unique_ptr<KmboxNetConnection> nextKmboxNet;
     if (cfg->input_method == "MAKCU")
     {
+        // ── 混合模式 (hybrid) ─────────────────────────────────────────────
+        //
+        // 鼠标那台的固件已重写为【纯 ASCII】(km.move / km.left(1) / ...), 与官方
+        // SDK 的 MakcuConnection 无缝对接; 键盘那台 (KBD_PASSTHROUGH) 仍是二进制,
+        // 继续走 MakcuNewConnection。两条链路协议不同, 必须用 WrappedHybridDriver
+        // 分别转发 —— 见 mouse_driver.h 的说明。
+        //
+        // 开启条件: MAKCU 方式 + 填了键盘串口 (makcu_new_port_kbd)。
+        // 不填键盘口 = 只有鼠标那台, 行为与纯 WrappedMakcuDriver 完全一致
+        // (键盘能力位不声明, tapKey/maskRealKeyboard 直接失败)。
         nextMakcu = std::make_unique<MakcuConnection>(cfg->makcu_port, cfg->makcu_baudrate);
         if (!nextMakcu->isOpen()) nextMakcu.reset();
+
+        if (!cfg->makcu_new_port_kbd.empty() &&
+            cfg->makcu_new_port_kbd != cfg->makcu_port)
+        {
+            nextNewKbd = std::make_unique<MakcuNewConnection>(
+                cfg->makcu_new_port_kbd, cfg->makcu_new_baudrate_kbd);
+            if (!nextNewKbd->isOpen())
+            {
+                std::cerr << "[Apotheosis] keyboard port " << cfg->makcu_new_port_kbd
+                          << " failed to open; keyboard injection and auto-stop "
+                          << "keyboard masking will be unavailable. Mouse is unaffected."
+                          << std::endl;
+                nextNewKbd.reset();
+            }
+            else
+            {
+                std::cout << "[Apotheosis] Hybrid input: mouse on " << cfg->makcu_port
+                          << " (ASCII), keyboard on " << cfg->makcu_new_port_kbd
+                          << " (binary)." << std::endl;
+            }
+        }
     }
     else if (cfg->input_method == "MAKCUNEW")
     {
@@ -155,6 +186,10 @@ void createInputDevices()
 
         // 第二台(键盘)。端口为空 = 未配置, 保持 nullptr 让驱动回落。
         // 与第一台端口相同也视为未配置(避免对同一个串口开两次)。
+        //
+        // ★ 注意: 这里【不】改走 hybrid。MAKCUNEW 方式下鼠标那台用的是
+        //   MakcuNewConnection(二进制), 与键盘那台同协议, WrappedMakcuNewDriver
+        //   已经能正确处理双硬件; 换成 MakcuConnection 反而会因为协议不符而失灵。
         if (!cfg->makcu_new_port_kbd.empty() &&
             cfg->makcu_new_port_kbd != cfg->makcu_new_port)
         {

@@ -369,28 +369,20 @@ void MakcuNewConnection::sendDeadBaud(unsigned int baud)
 
 void MakcuNewConnection::subscribeAsync(bool on)
 {
-    const uint8_t enable = on ? 1 : 0;
-    const bool ok = sendFrame(makcu::CMD_SUB_ASYNC, &enable, 1);
-    if (!ok)
-    {
-        std::cerr << "[MakcuNew] 0x48 SUB_ASYNC write failed on " << port_
-                  << " (physical button readback will not work)" << std::endl;
-        buttonStreamReady_.store(false, std::memory_order_release);
-        return;
-    }
+    // ★ 只走 ASCII 通道: km.buttons(1)。
+    //
+    // 固件已对齐官方 SDK, Serial0 上是【纯按行 ASCII】解析
+    // (fw_device/src/handleCommands.cpp 的 serial0RX: 逐字节攒进命令缓冲,
+    //  见到 '\n' 才 processCommand)。二进制帧解析器(proto_parser.cpp)已被删除。
+    //
+    // 因此不能再发 0x48 二进制订阅帧: 它没有 '\n', 会被当成垃圾文本一直留在
+    // 命令缓冲里, 污染下一条命令 —— 表现为"鼠标能动但间歇性命令失灵"。
+    //
+    // 按键回读现在只有一条通道: km.buttons(1) 使能后, 固件在【真实按键】变化时
+    // 直接往 Serial0 推一个 <0x20 的单字节掩码(0..31), 由 feedAsciiByte 的
+    // <0x20 分支收下。它不依赖帧同步, 抗错位能力本来就强于原来的 0xA5 5C 帧。
     if (on)
     {
-        // 第二条冗余通道: 固件的单字节裸掩码流(km.buttons(1))。
-        //
-        // 这条路径与 0x84 帧【互为冗余】, 且更健壮:
-        //   · 0x84 帧是 0xA5 0x5C 开头的 9 字节帧, 需要接收侧帧同步正确、CRC 通过;
-        //     任何一次分片/错位都会让该帧被丢弃, 而固件只在按键【变化】时才推,
-        //     丢了就不会重发 —— 表现就是"能移动但热键读不到按下"。
-        //   · 裸掩码是 1 个 <32 的字节, 上位机 feedAsciiByte() 的 b<0x20 分支直接
-        //     捕获, 不依赖帧同步, 抗错位能力强得多。
-        //
-        // 固件侧两条流由不同开关控制(g_async_sub / g_makcu_buttons_enabled),
-        // 开这条不影响那条, 属于纯增量。
         writeAsciiLine("km.buttons(1)");
         makcuButtonsModeOn_.store(true, std::memory_order_release);
     }
@@ -546,16 +538,21 @@ bool MakcuNewConnection::initializeProtocolSession()
     buttonStreamReady_.store(false, std::memory_order_release);
     lastButtonFrameMs_.store(0, std::memory_order_release);
 
-    // 订阅按键上报。固件在 onSubAsync 里会立刻补发一帧当前按键态
-    // (见 fw_device/src/handleCommands.cpp:443), 所以这里发完就等一下收帧。
+    // 使能按键上报 (km.buttons(1))。
+    //
+    // ★ 注意固件【不会】在使能时补发当前按键态 —— 它只在真实按键发生变化时推送
+    //   (见 fw_device/src/handleCommands.cpp 的 handleMouseButton)。
+    //   所以下面"等第一帧"的等待可能一直等不到, 这是正常的(用户还没按键),
+    //   绝不能因此判定链路故障。这里只等到超时就报告"未确认", 由保活机制在
+    //   用户首次按键后自动转为 ready。
     lastButtonSubscribeMs_.store(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count(),
         std::memory_order_release);
     subscribeAsync(true);
 
-    // 等第一帧按键上报落地。等到就说明回读链路是通的; 等不到不阻断启动
-    // (鼠标位移不受影响), 但必须【明确告知】—— 否则用户只会看到"热键没反应"。
+    // 短暂等待, 只用于把「使能命令本身没发出去」这种情况尽早暴露出来。
+    // 等不到按键帧不算失败 —— 用户没按键时本来就没有帧。
     for (int i = 0; i < 20; ++i)
     {
         if (lastButtonFrameMs_.load(std::memory_order_acquire) != 0)
@@ -568,10 +565,10 @@ bool MakcuNewConnection::initializeProtocolSession()
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    std::cerr << "[MakcuNew] WARNING: no physical button report received on "
-              << port_ << " within 100ms. Hotkeys bound to mouse buttons "
-              << "(LeftMouseButton/RightMouseButton/...) will NOT trigger. "
-              << "Mouse movement is unaffected." << std::endl;
+    std::cout << "[MakcuNew] Button monitoring enabled on " << port_
+              << " (km.buttons(1)); no button frame yet because no physical "
+              << "button change has occurred. Hotkeys will work on first press."
+              << std::endl;
     return true;
 }
 
