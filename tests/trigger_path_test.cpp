@@ -1,6 +1,7 @@
 
 #include "mouse/aim_path.h"
 #include "mouse/trigger_fsm.h"
+#include "mouse/trigger_release.h"
 
 #include <cmath>
 #include <cstdio>
@@ -249,6 +250,26 @@ static void test_reset_releases()
         check(f.phase() != boss::TriggerPhase::SwitchCooldown,
               "★ reset 后第一帧不算「换目标」");
     }
+}
+
+static void test_target_loss_releases()
+{
+    boss::TriggerFsm trigger;
+    boss::ScopeController scope;
+    run(trigger, 1, 0, 10, true, 1, true, 0, 0, 200);
+    scope.tick(true, true, 2, 0, 0);
+    const auto held = boss::releaseOnTargetLoss(trigger, scope, 2);
+    check(held.left && held.right, "目标消失时释放长按的左键和右键");
+    const auto again = boss::releaseOnTargetLoss(trigger, scope, 2);
+    check(!again.left && !again.right, "连续丢框不会重复发送松键");
+
+    boss::ScopeController tapScope;
+    tapScope.tick(true, true, 1, 0, 0);
+    const auto tap = boss::releaseOnTargetLoss(trigger, tapScope, 1);
+    check(tap.right, "点按开镜时先完成待释放的短按");
+    check(tapScope.engaged(), "丢框后保留点按开镜状态，重获目标不再点一次");
+    check(!tapScope.tick(true, true, 1, 0, 20).press_right,
+          "重获目标不会把游戏里的镜关掉");
 }
 
 static void test_linear_passthrough()
@@ -517,6 +538,7 @@ int main()
     test_hold_mode();
     test_switch_cooldown();
     test_reset_releases();
+    test_target_loss_releases();
 
     test_linear_passthrough();
     test_no_scaling();

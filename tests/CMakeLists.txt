@@ -45,6 +45,7 @@ add_logic_test(gpu_ready_event_test "${CMAKE_CURRENT_LIST_DIR}/gpu_ready_event_t
 # This test verifies event ownership with an instrumented CUDA API, not GPU work.
 target_include_directories(gpu_ready_event_test BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}/stubs")
 add_logic_test(raw_frame_layout_test "${CMAKE_CURRENT_LIST_DIR}/raw_frame_layout_test.cpp")
+add_logic_test(sensitivity_calibrator_test "${CMAKE_CURRENT_LIST_DIR}/sensitivity_calibrator_test.cpp")
 
 # ── 控制器层回归 (2026-09-17 重建) ────────────────────────────────────────────
 #

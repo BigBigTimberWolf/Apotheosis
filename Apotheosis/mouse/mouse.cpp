@@ -121,8 +121,9 @@ void MouseThread::moveWorkerLoop()
             const bool sent = sendMovementToDriver(move.dx, move.dy);
             if (sent) {
                 runtime::latency::markMoveSent(move.capture_ns, move.aim_ns);
-                appliedDx_.fetch_add(move.dx, std::memory_order_release);
-                appliedDy_.fetch_add(move.dy, std::memory_order_release);
+                std::lock_guard<std::mutex> feedbackLock(feedbackMtx_);
+                appliedDx_ += move.dx;
+                appliedDy_ += move.dy;
             } else {
                 failedMoves_.fetch_add(1, std::memory_order_release);
             }
@@ -157,8 +158,9 @@ void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns
             if (ok)
             {
                 if (dx != 0 || dy != 0) runtime::latency::markMoveSent(capture_ns, aim_ns);
-                appliedDx_.fetch_add(dx, std::memory_order_release);
-                appliedDy_.fetch_add(dy, std::memory_order_release);
+                std::lock_guard<std::mutex> feedbackLock(feedbackMtx_);
+                appliedDx_ += dx;
+                appliedDy_ += dy;
             }
             else
             {
@@ -254,8 +256,13 @@ void MouseThread::clearQueuedMoves()
 MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
 {
     MovementFeedback out;
-    out.dx = static_cast<int>(appliedDx_.exchange(0, std::memory_order_acq_rel));
-    out.dy = static_cast<int>(appliedDy_.exchange(0, std::memory_order_acq_rel));
+    {
+        std::lock_guard<std::mutex> feedbackLock(feedbackMtx_);
+        out.dx = static_cast<int>(appliedDx_);
+        out.dy = static_cast<int>(appliedDy_);
+        appliedDx_ = 0;
+        appliedDy_ = 0;
+    }
     out.latency_ms = static_cast<double>(
         lastLatencyUs_.load(std::memory_order_acquire)) / 1000.0;
     out.failed = failedMoves_.load(std::memory_order_acquire);

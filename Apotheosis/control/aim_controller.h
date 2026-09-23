@@ -46,6 +46,8 @@ struct ControlInput
     std::vector<Candidate> candidates;
     Vec2 cross;
     double dtSec = 0.0;
+    // 自上次控制拍以来，驱动确认发送的鼠标计数（已包含轨迹整形）。
+    Counts sentCounts{};
     uint64_t frameIndex = 0;
     bool detectionFresh = true;
     bool crosshairFresh = true;
@@ -123,9 +125,6 @@ private:
 
     bool hasLastBox_ = false;
     Box lastBox_;
-
-    // 上一拍实际下发的计数，供本拍做自身速度污染修正 (见 pxPerCount)。
-    Counts lastSentCounts_{ 0, 0 };
 
     int targetIdCounter_ = 0;
 };

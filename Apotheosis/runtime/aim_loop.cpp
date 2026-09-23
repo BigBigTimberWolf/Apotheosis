@@ -6,6 +6,7 @@
 #include "mouse/aim_path.h"
 #include "mouse/auto_stop.h"
 #include "mouse/trigger_fsm.h"
+#include "mouse/trigger_release.h"
 #include "mouse/trigger_scope.h"
 
 #include "Apotheosis.h"   // 设备指针 (makcuSerial / makcuNewSerial / kmboxNetSerial)
@@ -106,13 +107,25 @@ bool g_scopeTapped = false;
 void releaseHeldButtons()
 {
     std::lock_guard<std::mutex> lk(g_mtx);
+    const bool releaseLeft = g_trigger.reset();
+    const auto act = g_scope.forceRelease();
     if (MouseThread* mouse = ensureMouse())
     {
-        if (g_trigger.reset())
+        if (releaseLeft)
             mouse->releaseLeftButton();
-        const auto act = g_scope.forceRelease();
         if (act.release_right)
             mouse->releaseRightButton();
+    }
+}
+
+void releaseTargetButtons(int scopeMode)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    const auto release = boss::releaseOnTargetLoss(g_trigger, g_scope, scopeMode);
+    if (MouseThread* mouse = ensureMouse())
+    {
+        if (release.left) mouse->releaseLeftButton();
+        if (release.right) mouse->releaseRightButton();
     }
 }
 
@@ -281,7 +294,11 @@ bool tick()
         return false;
     }
     if (activeIdx >= static_cast<int>(cfg.hotkeys.size()))
+    {
+        g_scopeTapped = false;
+        releaseHeldButtons();
         return false;
+    }
     const HotkeyProfile& hk = cfg.hotkeys[static_cast<size_t>(activeIdx)];
 
     if (!hk.ctl_enabled)
@@ -295,10 +312,8 @@ bool tick()
     bool detectionFresh = false;
     {
         std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
-        if (detectionBuffer.boxes.empty())
-            return false;
-        detectionFresh = !detectionBuffer.staleLocked();
         const size_t n = detectionBuffer.boxes.size();
+        detectionFresh = n > 0 && !detectionBuffer.staleLocked();
         candidates.reserve(n);
         for (size_t i = 0; i < n; ++i)
         {
@@ -322,7 +337,10 @@ bool tick()
         }
     }
     if (candidates.empty())
+    {
+        releaseTargetButtons(std::clamp(hk.trigger_auto_scope, 0, 2));
         return false;
+    }
 
     bool crossFresh = false;
     const control::Vec2 cross = resolveCrosshair(cfg, hk, crossFresh);
@@ -351,6 +369,11 @@ bool tick()
     }
     // 本拍是否真的在用【开镜档】那一组参数 (日志与预览都用它)。
     const bool scopeCtlActive = scopeEngaged && hk.scope_ctl_enabled != 0;
+
+    // 只统计驱动报告成功的位移；路径整形、队列覆盖和发送失败都在此之后结算。
+    MouseThread::MovementFeedback movementFeedback;
+    if (MouseThread* mouse = ensureMouse())
+        movementFeedback = mouse->consumeMovementFeedback();
 
     const auto now = std::chrono::steady_clock::now();
     double dtSec = 0.0;
@@ -407,6 +430,7 @@ bool tick()
         in.candidates = std::move(candidates);
         in.cross = cross;
         in.dtSec = dtSec;
+        in.sentCounts = control::Counts{ movementFeedback.dx, movementFeedback.dy };
         in.frameIndex = ++g_frame_index;
         in.detectionFresh = detectionFresh;
         in.crosshairFresh = crossFresh;
@@ -449,10 +473,7 @@ bool tick()
 
     if (!out.engaged)
     {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        const auto act = g_scope.flushUp();
-        if (mouse && act.release_right)
-            mouse->releaseRightButton();
+        releaseTargetButtons(scopeMode);
         return false;
     }
 
@@ -578,14 +599,15 @@ bool tick()
         }
     }
 
-    if (move_x == 0 && move_y == 0)
-        return false;
-
-    // 馈送标定器 (如果用户正在前台测算灵敏度 k)
+    // 标定器使用已确认发送的计数和本拍观测位置，不把尚未发送的 PID 输出当作实测。
     if (control::globalSensitivityCalibrator().isRunning() && out.hasTarget)
     {
-        control::globalSensitivityCalibrator().feed(out.anchor.x, move_x, dtSec);
+        control::globalSensitivityCalibrator().feed(
+            out.filteredCenter.x, movementFeedback.dx, dtSec);
     }
+
+    if (move_x == 0 && move_y == 0)
+        return false;
 
     if (MouseThread* mouse = ensureMouse())
         mouse->sendRawMove(move_x, move_y);

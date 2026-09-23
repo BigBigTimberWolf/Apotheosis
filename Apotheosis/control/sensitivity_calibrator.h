@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 
 namespace control {
 
@@ -31,6 +32,7 @@ public:
 
     void start()
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         running_ = true;
         ready_ = false;
         samples_.clear();
@@ -40,19 +42,22 @@ public:
         totalCounts_ = 0.0;
         currTime_ = 0.0;
         bestK_ = 0.0;
+        lastFitTime_ = -1.0;
     }
 
     void stop()
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         running_ = false;
     }
 
-    bool isRunning() const { return running_; }
-    bool isReady() const { return ready_; }
-    double estimatedK() const { return bestK_; }
+    bool isRunning() const { std::lock_guard<std::mutex> lock(mutex_); return running_; }
+    bool isReady() const { std::lock_guard<std::mutex> lock(mutex_); return ready_; }
+    double estimatedK() const { std::lock_guard<std::mutex> lock(mutex_); return bestK_; }
 
     void feed(double anchorPx, int countsSent, double dtSec)
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!running_ || ready_) return;
         if (!std::isfinite(anchorPx) || !std::isfinite(dtSec) || dtSec <= 0.0) return;
 
@@ -72,6 +77,7 @@ public:
 
     Status status() const
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         Status s;
         s.running = running_;
         s.sampleCount = static_cast<int>(samples_.size());
@@ -79,15 +85,15 @@ public:
         s.estimatedK = bestK_;
         s.ready = ready_;
 
-        if (!running_)
-        {
-            s.progress = 0.0;
-            s.hint = "测算已就绪，点击「开始采集」";
-        }
-        else if (ready_)
+        if (ready_)
         {
             s.progress = 1.0;
             s.hint = "测算完成（20 次高精度均值收敛）！请查看测算值并确认回填。";
+        }
+        else if (!running_)
+        {
+            s.progress = 0.0;
+            s.hint = "测算已就绪，点击「开始采集」";
         }
         else
         {
@@ -98,6 +104,9 @@ public:
     }
 
 private:
+    // 界面线程读写状态，推理线程喂样本；两边必须保护同一组数据。
+    mutable std::mutex mutex_;
+
     void tryCompute()
     {
         if (samples_.size() < 25) return;

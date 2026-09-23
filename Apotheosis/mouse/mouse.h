@@ -99,8 +99,9 @@ private:
     std::condition_variable queueCv_;
     std::thread moveWorker_;
     std::atomic<bool> workerStop_{ false };
-    std::atomic<long long> appliedDx_{ 0 };
-    std::atomic<long long> appliedDy_{ 0 };
+    std::mutex feedbackMtx_;
+    long long appliedDx_ = 0;
+    long long appliedDy_ = 0;
     std::atomic<long long> lastLatencyUs_{ 0 };
     std::atomic<unsigned long long> failedMoves_{ 0 };
 

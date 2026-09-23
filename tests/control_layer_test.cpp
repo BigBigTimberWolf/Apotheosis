@@ -832,15 +832,16 @@ static void testFullChain()
         ControllerConfig cfgOff = cfgOn;
         cfgOff.pxPerCount = 0.0;
 
-        AimController acOn, acOff;
+        AimController acOn, acOff, acNoSent;
         acOn.setConfig(cfgOn);
         acOff.setConfig(cfgOff);
+        acNoSent.setConfig(cfgOn);
 
         ControlInput in;
         in.dtSec = dt;
         in.cross = Vec2{ 320, 240 };
 
-        ControlOutput outOn, outOff;
+        ControlOutput outOn, outOff, outNoSent;
         for (int i = 0; i < 30; ++i)
         {
             Candidate c;
@@ -849,8 +850,11 @@ static void testFullChain()
             c.confidence = 0.9;
             in.candidates = { c };
             in.frameIndex = static_cast<uint64_t>(i);
+            in.sentCounts = Counts{ 4, 0 };
             outOn = acOn.update(in);
             outOff = acOff.update(in);
+            in.sentCounts = Counts{ 0, 0 };
+            outNoSent = acNoSent.update(in);
         }
 
         check(outOn.predictor.applied && outOff.predictor.applied,
@@ -858,6 +862,8 @@ static void testFullChain()
         check(outOn.predictor.rawVelocity.x > outOff.predictor.rawVelocity.x,
               "★★★ 打开灵敏度折算后, 喂给预测器的速度比不修正时更大 "
               "(修正了准星自己追踪造成的观测速度低估)");
+        checkNear(outNoSent.predictor.rawVelocity.x, outOff.predictor.rawVelocity.x,
+                  1e-9, "驱动没有确认发送位移时，不把 PID 输出算作自身运动");
     }
 }
 
