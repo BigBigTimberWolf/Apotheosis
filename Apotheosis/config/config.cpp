@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -664,6 +665,46 @@ bool Config::loadConfig(const std::string& filename)
                             std::make_shared<const std::vector<float>>(std::move(samples));
                 }
             }
+            const std::string trainedField = get_string(
+                sec, "aim_path_neural_trained", "");
+            const bool legacyNeural = get_bool(sec, "aim_path_neural_enabled", false);
+            hk.aim_path_neural_trained = trainedField.empty()
+                ? legacyNeural : get_bool(sec, "aim_path_neural_trained", false);
+            const double neuralExamples = get_double(sec, "aim_path_neural_examples", 0);
+            hk.aim_path_neural_examples = std::isfinite(neuralExamples)
+                ? static_cast<int>(std::clamp(neuralExamples, 0.0, 200.0)) : 0;
+            hk.aim_path_neural_validation_rmse = static_cast<float>(get_double(
+                sec, "aim_path_neural_validation_rmse", 0.0));
+            hk.aim_path_neural_validation_p95 = static_cast<float>(get_double(
+                sec, "aim_path_neural_validation_p95", 0.0));
+            hk.aim_path_neural_slope_variation = static_cast<float>(get_double(
+                sec, "aim_path_neural_slope_variation", 0.0));
+            if (hk.aim_path_neural_trained)
+            {
+                const auto tokens = splitString(
+                    get_string(sec, "aim_path_neural_weights", ""), ',');
+                if (tokens.size() == hk.aim_path_neural_weights.size())
+                {
+                    for (size_t wi = 0; wi < tokens.size(); ++wi)
+                    {
+                        try
+                        {
+                            size_t parsed = 0;
+                            const float value = std::stof(tokens[wi], &parsed);
+                            if (parsed != tokens[wi].size() || !std::isfinite(value) ||
+                                std::abs(value) > 20.0f)
+                                throw std::invalid_argument("invalid neural weight");
+                            hk.aim_path_neural_weights[wi] = value;
+                        }
+                        catch (...) { hk.aim_path_neural_trained = false; break; }
+                    }
+                }
+                else hk.aim_path_neural_trained = false;
+            }
+            if (!hk.aim_path_neural_trained)
+                hk.aim_path_neural_weights.fill(0.0f);
+            else if (trainedField.empty() && legacyNeural && hk.aim_path_mode == 2)
+                hk.aim_path_mode = 4; // 旧版神经网络挂在 Custom 模式下。
 
             hotkeys.push_back(std::move(hk));
         }
@@ -741,7 +782,17 @@ bool Config::loadConfig(const std::string& filename)
         hk.trigger_switch31_delay_ms = std::clamp(hk.trigger_switch31_delay_ms, 0, 2000);
         hk.trigger_switch31_step_ms = std::clamp(hk.trigger_switch31_step_ms, 5, 100);
 
-        hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 3);
+        hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 4);
+        hk.aim_path_neural_examples = std::clamp(hk.aim_path_neural_examples, 0, 200);
+        if (!std::isfinite(hk.aim_path_neural_validation_rmse) ||
+            hk.aim_path_neural_validation_rmse < 0.0f)
+            hk.aim_path_neural_validation_rmse = 0.0f;
+        if (!std::isfinite(hk.aim_path_neural_validation_p95) ||
+            hk.aim_path_neural_validation_p95 < 0.0f)
+            hk.aim_path_neural_validation_p95 = 0.0f;
+        if (!std::isfinite(hk.aim_path_neural_slope_variation) ||
+            hk.aim_path_neural_slope_variation < 0.0f)
+            hk.aim_path_neural_slope_variation = 0.0f;
         hk.aim_path_influence = std::clamp(hk.aim_path_influence, 0, 100);
         hk.aim_path_bezier_cx1 = std::clamp(hk.aim_path_bezier_cx1, 0.0f, 1.0f);
         hk.aim_path_bezier_cx2 = std::clamp(hk.aim_path_bezier_cx2, 0.0f, 1.0f);
@@ -1027,6 +1078,21 @@ bool Config::saveConfig(const std::string& filename)
                     std::clamp(static_cast<double>(s[i]), -1.0, 1.0) * 10000.0));
             }
             file << "\n";
+        }
+        file << "aim_path_neural_trained = " << to_bool_str(hk.aim_path_neural_trained) << "\n"
+             << "aim_path_neural_examples = " << hk.aim_path_neural_examples << "\n"
+             << "aim_path_neural_validation_rmse = " << hk.aim_path_neural_validation_rmse << "\n"
+             << "aim_path_neural_validation_p95 = " << hk.aim_path_neural_validation_p95 << "\n"
+             << "aim_path_neural_slope_variation = " << hk.aim_path_neural_slope_variation << "\n";
+        if (hk.aim_path_neural_trained)
+        {
+            file << "aim_path_neural_weights = " << std::setprecision(9);
+            for (size_t wi = 0; wi < hk.aim_path_neural_weights.size(); ++wi)
+            {
+                if (wi) file << ',';
+                file << hk.aim_path_neural_weights[wi];
+            }
+            file << std::setprecision(4) << "\n";
         }
 
         file << "\n";

@@ -129,7 +129,34 @@ int main()
                   "31 切枪配置保存后不丢失");
     }
 
-    std::printf("\n[3] 旧三槽 -> aim_classes 的迁移(唯一还活着的迁移)\n");
+    {
+        std::string weights;
+        for (int i = 0; i < 25; ++i)
+        {
+            if (i) weights += ',';
+            weights += "0.1";
+        }
+        const std::string path = write_config("neural_legacy.ini",
+            "aim_path_mode = 2\n"
+            "aim_path_neural_enabled = true\n"
+            "aim_path_neural_weights = " + weights + "\n");
+        Config old;
+        check(old.loadConfig(path), "旧版神经网络曲线配置能加载");
+        if (!old.hotkeys.empty())
+            check(old.hotkeys[0].aim_path_mode == 4 &&
+                  old.hotkeys[0].aim_path_neural_trained,
+                  "旧版 Custom 神经网络模型迁移到独立曲线模式");
+        check(old.saveConfig("neural_migrated.ini"), "迁移模型能保存");
+        Config restored;
+        check(restored.loadConfig("neural_migrated.ini"), "迁移模型能回读");
+        if (!restored.hotkeys.empty())
+            check(restored.hotkeys[0].aim_path_neural_trained &&
+                  restored.hotkeys[0].aim_path_mode == 4 &&
+                  restored.hotkeys[0].aim_path_neural_weights[24] > 0.09f,
+                  "25 个神经网络权重保存后完整回读");
+    }
+
+    std::printf("\n[3] 旧三槽 -> aim_classes 的迁移\n");
     {
         const std::string p = write_config("legacy_slots.ini",
             "target_class_1 = 2\n"

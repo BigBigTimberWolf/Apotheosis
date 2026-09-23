@@ -112,11 +112,15 @@ private:
     QLabel* m_pathSectionBezier = nullptr;
     QLabel* m_pathSectionWind   = nullptr;
     QLabel* m_pathSectionCustom = nullptr;
+    QLabel* m_pathSectionNeural = nullptr;
     QWidget* m_windThresholdRow = nullptr;
     std::vector<QWidget*> m_pathSectionBezierRows;
     std::vector<QWidget*> m_pathSectionWindRows;
     std::vector<QWidget*> m_pathSectionCustomRows;
+    std::vector<QWidget*> m_pathSectionNeuralRows;
     CurveCanvas* m_curveCanvas = nullptr;
+    CurveCanvas* m_neuralPreviewCanvas = nullptr;
+    QLabel* m_neuralQualityLabel = nullptr;
 
     QWidget*     m_aimClassContainer = nullptr;
     QVBoxLayout* m_aimClassLayout    = nullptr;

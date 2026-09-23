@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -230,6 +231,12 @@ struct HotkeyProfile
     float aim_path_wind_distance  = 8.0f;
     int   aim_path_wind_threshold = 10;
     std::shared_ptr<const std::vector<float>> aim_path_custom_samples;
+    bool aim_path_neural_trained = false;
+    std::array<float, 25> aim_path_neural_weights{};
+    int aim_path_neural_examples = 0;
+    float aim_path_neural_validation_rmse = 0.0f;
+    float aim_path_neural_validation_p95 = 0.0f;
+    float aim_path_neural_slope_variation = 0.0f;
 
 };
 

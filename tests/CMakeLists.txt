@@ -47,6 +47,29 @@ target_include_directories(gpu_ready_event_test BEFORE PRIVATE "${CMAKE_CURRENT_
 add_logic_test(raw_frame_layout_test "${CMAKE_CURRENT_LIST_DIR}/raw_frame_layout_test.cpp")
 add_logic_test(sensitivity_calibrator_test "${CMAKE_CURRENT_LIST_DIR}/sensitivity_calibrator_test.cpp")
 add_logic_test(weapon_switch31_test "${CMAKE_CURRENT_LIST_DIR}/weapon_switch31_test.cpp")
+add_logic_test(neural_curve_test "${CMAKE_CURRENT_LIST_DIR}/neural_curve_test.cpp")
+
+if(Qt6Widgets_FOUND)
+    add_executable(neural_curve_ui_smoke
+        "${CMAKE_CURRENT_LIST_DIR}/neural_curve_ui_smoke.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/NeuralCurveTrainer.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/NeuralCurveTrainer.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/CurveCanvas.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/CurveCanvas.h")
+    target_include_directories(neural_curve_ui_smoke PRIVATE
+        "${APP_SOURCE_ROOT}" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_compile_features(neural_curve_ui_smoke PRIVATE cxx_std_20)
+    target_link_libraries(neural_curve_ui_smoke PRIVATE Qt6::Widgets Threads::Threads)
+    set_target_properties(neural_curve_ui_smoke PROPERTIES AUTOMOC ON)
+    if(MSVC)
+        target_compile_options(neural_curve_ui_smoke PRIVATE /utf-8 /Zc:char8_t-)
+    else()
+        target_compile_options(neural_curve_ui_smoke PRIVATE -fno-char8_t)
+    endif()
+    add_test(NAME neural_curve_ui_smoke COMMAND neural_curve_ui_smoke)
+    set_tests_properties(neural_curve_ui_smoke PROPERTIES
+        TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
 
 # ── 控制器层回归 (2026-09-17 重建) ────────────────────────────────────────────
 #

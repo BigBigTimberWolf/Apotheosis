@@ -172,6 +172,7 @@ set(APP_SOURCES
     "${SRC_DIR}/control/predictor.cpp"
     "${SRC_DIR}/control/aim_controller.cpp"
     "${SRC_DIR}/runtime/aim_loop.cpp"
+    "${SRC_DIR}/runtime/aim_path_config.h"
     # aim_loop_config.cpp 是【纯映射】, 不依赖 OpenCV/Windows ⇒ 逻辑测试也编它。
     "${SRC_DIR}/runtime/aim_loop_config.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
@@ -232,6 +233,8 @@ set(APP_SOURCES
     "${QT_UI_DIR}/widgets/CardWidget.h"
     "${QT_UI_DIR}/widgets/CurveCanvas.cpp"
     "${QT_UI_DIR}/widgets/CurveCanvas.h"
+    "${QT_UI_DIR}/widgets/NeuralCurveTrainer.cpp"
+    "${QT_UI_DIR}/widgets/NeuralCurveTrainer.h"
     "${QT_UI_DIR}/widgets/FormKit.cpp"
     "${QT_UI_DIR}/widgets/FormKit.h"
     "${QT_UI_DIR}/widgets/IconFont.cpp"

@@ -36,6 +36,7 @@
 #include "runtime/config_snapshot.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
+#include "widgets/NeuralCurveTrainer.h"
 #include "widgets/ToggleSwitch.h"
 
 namespace
@@ -1590,7 +1591,7 @@ void AimSettingsPage::buildTrajectoryCard()
     auto* cl = card->contentLayout();
     card->setToolTip(QString::fromUtf8(
         u8"轨迹只有在【瞄准控制器开启】时才有意义 —— 它整形的是控制器算出来的位移。\n"
-        u8"四种模式都只旋转不缩放：每拍走多远仍由 PID 决定，曲线只决定往哪个方向走。"));
+        u8"曲线模式只旋转不缩放：每拍走多远仍由 PID 决定，曲线只决定往哪个方向走。"));
 
     auto* modeCombo = new QComboBox;
     modeCombo->setObjectName("aimPathMode");
@@ -1598,11 +1599,12 @@ void AimSettingsPage::buildTrajectoryCard()
     modeCombo->addItem(QStringLiteral("贝塞尔曲线"), 1);
     modeCombo->addItem(QStringLiteral("自定义手绘"), 2);
     modeCombo->addItem(QStringLiteral("WindMouse（风力曲线）"), 3);
+    modeCombo->addItem(QString::fromUtf8(u8"神经网络训练曲线"), 4);
     auto* modeRow = FormKit::fieldRow(QStringLiteral("轨迹模式"), modeCombo);
     attachTip(modeRow, QString::fromUtf8(
         u8"移动轨迹的整形方式。\n"
         u8"★ 直线 = 完全透传控制器输出，与不开这个功能逐位一致。\n"
-        u8"★ 其余三种都【只旋转不缩放】：曲线只决定「往哪个方向走」，\n"
+        u8"★ 曲线模式都【只旋转不缩放】：曲线只决定「往哪个方向走」，\n"
         u8"  每拍走多远仍然由 PID 决定。所以它不会把控制器拖成振荡。\n"
         u8"★ 风力曲线额外带一个门控（见下面的门控阈值）：误差很小时整段\n"
         u8"  旁路走直线 —— 小修正保精度，只有大甩枪才走拟人路径。"));
@@ -1714,6 +1716,54 @@ void AimSettingsPage::buildTrajectoryCard()
         });
     }
 
+    m_pathSectionNeural = makeSectionTitle(QString::fromUtf8(u8"神经网络训练曲线"));
+    cl->addWidget(m_pathSectionNeural);
+    m_neuralQualityLabel = makeHint(QString::fromUtf8(
+        u8"尚未训练。点击下方按钮录制至少 5 条真实鼠标轨迹。"));
+    cl->addWidget(m_neuralQualityLabel);
+    m_pathSectionNeuralRows.push_back(m_neuralQualityLabel);
+    m_neuralPreviewCanvas = new CurveCanvas;
+    m_neuralPreviewCanvas->setObjectName("aimNeuralCurvePreview");
+    m_neuralPreviewCanvas->setEnabled(false);
+    cl->addWidget(m_neuralPreviewCanvas);
+    m_pathSectionNeuralRows.push_back(m_neuralPreviewCanvas);
+    auto* trainButton = new QPushButton(QString::fromUtf8(u8"录制轨迹并训练神经网络"));
+    trainButton->setObjectName("aimNeuralCurveTrain");
+    cl->addWidget(trainButton);
+    m_pathSectionNeuralRows.push_back(trainButton);
+    attachTip(trainButton, QString::fromUtf8(
+        u8"在弹窗里用 Windows 桌面鼠标从蓝色起点拖到绿色目标，录制多轮真实路径。\n"
+        u8"训练结束会用留出的轨迹评估拟合误差；点击应用后才写入当前热键。\n"
+        u8"★ 评估的是曲线拟合质量，不是游戏命中率。"));
+    connect(trainButton, &QPushButton::clicked, this, [this] {
+        const int profileIndex = currentRuntimeIndex();
+        if (profileIndex < 0) return;
+        auto* trainer = new NeuralCurveTrainerDialog(this);
+        trainer->setAttribute(Qt::WA_DeleteOnClose);
+        trainer->setWindowModality(Qt::WindowModal);
+        trainer->onApply = [this, profileIndex](const boss::NeuralCurveTrainResult& result) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(configMutex);
+                if (profileIndex >= static_cast<int>(config.hotkeys.size())) return;
+                HotkeyProfile& hp = config.hotkeys[profileIndex];
+                hp.aim_path_mode = 4;
+                hp.aim_path_neural_trained = true;
+                hp.aim_path_neural_weights = result.weights;
+                hp.aim_path_neural_examples = result.quality.trainingTrajectories
+                                            + result.quality.validationTrajectories;
+                hp.aim_path_neural_validation_rmse =
+                    static_cast<float>(result.quality.validationRmse);
+                hp.aim_path_neural_validation_p95 =
+                    static_cast<float>(result.quality.validationP95);
+                hp.aim_path_neural_slope_variation =
+                    static_cast<float>(result.quality.slopeVariation);
+                ConfigBridge::instance().markDirty();
+            }
+            reloadProfileToUi();
+        };
+        trainer->show();
+    });
+
     auto commit = [this, modeCombo]() {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
@@ -1758,6 +1808,7 @@ void AimSettingsPage::buildTrajectoryCard()
         const bool isBezier = (mode == 1);
         const bool isCustom = (mode == 2);
         const bool isWind   = (mode == 3);
+        const bool isNeural = (mode == 4);
 
         if (m_pathSectionBezier)
             m_pathSectionBezier->setVisible(isBezier);
@@ -1771,6 +1822,9 @@ void AimSettingsPage::buildTrajectoryCard()
         if (m_pathSectionCustom)
             m_pathSectionCustom->setVisible(isCustom);
         for (auto* w : m_pathSectionCustomRows) w->setVisible(isCustom);
+        if (m_pathSectionNeural)
+            m_pathSectionNeural->setVisible(isNeural);
+        for (auto* w : m_pathSectionNeuralRows) w->setVisible(isNeural);
     };
 
     connect(modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -2028,6 +2082,37 @@ void AimSettingsPage::reloadProfileToUi()
                 m_curveCanvas->setSamples(
                     hp.aim_path_custom_samples ? *hp.aim_path_custom_samples
                                                : std::vector<float>{});
+            if (m_neuralPreviewCanvas && m_neuralQualityLabel)
+            {
+                if (hp.aim_path_neural_trained)
+                {
+                    std::vector<float> preview(512);
+                    for (size_t pi = 0; pi < preview.size(); ++pi)
+                        preview[pi] = static_cast<float>(boss::evaluateNeuralCurve(
+                            hp.aim_path_neural_weights,
+                            static_cast<double>(pi) / (preview.size() - 1)));
+                    m_neuralPreviewCanvas->setSamples(preview);
+                    if (hp.aim_path_neural_examples > 0)
+                        m_neuralQualityLabel->setText(QString::fromUtf8(
+                            u8"已训练 %1 条轨迹；留出验证均方根偏差 %2%，95% 点偏差 %3%；"
+                            u8"斜率变化量 %4。指标衡量拟合质量，不是命中率。")
+                            .arg(hp.aim_path_neural_examples)
+                            .arg(hp.aim_path_neural_validation_rmse * 100.0, 0, 'f', 1)
+                            .arg(hp.aim_path_neural_validation_p95 * 100.0, 0, 'f', 1)
+                            .arg(hp.aim_path_neural_slope_variation, 0, 'f', 3));
+                    else
+                        m_neuralQualityLabel->setText(QString::fromUtf8(
+                            u8"已载入旧版神经网络模型，但没有保留验证指标；"
+                            u8"建议重新录制以评估拟合质量。"));
+                }
+                else
+                {
+                    m_neuralPreviewCanvas->setSamples({});
+                    m_neuralQualityLabel->setText(QString::fromUtf8(
+                        u8"尚未训练。点击下方按钮录制至少 5 条真实鼠标轨迹；"
+                        u8"未训练时该模式安全退回直线。"));
+                }
+            }
 
             rebuildAimClassRows();
         }

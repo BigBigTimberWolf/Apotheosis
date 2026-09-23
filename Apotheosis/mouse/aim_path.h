@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "neural_curve.h"
+
 namespace boss
 {
 
@@ -382,18 +384,7 @@ private:
         if (p_.mode == Mode::Custom)
         {
             if (p_.neural_enabled)
-            {
-                const double x = t * 2.0 - 1.0;
-                double raw = static_cast<double>(p_.neural_weights[24]);
-                for (int h = 0; h < 8; ++h)
-                {
-                    const double activation = std::tanh(
-                        static_cast<double>(p_.neural_weights[h]) * x +
-                        static_cast<double>(p_.neural_weights[8 + h]));
-                    raw += static_cast<double>(p_.neural_weights[16 + h]) * activation;
-                }
-                return std::tanh(raw) * 4.0 * t * (1.0 - t);
-            }
+                return evaluateNeuralCurve(p_.neural_weights, t);
             if (!p_.custom_samples) return 0.0;
             const auto& samples = *p_.custom_samples;
             const int N = static_cast<int>(samples.size());
