@@ -431,9 +431,12 @@ static void testPid()
         PidConfig cfg;
         cfg.inflightBeta = 1.6;
         PidController pid(cfg);
-        pid.update(Vec2{10, 0}, Vec2{}, dt);
+        const Counts first = pid.update(Vec2{10, 0}, Vec2{}, dt);
         for (int i = 0; i < 8; ++i)
+        {
+            pid.observeSentCounts(i == 0 ? first : Counts{}, dt);
             pid.update(Vec2{0.5, 0}, Vec2{}, dt);
+        }
         check(pid.telemetry().settled, "Smith 开启时也能停稳");
         pid.update(Vec2{2.5, 0}, Vec2{}, dt);
         checkNear(pid.telemetry().x.inflight, 0.0, 1e-9,
@@ -511,6 +514,16 @@ static void testPid()
         pid2.update(Vec2{0.01, 0}, Vec2{0, 0}, dt);
         checkNear(pid2.telemetry().x.p, 0.01, 1e-12,
                   "★ P 项经过原点: 0.01px 误差 ⇒ P=0.01 (连续, 无死区台阶)");
+    }
+
+    {
+        PidConfig cfg;
+        cfg.kdX = 0.1;
+        PidController pid(cfg);
+        const Counts first = pid.update(Vec2{1, 0}, Vec2{}, dt);
+        checkNear(pid.telemetry().x.d, 0.0, 1e-12,
+                  "首拍没有上一帧误差，D 项不能把位置误差当速度");
+        check(first.x == 0, "首拍 1px 误差不会被 Kd 放大成多计数突跳");
     }
 
     {
@@ -694,14 +707,15 @@ static void testPid()
         cfg.deadTimeMs = 46.0;
 
         PidController pid(cfg);
-        // 第一拍：目标在 100px 处，发出大力度拉枪；窗口里还没有历史，补偿为 0。
+        // 第一拍：目标在 100px 处，窗口里还没有驱动确认的位移，补偿为 0。
         const Counts c1 = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(c1.x > 0, "★ 第一拍向目标猛拉");
         checkNear(pid.telemetry().x.inflight, 0.0, 1e-9,
                   "★ 第一拍窗口里还没有历史发出的 counts，补偿量为 0");
 
         // 第二拍：46ms 死区内画面尚未改变（仍然看到同样 100px 误差）。
-        // 上一拍已经发出去的位移应当被折算扣除，第二拍力度减小。
+        // 驱动确认上一拍位移后，第二拍才应折算扣除。
+        pid.observeSentCounts(c1, dt);
         const Counts c2 = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(c2.x < c1.x, "★ 第二拍因在途位移扣除，输出力度减小（避免重复下令）");
         check(pid.telemetry().x.inflight > 0.0, "★ 第二拍补偿量非零");
@@ -714,6 +728,15 @@ static void testPid()
         const Counts u2 = pidOff.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(u1.x == c1.x, "★ beta=0 时第一拍与开启补偿的一组完全一致（交叉验证）");
         check(c2.x < u2.x, "★ 有/无补偿对照：有补偿时第二拍明显更小");
+
+        PidController unsent(cfg);
+        const Counts unsentFirst = unsent.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        unsent.observeSentCounts({}, dt);
+        const Counts unsentSecond = unsent.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(unsentFirst.x == c1.x && unsentSecond.x == u2.x,
+              "驱动未确认发送时 Smith 不得虚构上一拍的 PID 位移");
+        checkNear(unsent.telemetry().x.inflight, 0.0, 1e-9,
+                  "发送失败或队列覆盖时在途补偿保持为零");
     }
 
     {
@@ -755,9 +778,11 @@ static void testPid()
             cfg.deadTimeMs = 46.0;
             PidController pid(cfg);
             double last = 0.0;
+            Counts confirmed{};
             for (int i = 0; i < 200; ++i)
             {
-                pid.update(Vec2{1000, 0}, Vec2{0, 0}, dtSec);
+                pid.observeSentCounts(confirmed, dtSec);
+                confirmed = pid.update(Vec2{1000, 0}, Vec2{0, 0}, dtSec);
                 last = pid.telemetry().x.inflight;
             }
             return last;
@@ -779,7 +804,8 @@ static void testPid()
         cfg.inflightBeta = 1.6;
         cfg.deadTimeMs = 46.0;
         PidController pid(cfg);
-        pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        const Counts first = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        pid.observeSentCounts(first, dt);
         pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(pid.telemetry().x.inflight > 0.0, "复位前补偿量非零");
 
@@ -792,6 +818,19 @@ static void testPid()
         const Counts freshFirst = fresh.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(afterReset.x == freshFirst.x,
               "★ reset 后第一拍输出 == 全新控制器第一拍输出");
+    }
+
+    {
+        AxisState history;
+        for (int i = 0; i < 240; ++i)
+            history.recordCount(1, 1.0 / 240.0);
+        checkNear(history.inFlightCountsPerTick(1.0, 1.0 / 240.0), 1.0, 1e-9,
+                  "240fps 下 1000ms 窗口覆盖完整历史，不因 128 拍截断而低估");
+        history.reset();
+        for (int i = 0; i < 1000; ++i)
+            history.recordCount(1, 0.001);
+        checkNear(history.inFlightCountsPerTick(1.0, 0.001), 1.0, 1e-9,
+                  "最短有效拍长 1ms 时仍覆盖允许的最长窗口");
     }
 }
 
@@ -835,6 +874,29 @@ static void testFullChain()
         check(!out.engaged, "检测不新鲜时不 engage");
         check(out.idleReason == ControlOutput::IdleReason::StaleDetection,
               "idleReason = StaleDetection");
+    }
+
+    {
+        ControllerConfig smithCfg = cfg;
+        smithCfg.pid.inflightBeta = 1.6;
+        AimController ac;
+        ac.setConfig(smithCfg);
+        ControlInput in;
+        in.cross = Vec2{ 320, 240 };
+        in.dtSec = dt;
+        Candidate c; c.box = Box{ 380, 300, 40, 80 }; c.classId = 0; c.confidence = 0.9;
+        in.candidates = { c };
+        const ControlOutput first = ac.update(in);
+        check(first.engaged && first.counts.x > 0, "Smith 新鲜度回归前提：已下发位移");
+
+        in.detectionFresh = false;
+        in.sentCounts = first.counts;
+        check(!ac.update(in).engaged, "检测失鲜时本拍不出力");
+        in.detectionFresh = true;
+        in.sentCounts = Counts{};
+        const ControlOutput resumed = ac.update(in);
+        check(resumed.engaged && ac.telemetry().x.inflight > 0.0,
+              "失鲜拍也记录成功发送的位移，恢复时 Smith 不丢历史");
     }
 
     {

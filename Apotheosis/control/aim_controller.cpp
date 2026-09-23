@@ -43,6 +43,9 @@ ControlOutput AimController::update(const ControlInput& in)
         return out;
     }
 
+    // 即使本拍因检测/准星新鲜度而不出力，也不能丢失已经发送成功的位移。
+    pid_.observeSentCounts(in.sentCounts, in.dtSec);
+
     if (cfg_.requireFreshDetection && !in.detectionFresh)
     {
         out.idleReason = ControlOutput::IdleReason::StaleDetection;

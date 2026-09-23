@@ -546,10 +546,10 @@ bool tick()
                     hk.trigger_delay_jitter_ms, hk.trigger_duration_jitter_ms,
                     hk.trigger_interval_jitter_ms);
             }
-            else if (!hk.trigger_enabled)
+            else if (boss::releaseTriggerIfUnavailable(
+                         g_trigger, hk.trigger_enabled, scopeReady))
             {
-                if (g_trigger.reset())
-                    mouse->releaseLeftButton();
+                mouse->releaseLeftButton();
             }
 
             if (tAct.release_left) mouse->releaseLeftButton();

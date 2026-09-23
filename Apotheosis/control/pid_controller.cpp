@@ -57,15 +57,20 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
     double deriv = 0.0;
     if (kd != 0.0)
     {
-        const double de = error - st.prevError;
-        if (cfg_.tauDerivSec > 0.0 && st.hasPrev)
+        if (!st.hasPrev)
         {
+            // 首拍没有前一帧误差，不能把当前误差当作速度，否则 Kd 会突跳。
+            st.derivLp = 0.0;
+        }
+        else if (cfg_.tauDerivSec > 0.0)
+        {
+            const double de = error - st.prevError;
             const double a = 1.0 - std::exp(-dtSec / cfg_.tauDerivSec);
             st.derivLp += (de - st.derivLp) * a;
         }
         else
         {
-            st.derivLp = de;
+            st.derivLp = error - st.prevError;
         }
         deriv = st.derivLp / dtSec;
     }
@@ -101,9 +106,7 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
 
     st.carry = withCarry - countsClamped;
 
-    // 记录本拍发出的 counts 和 dt，供给后续拍做在途折算
     const int finalCounts = static_cast<int>(countsClamped);
-    st.recordCount(finalCounts, dtSec);
 
     st.prevError = error;
     st.hasPrev = true;
@@ -119,6 +122,13 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
     tm.inflight = inflight;
 
     return u;
+}
+
+void PidController::observeSentCounts(Counts sentCounts, double dtSec)
+{
+    if (!(dtSec > 0.0)) return;
+    stateX_.recordCount(sentCounts.x, dtSec);
+    stateY_.recordCount(sentCounts.y, dtSec);
 }
 
 Counts PidController::update(const Vec2& anchor, const Vec2& cross, double dtSec)

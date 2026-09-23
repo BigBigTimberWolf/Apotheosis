@@ -272,6 +272,24 @@ static void test_target_loss_releases()
           "重获目标不会把游戏里的镜关掉");
 }
 
+static void test_scope_unready_releases_trigger()
+{
+    boss::TriggerFsm trigger;
+    boss::ScopeController scope;
+    scope.tick(true, true, 2, 0, 0);
+    run(trigger, 1, 0, 10, true, 1, true, 0, 0, 200);
+    check(trigger.pressed(), "前提：开镜时长按扳机已按下左键");
+    check(!boss::releaseTriggerIfUnavailable(trigger, true, true),
+          "开镜仍就绪时不误放左键");
+
+    const auto scopeAction = scope.tick(false, true, 2, 0, 8);
+    const bool ready = scope.ready(true, 2, 0, 8);
+    check(scopeAction.release_right && !ready,
+          "目标离开命中区后长按开镜松右键并变为未就绪");
+    check(boss::releaseTriggerIfUnavailable(trigger, true, ready) && !trigger.pressed(),
+          "开镜未就绪时即使目标仍被检测到，也归还长按左键");
+}
+
 static void test_linear_passthrough()
 {
     std::printf("\n[8] 直线模式逐位透传\n");
@@ -539,6 +557,7 @@ int main()
     test_switch_cooldown();
     test_reset_releases();
     test_target_loss_releases();
+    test_scope_unready_releases_trigger();
 
     test_linear_passthrough();
     test_no_scaling();

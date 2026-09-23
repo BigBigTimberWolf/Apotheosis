@@ -57,8 +57,9 @@ struct AxisState
     double derivLp = 0.0;
     bool hasPrev = false;
 
-    // 在途位移环形缓冲区 (记录最近发出的 counts 和 dt)
-    static constexpr int kRingCap = 128;
+    // 在途位移环形缓冲区。运行时最短有效拍长为 1ms；1024 拍可覆盖界面允许的
+    // 最长 1000ms 窗口，并留出少量帧率抖动余量。
+    static constexpr int kRingCap = 1024;
     struct StepSample {
         int counts = 0;
         double dt = 0.0;
@@ -120,8 +121,8 @@ struct AxisState
         derivLp = 0.0;
         prevError = error;
         hasPrev = true;
-        ringHead = 0;
-        ringCount = 0;
+        // 在途历史继续由每拍成功发送计数（停稳时通常是 0）推进时间，
+        // 不能清空：进入停稳前的动作可能此刻才真正发送成功。
     }
 };
 
@@ -156,6 +157,8 @@ public:
     void setConfig(const PidConfig& cfg) { cfg_ = cfg; }
     const PidConfig& config() const { return cfg_; }
 
+    // 每个控制拍先记录自上拍以来驱动确认发送的计数，随后再计算本拍输出。
+    void observeSentCounts(Counts sentCounts, double dtSec);
     Counts update(const Vec2& anchor, const Vec2& cross, double dtSec);
 
     void reset();

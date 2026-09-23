@@ -23,4 +23,12 @@ inline TargetLossRelease releaseOnTargetLoss(TriggerFsm& trigger,
     return release;
 }
 
+// 自动开镜尚未就绪时扳机不会 tick；若左键已按下，必须在跳过状态机前归还。
+inline bool releaseTriggerIfUnavailable(TriggerFsm& trigger,
+                                        bool triggerEnabled,
+                                        bool scopeReady)
+{
+    return (!triggerEnabled || !scopeReady) && trigger.reset();
+}
+
 }
