@@ -774,6 +774,8 @@ static void testScopeCtlSwitch()
         checkNear(cc.pid.kpX, 5.0, 0.0, "★★ 开镜档 kpX 真的进了 ControllerConfig.pid");
         check(cc.pid.maxOutputCounts == 40, "★★ 开镜档限幅真的进了 ControllerConfig.pid");
         checkNear(cc.pxPerCount, 0.211, 0.0, "★★ 开镜档灵敏度折算 k 真的进了 ControllerConfig");
+        checkNear(cc.pid.deadTimeMs, 33.0, 0.0,
+                  "★★ 开镜档 Smith 窗口真的进了 PID");
     }
 
     // ④ 一键复制的搬运: 默认档 → 结构 → 开镜档, 一个字段都不能漏

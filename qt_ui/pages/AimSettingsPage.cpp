@@ -912,10 +912,10 @@ void AimSettingsPage::buildControllerCard()
     {
         auto* title = makeSectionTitle(QString::fromUtf8(u8"在途自身位移补偿 (Smith)"));
         title->setToolTip(QString::fromUtf8(
-            u8"链路死区内（约 46ms）已经发出去、游戏里已生效、但画面还没显现的自身"
+            u8"补偿窗口内已经发出去、游戏里已生效、但画面还没显现的自身"
             u8"位移，会被控制器当成「目标还没动」重复下令，导致锁定目标后来回抖动。\n"
             u8"这里把这部分位移从下一拍的输出里扣掉，纯计数域运算，不需要任何"
-            u8"灵敏度标定。"));
+            u8"灵敏度标定。窗口应按当前链路实际延迟设置。"));
         cl->addWidget(title);
     }
 
@@ -930,6 +930,14 @@ void AimSettingsPage::buildControllerCard()
         u8"★ 0 = 关闭，与没有这个功能逐位相同。\n"
         u8"★ 锁定目标后如果左右抖、必须靠降 Kp 才能压住，先把这个调到 1.6"
         u8"再重新试拉枪速度。")));
+
+    cl->addWidget(makeDoubleRowTip("ctlInflightDeadTimeMs",
+        "补偿窗口 (毫秒)", 0.0, 1000.0, 1.0, 46.0,
+        QString::fromUtf8(
+        u8"Smith 计算最近多长时间内已下发、画面尚未显现的鼠标计数。\n"
+        u8"★ 46ms 是旧链路日志反推的默认值，当前硬件应按实际延迟调整。\n"
+        u8"★ 设为 0 或将补偿强度设为 0，均会关闭 Smith。\n"
+        u8"★ 这里与「预测提前时间」和「近点停稳观察时间」是独立参数。")));
 
     card->setToolTip(QString::fromUtf8(
         u8"★ 「稳定器」那 5 项与滞回倍数目前都是【占位值】，没有实测依据，"
@@ -965,6 +973,7 @@ void AimSettingsPage::buildControllerCard()
         hp.ctl_predict_max_lead_ratio    = d("ctlPredictMaxLeadRatio");
         hp.ctl_k_px_per_count   = d("ctlKPxPerCount");
         hp.ctl_inflight_beta    = d("ctlInflightBeta");
+        hp.ctl_inflight_dead_time_ms = d("ctlInflightDeadTimeMs");
         hp.ctl_random_seed      = i("ctlRandomSeed");
 
         ConfigBridge::instance().markDirty();
@@ -1302,6 +1311,8 @@ const ScopeRowDesc kScopePredictRows[] = {
 const ScopeRowDesc kScopeInflightRows[] = {
     { "ctlInflightBeta", "scopeInflightBeta", "在途补偿强度 (无量纲, 0=关闭)",
       0.0, 3.0, 0.05, 1.6, 3 },
+    { "ctlInflightDeadTimeMs", "scopeInflightDeadTimeMs", "补偿窗口 (毫秒)",
+      0.0, 1000.0, 1.0, 46.0, 3 },
 };
 
 
@@ -1451,6 +1462,7 @@ void AimSettingsPage::buildScopeCtlCard()
         p.predict_max_lead_ratio    = d("scopePredictMaxLeadRatio");
         p.k_px_per_count   = d("scopeKPxPerCount");
         p.inflight_beta    = d("scopeInflightBeta");
+        p.inflight_dead_time_ms = d("scopeInflightDeadTimeMs");
         p.random_seed      = i("scopeRandomSeed");
 
         ConfigBridge::instance().markDirty();
@@ -1921,6 +1933,7 @@ void AimSettingsPage::reloadProfileToUi()
             sd("ctlPredictMaxLeadRatio", hp.ctl_predict_max_lead_ratio);
             sd("ctlKPxPerCount", hp.ctl_k_px_per_count);
             sd("ctlInflightBeta", hp.ctl_inflight_beta);
+            sd("ctlInflightDeadTimeMs", hp.ctl_inflight_dead_time_ms);
             si("ctlMaxOutputCounts", hp.ctl_max_output_counts);
             si("ctlRandomSeed", hp.ctl_random_seed);
 
@@ -1969,6 +1982,7 @@ void AimSettingsPage::reloadProfileToUi()
             sd("scopePredictMaxLeadRatio",        hp.ctl_scope.predict_max_lead_ratio);
             sd("scopeKPxPerCount",     hp.ctl_scope.k_px_per_count);
             sd("scopeInflightBeta",    hp.ctl_scope.inflight_beta);
+            sd("scopeInflightDeadTimeMs", hp.ctl_scope.inflight_dead_time_ms);
             si("scopeMaxOutputCounts", hp.ctl_scope.max_output_counts);
             si("scopeRandomSeed",      hp.ctl_scope.random_seed);
 

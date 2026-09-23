@@ -170,6 +170,7 @@ public:
 
         // 在途自身位移补偿 (Smith)：把已下发但画面未显现的自身位移从输出里扣掉。
         double ctlInflightBeta = 1.6;
+        double ctlInflightDeadTimeMs = 46.0;
 
         double ctlYOffset = 0.5;
         double ctlYOffsetMax = 0.5;
