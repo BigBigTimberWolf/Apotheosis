@@ -567,6 +567,12 @@ bool Config::loadConfig(const std::string& filename)
                 get_double(sec, "ctl_predict_max_velocity_px_s", hk.ctl_predict_max_velocity_px_s);
             hk.ctl_predict_max_lead_ratio =
                 get_double(sec, "ctl_predict_max_lead_ratio", hk.ctl_predict_max_lead_ratio);
+            hk.ctl_k_px_per_count =
+                get_double(sec, "ctl_k_px_per_count", hk.ctl_k_px_per_count);
+            hk.ctl_inflight_beta =
+                get_double(sec, "ctl_inflight_beta", hk.ctl_inflight_beta);
+            hk.ctl_inflight_dead_time_ms =
+                get_double(sec, "ctl_inflight_dead_time_ms", hk.ctl_inflight_dead_time_ms);
             hk.ctl_y_offset     = get_double(sec, "ctl_y_offset",     hk.ctl_y_offset);
             hk.ctl_y_offset_max = get_double(sec, "ctl_y_offset_max", hk.ctl_y_offset_max);
             hk.ctl_hysteresis_ratio = get_double(sec, "ctl_hysteresis_ratio", hk.ctl_hysteresis_ratio);
@@ -607,6 +613,12 @@ bool Config::loadConfig(const std::string& filename)
                 hk.ctl_scope.predict_max_velocity_px_s);
             hk.ctl_scope.predict_max_lead_ratio = get_double(
                 sec, "ctl_scope_predict_max_lead_ratio", hk.ctl_scope.predict_max_lead_ratio);
+            hk.ctl_scope.k_px_per_count = get_double(
+                sec, "ctl_scope_k_px_per_count", hk.ctl_scope.k_px_per_count);
+            hk.ctl_scope.inflight_beta = get_double(
+                sec, "ctl_scope_inflight_beta", hk.ctl_scope.inflight_beta);
+            hk.ctl_scope.inflight_dead_time_ms = get_double(
+                sec, "ctl_scope_inflight_dead_time_ms", hk.ctl_scope.inflight_dead_time_ms);
             hk.ctl_scope.random_seed = static_cast<int>(
                 get_double(sec, "ctl_scope_random_seed", hk.ctl_scope.random_seed));
 
@@ -924,6 +936,9 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_predict_lead_ms = "  << hk.ctl_predict_lead_ms << "\n"
              << "ctl_predict_max_velocity_px_s = " << hk.ctl_predict_max_velocity_px_s << "\n"
              << "ctl_predict_max_lead_ratio = "    << hk.ctl_predict_max_lead_ratio << "\n"
+             << "ctl_k_px_per_count = "  << hk.ctl_k_px_per_count << "\n"
+             << "ctl_inflight_beta = "          << hk.ctl_inflight_beta << "\n"
+             << "ctl_inflight_dead_time_ms = "  << hk.ctl_inflight_dead_time_ms << "\n"
              << "ctl_y_offset = "         << hk.ctl_y_offset << "\n"
              << "ctl_y_offset_max = "     << hk.ctl_y_offset_max << "\n"
              << "ctl_hysteresis_ratio = " << hk.ctl_hysteresis_ratio << "\n"
@@ -955,6 +970,9 @@ bool Config::saveConfig(const std::string& filename)
              << hk.ctl_scope.predict_max_velocity_px_s << "\n"
              << "ctl_scope_predict_max_lead_ratio = "
              << hk.ctl_scope.predict_max_lead_ratio << "\n"
+             << "ctl_scope_k_px_per_count = "  << hk.ctl_scope.k_px_per_count << "\n"
+             << "ctl_scope_inflight_beta = "          << hk.ctl_scope.inflight_beta << "\n"
+             << "ctl_scope_inflight_dead_time_ms = "  << hk.ctl_scope.inflight_dead_time_ms << "\n"
              << "ctl_scope_max_output_counts = " << hk.ctl_scope.max_output_counts << "\n"
              << "ctl_scope_random_seed = "       << hk.ctl_scope.random_seed << "\n";
 

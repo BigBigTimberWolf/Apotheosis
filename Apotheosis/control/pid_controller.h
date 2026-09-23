@@ -2,6 +2,8 @@
 
 #include "types.h"
 
+#include <algorithm>
+
 namespace control {
 
 struct PidConfig
@@ -23,6 +25,20 @@ struct PidConfig
 
     double pFullScalePx = 0.0;
 
+    // ── 在途自身位移补偿 (Smith) ────────────────────────────────────────────
+    // 把"已经发出去、游戏里已生效、只是画面还没回来"的自身位移从【输出】里扣掉，
+    // 避免死区期间控制器反复对同一批位移重复下令导致的过冲/振荡。
+    //
+    // ★ 纯计数域运算：u -= inflightBeta * (窗口内下发 counts 之和 / 窗口拍数)。
+    //   不需要任何计数<->像素换算（不引入 kp 或每计数像素 k̂）——两者相除后
+    //   本就与像素无关，强行换算反而会隐含"kp = 1/k̂"这个错误假设。
+    // ★ 必须除以窗口拍数：否则同一批位移会在窗口内被跨帧重复扣除，导致强度
+    //   随检测帧率剧烈漂移（帧率越高，重复扣的次数越多）。
+    // ★ inflightBeta = 0 时整段直接跳过，与没有这个功能逐位相同（安全默认）。
+    double inflightBeta = 0.0;
+    // 补偿窗口(ms)。★ 必须等于真实链路死区，不能超过——超过会把已经生效的
+    // 位移当成还在途、重复扣除、变成正反馈发散。
+    double deadTimeMs = 46.0;
 };
 
 struct AxisState
@@ -33,6 +49,51 @@ struct AxisState
     double derivLp = 0.0;
     bool hasPrev = false;
 
+    // 在途位移环形缓冲区 (记录最近发出的 counts 和 dt)
+    static constexpr int kRingCap = 128;
+    struct StepSample {
+        int counts = 0;
+        double dt = 0.0;
+    };
+    StepSample ring[kRingCap]{};
+    int ringHead = 0;
+    int ringCount = 0;
+
+    void recordCount(int counts, double dt)
+    {
+        ring[ringHead] = { counts, dt };
+        ringHead = (ringHead + 1) % kRingCap;
+        if (ringCount < kRingCap) ringCount++;
+    }
+
+    // 窗口(windowSec 秒)内"已发出、尚未生效"的位移，按窗口的【理论拍数】
+    // (windowSec / currentDtSec)归一化为"平均每拍在途多少 counts"。
+    //
+    // ★ 为什么除以"理论拍数"而不是"实际扫到的样本数": 历史不够长时(刚启动/
+    //   刚复位/刚换目标), 用极少的样本去算均值会冒充"整窗平均", 导致第二拍
+    //   就按满窗强度补偿, 造成过补偿的瞬态尖峰。除以理论拍数让窗口不够满时
+    //   缺的那部分按 0 计入, 随历史积累逐渐爬升到满强度, 更保守也更符合"这
+    //   段时间内平均每拍发了多少"的物理含义。
+    // ★ 为什么还要按时间戳累加(而不是固定拍数): 检测帧率会抖动, 用真实记录
+    //   的 dt 累加能让"扫到多少样本才算覆盖了这个窗口"不受个别拍长短影响。
+    // ★ 这两者结合才是帧率无关的关键: 同一个 beta 在 60/120/240fps 下算出的
+    //   在途量应保持一致比例, 不会随检测帧率线性放大或缩小。
+    double inFlightCountsPerTick(double windowSec, double currentDtSec) const
+    {
+        if (windowSec <= 0.0 || ringCount == 0 || !(currentDtSec > 0.0)) return 0.0;
+        double totalCounts = 0.0;
+        double accumulatedTime = 0.0;
+        for (int i = 0; i < ringCount; ++i)
+        {
+            int idx = (ringHead - 1 - i + kRingCap) % kRingCap;
+            accumulatedTime += ring[idx].dt;
+            totalCounts += ring[idx].counts;
+            if (accumulatedTime >= windowSec) break;
+        }
+        const double windowTicks = std::max(1.0, windowSec / currentDtSec);
+        return totalCounts / windowTicks;
+    }
+
     void reset()
     {
         integral = 0.0;
@@ -40,6 +101,8 @@ struct AxisState
         prevError = 0.0;
         derivLp = 0.0;
         hasPrev = false;
+        ringHead = 0;
+        ringCount = 0;
     }
 };
 
@@ -53,6 +116,7 @@ struct AxisTelemetry
     int counts = 0;
     double carry = 0.0;
     double stabilityRatio = 0.0;
+    double inflight = 0.0;  // 本拍从输出里扣掉的在途补偿量 (counts)，遥测用
 };
 
 struct ControlTelemetry

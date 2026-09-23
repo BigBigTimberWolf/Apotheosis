@@ -478,7 +478,7 @@ int main()
             check(hp.ctl_scope.max_output_counts == 1, "★★ 开镜档限幅 0 被夹到 1");
             check(hp.ctl_scope.tau_unwind_sec > 0.0, "★★ 开镜档 tau_unwind 0 被夹到 1e-4");
             check(hp.ctl_scope.random_seed == 0, "★★ 开镜档负种子被夹到 0");
-            check(hp.ctl_scope.inflight_beta <= 2.0, "★★ 开镜档 β 9 被夹到 2.0");
+            check(hp.ctl_scope.inflight_beta <= 3.0, "★★ 开镜档 β 9 被夹到 3.0");
             check(hp.ctl_scope.predict_lead_ms <= 1000.0, "★★ 开镜档提前时间 99999 被夹到 1000");
             // 默认档在同一份规则下被夹 (改动前是手写的一组 clamp)
             check(hp.ctl_kp_x >= 0.0, "★★ 默认档负 kp 同样被夹到 >= 0");

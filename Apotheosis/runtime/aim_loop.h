@@ -39,6 +39,16 @@ struct FlatConfig
     double predictLeadMs = 0.0;
     double predictMaxVelocityPxPerSec = 0.0;
     double predictMaxLeadRatio = 0.0;
+
+    // 灵敏度折算系数 k (像素/计数)：把自身下发速率折算回像素、加回观测速度，
+    // 修正"准星追近导致画面观测速度偏小"的系统性偏差。0 = 关闭这项修正。
+    double kPxPerCount = 0.0;
+
+    // 在途自身位移补偿 (Smith)：把已下发但画面未显现的自身位移从输出里扣掉。
+    // inflightBeta = 0 时关闭，与没有这个功能逐位相同。
+    double inflightBeta = 0.0;
+    double inflightDeadTimeMs = 46.0;
+
     double yOffset = 0.5;
     double yOffsetMax = 0.5;
     double hysteresisRatio = 1.3;

@@ -583,31 +583,117 @@ static void testPid()
     }
 
     {
-        // 验证 Smith 在途自身位移补偿 (一帧拉枪)
+        // 验证 Smith 在途自身位移补偿 (一帧拉枪)。
+        //
+        // ★★ 2026-09-23 教训: 上一版实现(已删除)把补偿混进了送给 P/I/D 的误差里
+        // (compensatedError = error - pendingPx)，且窗口内 counts 求和不除以拍数。
+        // 这两个坑分别会导致①积分停在随 beta 线性增长的假平衡点(稳态瞄偏)、
+        // ②补偿强度随检测帧率漂移(1000fps 下从 0.30px 恶化到 8.30px)。
+        // 本版改为在【输出端】扣、且按窗口拍数归一化 —— 下面的断言专门钉住这两条。
         PidConfig cfg;
         cfg.kpX = 50.0;
-        cfg.kPxPerCount = 0.593;
-        cfg.inflightBeta = 0.8;
+        cfg.inflightBeta = 1.6;
         cfg.deadTimeMs = 46.0;
 
         PidController pid(cfg);
-        // 第一拍：目标在 100px 处，发出大力度拉枪
+        // 第一拍：目标在 100px 处，发出大力度拉枪；窗口里还没有历史，补偿为 0。
         const Counts c1 = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
         check(c1.x > 0, "★ 第一拍向目标猛拉");
+        checkNear(pid.telemetry().x.inflight, 0.0, 1e-9,
+                  "★ 第一拍窗口里还没有历史发出的 counts，补偿量为 0");
 
-        // 第二拍：由于 46ms 延迟画面尚未改变（仍然看到 100px）
-        // 但已下发的 counts 应当被折算扣除，避免重复下令
+        // 第二拍：46ms 死区内画面尚未改变（仍然看到同样 100px 误差）。
+        // 上一拍已经发出去的位移应当被折算扣除，第二拍力度减小。
         const Counts c2 = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
-        check(c2.x < c1.x, "★ 第二拍因在途位移扣除，输出力度显著减小（精准刹车）");
+        check(c2.x < c1.x, "★ 第二拍因在途位移扣除，输出力度减小（避免重复下令）");
+        check(pid.telemetry().x.inflight > 0.0, "★ 第二拍补偿量非零");
 
-        // 对照：无在途补偿时（kPxPerCount = 0），第二拍依然在 41 counts 左右满额拉枪
-        PidConfig cfgUncomp = cfg;
-        cfgUncomp.kPxPerCount = 0.0;
-        PidController pidUncomp(cfgUncomp);
-        const Counts u1 = pidUncomp.update(Vec2{100, 0}, Vec2{0, 0}, dt);
-        const Counts u2 = pidUncomp.update(Vec2{100, 0}, Vec2{0, 0}, dt);
-        check(u2.x >= 40, "无补偿时第二拍继续满额拉枪（过冲成因）");
-        check(c2.x < u2.x, "★ Smith 补偿确实成功抑制了重复下令！");
+        // 对照组：beta=0（关闭）时第一拍完全一致，第二拍不会自动减力。
+        PidConfig cfgOff = cfg;
+        cfgOff.inflightBeta = 0.0;
+        PidController pidOff(cfgOff);
+        const Counts u1 = pidOff.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        const Counts u2 = pidOff.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(u1.x == c1.x, "★ beta=0 时第一拍与开启补偿的一组完全一致（交叉验证）");
+        check(c2.x < u2.x, "★ 有/无补偿对照：有补偿时第二拍明显更小");
+    }
+
+    {
+        // ★★★ 关键回归：P/I/D 必须吃【原始】误差，不能吃补偿后的输出。
+        // 上一版删除前的 bug：把 compensatedError 喂给积分，导致积分一旦被压小
+        // 就不再累积，回路停在随 beta 线性增长的假平衡点上（稳态瞄偏）。
+        // 验证方法：同样的原始误差下，开/关补偿两组的积分状态必须完全一致——
+        // 如果补偿泄漏进了积分，两组会分叉。
+        PidConfig withComp;
+        withComp.kpX = 10.0;
+        withComp.kiX = 5.0;
+        withComp.inflightBeta = 1.6;
+        withComp.deadTimeMs = 46.0;
+        PidConfig noComp = withComp;
+        noComp.inflightBeta = 0.0;
+
+        PidController pidComp(withComp);
+        PidController pidNoComp(noComp);
+        for (int i = 0; i < 50; ++i)
+        {
+            pidComp.update(Vec2{80, 0}, Vec2{0, 0}, dt);
+            pidNoComp.update(Vec2{80, 0}, Vec2{0, 0}, dt);
+        }
+        checkNear(pidComp.telemetry().x.i, pidNoComp.telemetry().x.i, 1e-9,
+                  "★★★ 积分状态与是否补偿无关——证明积分吃的是原始误差，不是补偿后的误差");
+        checkNear(pidComp.telemetry().x.error, 80.0, 1e-9,
+                  "★ 遥测里的 error 是原始误差，未被补偿污染");
+    }
+
+    {
+        // ★★★ 帧率无关性：同一个 beta/窗口，在不同检测帧率下补偿强度应保持
+        // 一致比例，而不是窗口内 counts 总和不除以拍数直接使用——那样帧率
+        // 越高、窗口里塞的拍数越多，补偿会不成比例地变强(历史 bug)。
+        auto steadyInflight = [](double dtSec) {
+            PidConfig cfg;
+            cfg.kpX = 1e6;            // 让每拍都顶到限幅，稳态每拍输出恒为 maxOutputCounts
+            cfg.maxOutputCounts = 40;
+            cfg.inflightBeta = 1.0;
+            cfg.deadTimeMs = 46.0;
+            PidController pid(cfg);
+            double last = 0.0;
+            for (int i = 0; i < 200; ++i)
+            {
+                pid.update(Vec2{1000, 0}, Vec2{0, 0}, dtSec);
+                last = pid.telemetry().x.inflight;
+            }
+            return last;
+        };
+        const double inflight60  = steadyInflight(1.0 / 60.0);
+        const double inflight120 = steadyInflight(1.0 / 120.0);
+        const double inflight240 = steadyInflight(1.0 / 240.0);
+        checkNear(inflight120, inflight60, inflight60 * 0.15,
+                  "★★★ 60fps 与 120fps 稳态在途量应接近一致 (帧率无关，容差 15%)");
+        checkNear(inflight240, inflight60, inflight60 * 0.15,
+                  "★★★ 240fps 与 60fps 稳态在途量应接近一致 —— 若不除以窗口拍数，"
+                  "这里 240fps 会是 60fps 的 4 倍 (历史 bug：1000fps 下 0.30px 恶化到 8.30px)");
+    }
+
+    {
+        // reset() 必须清空在途历史。
+        PidConfig cfg;
+        cfg.kpX = 50.0;
+        cfg.inflightBeta = 1.6;
+        cfg.deadTimeMs = 46.0;
+        PidController pid(cfg);
+        pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(pid.telemetry().x.inflight > 0.0, "复位前补偿量非零");
+
+        pid.reset();
+        const Counts afterReset = pid.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        checkNear(pid.telemetry().x.inflight, 0.0, 1e-9,
+                  "★ reset 后在途历史被清空，补偿量回到 0");
+
+        PidController fresh(cfg);
+        const Counts freshFirst = fresh.update(Vec2{100, 0}, Vec2{0, 0}, dt);
+        check(afterReset.x == freshFirst.x,
+              "★ reset 后第一拍输出 == 全新控制器第一拍输出");
     }
 }
 
@@ -733,6 +819,45 @@ static void testFullChain()
         check(ac.filter() != nullptr, "默认有滤波器");
         ac.setFilter(nullptr);
         check(ac.filter() != nullptr, "setFilter(nullptr) 恢复默认 α-β (不是变成没有滤波)");
+    }
+
+    {
+        // ★★★ 灵敏度折算系数 k：修正"准星追近导致画面观测速度偏小"的系统性偏差。
+        // 关闭时(pxPerCount=0)喂给预测器的是纯观测速度；打开后应叠加自身下发
+        // 速率折算出的分量，两者应有可测的差异（不要求具体数值，只钉住方向）。
+        ControllerConfig cfgOn = cfg;
+        cfgOn.predictor.leadMs = 50.0;
+        cfgOn.pxPerCount = 0.5;
+
+        ControllerConfig cfgOff = cfgOn;
+        cfgOff.pxPerCount = 0.0;
+
+        AimController acOn, acOff;
+        acOn.setConfig(cfgOn);
+        acOff.setConfig(cfgOff);
+
+        ControlInput in;
+        in.dtSec = dt;
+        in.cross = Vec2{ 320, 240 };
+
+        ControlOutput outOn, outOff;
+        for (int i = 0; i < 30; ++i)
+        {
+            Candidate c;
+            c.box = Box{ 380.0f + static_cast<float>(i) * 2.0f, 300, 40, 80 };
+            c.classId = 0;
+            c.confidence = 0.9;
+            in.candidates = { c };
+            in.frameIndex = static_cast<uint64_t>(i);
+            outOn = acOn.update(in);
+            outOff = acOff.update(in);
+        }
+
+        check(outOn.predictor.applied && outOff.predictor.applied,
+              "两组预测都应生效 (velocity 非零、leadMs 非零)");
+        check(outOn.predictor.rawVelocity.x > outOff.predictor.rawVelocity.x,
+              "★★★ 打开灵敏度折算后, 喂给预测器的速度比不修正时更大 "
+              "(修正了准星自己追踪造成的观测速度低估)");
     }
 }
 

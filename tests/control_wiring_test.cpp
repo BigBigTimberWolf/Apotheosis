@@ -773,6 +773,7 @@ static void testScopeCtlSwitch()
         const control::ControllerConfig cc = toControllerConfig(f);
         checkNear(cc.pid.kpX, 5.0, 0.0, "★★ 开镜档 kpX 真的进了 ControllerConfig.pid");
         check(cc.pid.maxOutputCounts == 40, "★★ 开镜档限幅真的进了 ControllerConfig.pid");
+        checkNear(cc.pxPerCount, 0.211, 0.0, "★★ 开镜档灵敏度折算 k 真的进了 ControllerConfig");
     }
 
     // ④ 一键复制的搬运: 默认档 → 结构 → 开镜档, 一个字段都不能漏
@@ -838,7 +839,7 @@ static void testScopeCtlSwitch()
         checkNear(bad.i_max, 0.0, 0.0, "夹取: 负 i_max → 0");
         checkNear(bad.p_full_scale_px, 0.0, 0.0, "夹取: 负 P 项饱和 → 0");
         checkNear(bad.k_px_per_count, 10.0, 0.0, "夹取: 灵敏度折算上限 10");
-        checkNear(bad.inflight_beta, 2.0, 0.0, "夹取: β 上限 2.0");
+        checkNear(bad.inflight_beta, 3.0, 0.0, "夹取: β 上限 3.0");
         checkNear(bad.inflight_dead_time_ms, 1000.0, 0.0, "夹取: 死区时间上限 1000");
         checkNear(bad.predict_lead_ms, 1000.0, 0.0, "夹取: 提前时间上限 1000");
         checkNear(bad.predict_max_velocity_px_s, 100000.0, 0.0, "夹取: 速度上限上限 100000");

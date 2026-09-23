@@ -75,7 +75,19 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
     }
 
     const double p = saturateForP(error, cfg_.pFullScalePx);
-    const double u = dtSec * kp * (p + st.integral + kd * deriv);
+    const double uRaw = dtSec * kp * (p + st.integral + kd * deriv);
+
+    // ── Smith 在途自身位移补偿：只作用在【输出】上，不碰上面的误差/积分/微分 ──
+    // ★ 这是与历史 bug 版本的关键区别：积分/微分/P 项必须吃原始 error，不能吃
+    //   补偿后的值——否则积分一旦被压小就再也不累积，回路会停在一个随 beta
+    //   线性增长的假平衡点上（稳态瞄偏）。
+    double inflight = 0.0;
+    if (cfg_.inflightBeta > 0.0 && cfg_.deadTimeMs > 0.0)
+    {
+        const double windowSec = cfg_.deadTimeMs * 0.001;
+        inflight = cfg_.inflightBeta * st.inFlightCountsPerTick(windowSec, dtSec);
+    }
+    const double u = uRaw - inflight;
 
     const double limited = std::clamp(
         u,
@@ -91,6 +103,7 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
 
     // 记录本拍发出的 counts 和 dt，供给后续拍做在途折算
     const int finalCounts = static_cast<int>(countsClamped);
+    st.recordCount(finalCounts, dtSec);
 
     st.prevError = error;
     st.hasPrev = true;
@@ -103,6 +116,7 @@ double PidController::stepAxis(Axis axis, double error, double dtSec,
     tm.counts = finalCounts;
     tm.carry = st.carry;
     tm.stabilityRatio = stabilityRatio(kp, dtSec);
+    tm.inflight = inflight;
 
     return u;
 }

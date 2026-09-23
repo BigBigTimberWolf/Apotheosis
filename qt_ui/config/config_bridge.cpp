@@ -290,6 +290,8 @@ void ConfigBridge::syncFromRuntime()
         hd.ctlPredictLeadMs             = hp.ctl_predict_lead_ms;
         hd.ctlPredictMaxVelocityPxPerSec = hp.ctl_predict_max_velocity_px_s;
         hd.ctlPredictMaxLeadRatio       = hp.ctl_predict_max_lead_ratio;
+        hd.ctlKPxPerCount      = hp.ctl_k_px_per_count;
+        hd.ctlInflightBeta     = hp.ctl_inflight_beta;
         hd.ctlYOffset          = hp.ctl_y_offset;
         hd.ctlYOffsetMax       = hp.ctl_y_offset_max;
         hd.ctlHysteresisRatio  = hp.ctl_hysteresis_ratio;

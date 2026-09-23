@@ -588,6 +588,8 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "ctl_predict_lead_ms", static_cast<double>(data.ctlPredictLeadMs));
     m_settings->setValue(prefix + "ctl_predict_max_velocity_px_s", static_cast<double>(data.ctlPredictMaxVelocityPxPerSec));
     m_settings->setValue(prefix + "ctl_predict_max_lead_ratio", static_cast<double>(data.ctlPredictMaxLeadRatio));
+    m_settings->setValue(prefix + "ctl_k_px_per_count", static_cast<double>(data.ctlKPxPerCount));
+    m_settings->setValue(prefix + "ctl_inflight_beta", static_cast<double>(data.ctlInflightBeta));
     m_settings->setValue(prefix + "ctl_y_offset", static_cast<double>(data.ctlYOffset));
     m_settings->setValue(prefix + "ctl_y_offset_max", static_cast<double>(data.ctlYOffsetMax));
     m_settings->setValue(prefix + "ctl_hysteresis_ratio", static_cast<double>(data.ctlHysteresisRatio));
@@ -630,6 +632,8 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
         m_settings->value(prefix + "ctl_predict_max_velocity_px_s", 0.0).toDouble();
     data.ctlPredictMaxLeadRatio =
         m_settings->value(prefix + "ctl_predict_max_lead_ratio", 0.0).toDouble();
+    data.ctlKPxPerCount = m_settings->value(prefix + "ctl_k_px_per_count", 0.0).toDouble();
+    data.ctlInflightBeta = m_settings->value(prefix + "ctl_inflight_beta", 1.6).toDouble();
     data.ctlYOffset = m_settings->value(prefix + "ctl_y_offset", 0.5).toDouble();
     data.ctlYOffsetMax = m_settings->value(prefix + "ctl_y_offset_max", 0.5).toDouble();
     data.ctlHysteresisRatio = m_settings->value(prefix + "ctl_hysteresis_ratio", 1.3).toDouble();

@@ -1,6 +1,7 @@
 #include "runtime/aim_loop.h"
 
 #include "control/aim_controller.h"
+#include "control/sensitivity_calibrator.h"
 
 #include "mouse/aim_path.h"
 #include "mouse/auto_stop.h"
@@ -90,6 +91,30 @@ bool g_scopeCtlLast = false;
 //   但游戏里镜头还开着 —— 参数会跟着命中区来回翻, 与实机状态对不上。
 // ★ mode 2(长按)不用它: 那种档右键真的按着才算在镜内, engaged() 就是真值。
 bool g_scopeTapped = false;
+
+// 热键松开 / 控制器关闭时把还按着的鼠标键放开。
+//
+// ★★ 这两种情况下 tick() 会在函数最前面直接 return —— g_trigger/g_scope 再
+//   也没有机会跑到"离开命中区/换目标"那些分支去主动松手, 左键(自动扳机长按)
+//   与右键(自动开镜长按档)会一直卡在按下状态, 直到下次热键触发时凑巧转回
+//   松开分支, 或者整个检测会话停止(module reset() 才会调 forceRelease())。
+// ★ 点按档(mode 1)的右键不受影响: ScopeController::forceRelease() 只在
+//   mode>=2 时才返回 release_right, 点按档"开镜状态由玩家自己负责"的语义
+//   保持不变 —— 这里只是让它的 engaged_ 状态跟 g_scopeTapped 一起清零, 对应
+//   下面注释"点按档的'在镜内'粘性状态到此为止", 免得下次热键重新按下时
+//   ScopeController 还记得上一轮已经点过, 不再补发新的一次点按。
+void releaseHeldButtons()
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (MouseThread* mouse = ensureMouse())
+    {
+        if (g_trigger.reset())
+            mouse->releaseLeftButton();
+        const auto act = g_scope.forceRelease();
+        if (act.release_right)
+            mouse->releaseRightButton();
+    }
+}
 
 boss::AimPathDriver::Params pathParamsFrom(const HotkeyProfile& hk)
 {
@@ -252,6 +277,7 @@ bool tick()
     {
         // 热键已松: 点按档的"在镜内"粘性状态到此为止。
         g_scopeTapped = false;
+        releaseHeldButtons();
         return false;
     }
     if (activeIdx >= static_cast<int>(cfg.hotkeys.size()))
@@ -261,6 +287,7 @@ bool tick()
     if (!hk.ctl_enabled)
     {
         g_scopeTapped = false;
+        releaseHeldButtons();
         return false;
     }
 
@@ -555,7 +582,9 @@ bool tick()
         return false;
 
     // 馈送标定器 (如果用户正在前台测算灵敏度 k)
+    if (control::globalSensitivityCalibrator().isRunning() && out.hasTarget)
     {
+        control::globalSensitivityCalibrator().feed(out.anchor.x, move_x, dtSec);
     }
 
     if (MouseThread* mouse = ensureMouse())

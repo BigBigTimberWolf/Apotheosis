@@ -1,7 +1,9 @@
 #include "pages/AimSettingsPage.h"
 
+#include "control/sensitivity_calibrator.h"
 
 #include <QCheckBox>
+#include <QDialog>
 #include <QProgressBar>
 #include <QTimer>
 #include <QComboBox>
@@ -20,6 +22,7 @@
 #include <QSpinBox>
 #include <QSplitter>       // 左栏/右栏可拖动分隔（旧页的写法）
 #include <QVBoxLayout>
+#include <QWheelEvent>     // NoWheelSpinBox/NoWheelDoubleSpinBox 的 wheelEvent 参数类型
 
 #include <algorithm>
 #include <iterator>   // std::size (开镜档的行表)
@@ -37,6 +40,35 @@
 
 namespace
 {
+
+// QSpinBox/QDoubleSpinBox 默认只要鼠标悬停在上面就会响应滚轮改值——这个页面
+// 塞在 QScrollArea 里、输入框又多又密, 用户想滚动整页时鼠标几乎必然会经过
+// 某个输入框, 于是滚一下页面顺手就改掉了一个参数的值(而且不容易察觉)。
+// 这里改成"没有键盘焦点就不响应滚轮", 滚轮事件原样丢给上层去滚页面。
+class NoWheelSpinBox : public QSpinBox
+{
+public:
+    using QSpinBox::QSpinBox;
+protected:
+    void wheelEvent(QWheelEvent* e) override
+    {
+        if (!hasFocus()) { e->ignore(); return; }
+        QSpinBox::wheelEvent(e);
+    }
+};
+
+class NoWheelDoubleSpinBox : public QDoubleSpinBox
+{
+public:
+    using QDoubleSpinBox::QDoubleSpinBox;
+protected:
+    void wheelEvent(QWheelEvent* e) override
+    {
+        if (!hasFocus()) { e->ignore(); return; }
+        QDoubleSpinBox::wheelEvent(e);
+    }
+};
+
 struct KeyEntry { const char* id; const char* label; };
 const KeyEntry kKeyEntries[] = {
     { "",                 "无 (始终活跃)" },
@@ -68,7 +100,7 @@ QLabel* AimSettingsPage::makeSectionTitle(const QString& text)
 QWidget* AimSettingsPage::makeDoubleRow(const char* obj, const char* label,
                                         double lo, double hi, double step, double def)
 {
-    auto* sp = new QDoubleSpinBox;
+    auto* sp = new NoWheelDoubleSpinBox;
     sp->setRange(lo, hi);
     sp->setSingleStep(step);
     sp->setDecimals(3);
@@ -122,7 +154,7 @@ QWidget* AimSettingsPage::makeIntRow(const char* obj, const char* label, int lo,
     else if (name.startsWith(QLatin1String("wind")) ||
              name.startsWith(QLatin1String("aimPath"))) sink = &m_pathInts;
 
-    auto* sp = new QSpinBox;
+    auto* sp = new NoWheelSpinBox;
     sp->setRange(lo, hi);
     sp->setSingleStep(step);
     sp->setObjectName(name);
@@ -320,8 +352,8 @@ void AimSettingsPage::buildFovCard()
     auto* card = new CardWidget(QStringLiteral("视野 FOV"), QStringLiteral("target"));
     auto* cl = card->contentLayout();
 
-    auto* fx = new QSpinBox; fx->setRange(1, 4096); fx->setObjectName("fovX");
-    auto* fy = new QSpinBox; fy->setRange(1, 4096); fy->setObjectName("fovY");
+    auto* fx = new NoWheelSpinBox; fx->setRange(1, 4096); fx->setObjectName("fovX");
+    auto* fy = new NoWheelSpinBox; fy->setRange(1, 4096); fy->setObjectName("fovY");
     cl->addWidget(FormKit::fieldRow(QStringLiteral("水平直径 (检测像素)"), fx));
     cl->addWidget(FormKit::fieldRow(QStringLiteral("垂直直径 (检测像素)"), fy));
 
@@ -345,10 +377,9 @@ void AimSettingsPage::buildAimClassCard()
 {
     auto* card = new CardWidget(QStringLiteral("瞄准类别 (优先级排序)"), QStringLiteral("target"));
     auto* cl = card->contentLayout();
-
-    cl->addWidget(makeHint(QString::fromUtf8(
+    card->setToolTip(QString::fromUtf8(
         u8"从「目标类别」页勾选「瞄准」的类别会出现在下方。"
-        u8"用 ▲ ▼ 调整优先级（顶部 = 最高），✕ 移除。")));
+        u8"用 ▲ ▼ 调整优先级（顶部 = 最高），✕ 移除。"));
 
     m_aimClassContainer = new QWidget;
     m_aimClassLayout = new QVBoxLayout(m_aimClassContainer);
@@ -530,7 +561,7 @@ void AimSettingsPage::rebuildAimClassRows()
         rl->addLayout(top);
 
         auto makeOffsetSpin = [](float value) {
-            auto* sp = new QDoubleSpinBox;
+            auto* sp = new NoWheelDoubleSpinBox;
             sp->setRange(0.0, 1.0);
             sp->setSingleStep(0.01);
             sp->setDecimals(2);
@@ -658,12 +689,10 @@ void AimSettingsPage::buildCrosshairCard()
 
     auto* chk = new QCheckBox(QStringLiteral("启用找色（用检测到的准星位置代替画面中心）"));
     chk->setObjectName("crosshairChk");
-    cl->addWidget(chk);
-
-    auto* note = makeHint(QString::fromUtf8(
+    chk->setToolTip(QString::fromUtf8(
         u8"★ 关：准星 = 画面中心（静态常量）。\n"
         u8"★ 开：用找色结果；找色失效时【退回画面中心】并跳过本拍控制。"));
-    cl->addWidget(note);
+    cl->addWidget(chk);
 
     connect(chk, &QCheckBox::toggled, this, [this](bool v) {
         if (m_loading) return;
@@ -689,7 +718,7 @@ void AimSettingsPage::buildDynamicFovCard()
     chk->setObjectName("dynFovChk");
     cl->addWidget(chk);
 
-    auto* spin = new QDoubleSpinBox;
+    auto* spin = new NoWheelDoubleSpinBox;
     spin->setRange(0.0, 1.0);
     spin->setSingleStep(0.05);
     spin->setDecimals(2);
@@ -730,12 +759,10 @@ void AimSettingsPage::buildControllerCard()
 
     auto* enable = new QCheckBox(QStringLiteral("★ 启用控制器（会真的往游戏机发鼠标位移）"));
     enable->setObjectName("ctlEnabled");
-    cl->addWidget(enable);
-
-    auto* warn = makeHint(QString::fromUtf8(
+    enable->setToolTip(QString::fromUtf8(
         u8"⚠️ 默认关闭。打开后本程序会真的动鼠标 —— 参数未在真机标定过，"
         u8"第一次打开请先把最大位移调小、并准备好随时关掉。"));
-    cl->addWidget(warn);
+    cl->addWidget(enable);
 
     cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"增益（水平 x = 跟枪 / 垂直 y = 压枪）")));
 
@@ -792,13 +819,60 @@ void AimSettingsPage::buildControllerCard()
         "★ 非 0 时每次启动都会得到不同的抖动序列。\n"
         "★ 只在「瞄准类别」里某一类的『随机锁点 Y』上下限【不相等】时才有意义。")));
 
+    // ── 灵敏度折算系数 k（修正预测吃到的速度）──────────────────────────────
+    {
+        auto* title = makeSectionTitle(QString::fromUtf8(u8"灵敏度折算系数 (修正预测速度)"));
+        title->setToolTip(QString::fromUtf8(
+            u8"★ 下面「在途补偿」的速度取自画面观测，但这个观测值有系统性偏差：\n"
+            u8"准星每追近目标一截，画面里目标的相对位移就被抵消一截——追得越准，\n"
+            u8"观测到的速度越比真实速度小，预测因此总是显得「不够用」。\n"
+            u8"这里把自身下发的鼠标计数按 k(像素/计数) 折算回像素、加回观测速度，\n"
+            u8"就能拿到目标接近真实的速度。0 = 关闭这项修正（预测仍能用，只是偏保守）。"));
+        cl->addWidget(title);
+    }
+
+    {
+        auto* row = new QWidget;
+        auto* hl = new QHBoxLayout(row);
+        hl->setContentsMargins(0, 0, 0, 0);
+
+        auto* spinK = new NoWheelDoubleSpinBox;
+        spinK->setObjectName("ctlKPxPerCount");
+        spinK->setRange(0.0, 10.0);
+        spinK->setSingleStep(0.005);
+        spinK->setDecimals(4);
+        spinK->setValue(0.0);
+        m_ctlDoubles.push_back(spinK);
+
+        auto* lbl = new QLabel(QString::fromUtf8(u8"灵敏度折算系数 k (像素/计数, 0=关):"));
+        lbl->setToolTip(QString::fromUtf8(
+            u8"发 1 个鼠标计数，准星在画面上移动多少像素。\n"
+            u8"★ 填入你本机的实测值，即开启目标速度的自身运动修正。\n"
+            u8"★ 不知道填多少？点击右侧「测算灵敏度」一键在线拟合。"));
+
+        auto* btnCalib = new QPushButton(QString::fromUtf8(u8"测算灵敏度"));
+        btnCalib->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 4px 12px; border-radius: 4px;");
+
+        hl->addWidget(lbl);
+        hl->addWidget(spinK, 1);
+        hl->addWidget(btnCalib);
+        cl->addWidget(row);
+
+        connect(btnCalib, &QPushButton::clicked, this, [this, spinK]() {
+            showSensitivityCalibrateDialog(spinK);
+        });
+    }
+
     // ── 在途补偿（预测提前量）────────────────────────────────────────────
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"在途补偿 (预测提前量)")));
-    cl->addWidget(makeHint(QString::fromUtf8(
-        u8"链路（采集 → 推理 → 瞄准 → 下发 → 游戏渲染）有几十毫秒延迟，"
-        u8"等这一拍算完，目标已经跑掉了。\n"
-        u8"在途补偿按目标速度把瞄准点往前推一段，抵消这段延迟。\n"
-        u8"★ 「预测提前时间」是总开关：填 0 则整个功能关闭，下面两项不生效。")));
+    {
+        auto* title = makeSectionTitle(QString::fromUtf8(u8"在途补偿 (预测提前量)"));
+        title->setToolTip(QString::fromUtf8(
+            u8"链路（采集 → 推理 → 瞄准 → 下发 → 游戏渲染）有几十毫秒延迟，"
+            u8"等这一拍算完，目标已经跑掉了。\n"
+            u8"在途补偿按目标速度把瞄准点往前推一段，抵消这段延迟。\n"
+            u8"★ 「预测提前时间」是总开关：填 0 则整个功能关闭，下面两项不生效。"));
+        cl->addWidget(title);
+    }
 
     cl->addWidget(makeDoubleRowTip("ctlPredictLeadMs",
         "预测提前时间 (毫秒, 0=关闭)", 0.0, 1000.0, 1.0, 0.0,
@@ -831,12 +905,37 @@ void AimSettingsPage::buildControllerCard()
         u8"  固定的像素数在近处（框大）会显得太小、远处（框小）会显得太大。\n"
         u8"★ 它是最后一道保险：异常速度估计不会把准星甩出去。")));
 
-    auto* note = makeHint(QString::fromUtf8(
+    // ── 在途自身位移补偿 (Smith) ──────────────────────────────────────────
+    // ★ 与上面「在途补偿(预测提前量)」是两回事：那个补的是【目标】在延迟期间
+    //   走了多远；这个补的是【自己】已经发出去、画面还没显现的位移。两者互不
+    //   干扰，命名容易混，所以分成独立的小节。
+    {
+        auto* title = makeSectionTitle(QString::fromUtf8(u8"在途自身位移补偿 (Smith)"));
+        title->setToolTip(QString::fromUtf8(
+            u8"链路死区内（约 46ms）已经发出去、游戏里已生效、但画面还没显现的自身"
+            u8"位移，会被控制器当成「目标还没动」重复下令，导致锁定目标后来回抖动。\n"
+            u8"这里把这部分位移从下一拍的输出里扣掉，纯计数域运算，不需要任何"
+            u8"灵敏度标定。"));
+        cl->addWidget(title);
+    }
+
+    cl->addWidget(makeDoubleRowTip("ctlInflightBeta",
+        "在途补偿强度 (无量纲, 0=关闭)", 0.0, 3.0, 0.05, 1.6,
+        QString::fromUtf8(
+        u8"每拍从输出里扣掉「窗口内平均每拍已发出 counts」的这个倍数。\n"
+        u8"★ 1.0 = 理论上的精确抵消点；实测适度调高（1.6）比精确点收敛更快、"
+        u8"过冲更小，这是因为它顺带压掉了 PID 自身残留的超调。\n"
+        u8"★ 超过 2.0 在低帧率下开始发散（实测 60fps 尾段从 0.29px 恶化到"
+        u8"56px），上限 3.0 只是挡住填错量级的配置，不是可用值。\n"
+        u8"★ 0 = 关闭，与没有这个功能逐位相同。\n"
+        u8"★ 锁定目标后如果左右抖、必须靠降 Kp 才能压住，先把这个调到 1.6"
+        u8"再重新试拉枪速度。")));
+
+    card->setToolTip(QString::fromUtf8(
         u8"★ 「稳定器」那 5 项与滞回倍数目前都是【占位值】，没有实测依据，"
         u8"默认值只保证「程序能跑」。\n"
         u8"★ 六个增益默认 Kp=35 / 其余 0，等价于历史单套行为 —— 是安全起点。\n"
         u8"★ 改完立即生效：控制器每拍重读配置，不用重启会话。"));
-    cl->addWidget(note);
 
     auto commit = [this, enable]() {
         if (m_loading) return;
@@ -864,6 +963,8 @@ void AimSettingsPage::buildControllerCard()
         hp.ctl_predict_lead_ms  = d("ctlPredictLeadMs");
         hp.ctl_predict_max_velocity_px_s = d("ctlPredictMaxVelocityPxPerSec");
         hp.ctl_predict_max_lead_ratio    = d("ctlPredictMaxLeadRatio");
+        hp.ctl_k_px_per_count   = d("ctlKPxPerCount");
+        hp.ctl_inflight_beta    = d("ctlInflightBeta");
         hp.ctl_random_seed      = i("ctlRandomSeed");
 
         ConfigBridge::instance().markDirty();
@@ -876,6 +977,113 @@ void AimSettingsPage::buildControllerCard()
         connect(sp, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
 
     m_rightLayout->addWidget(card);
+}
+
+void AimSettingsPage::showSensitivityCalibrateDialog(QDoubleSpinBox* spinK)
+{
+    auto* dlg = new QDialog(this);
+    dlg->setWindowTitle(QString::fromUtf8(u8"灵敏度折算系数 (k) 在线测算"));
+    dlg->resize(440, 260);
+
+    auto* layout = new QVBoxLayout(dlg);
+
+    auto* guide = new QLabel(QString::fromUtf8(
+        u8"<b>测算指引：</b><br>"
+        u8"1. 在游戏训练场中，将准星对准一个<b>静止的假人 / 靶子</b>。<br>"
+        u8"2. 点击下方的「开始采集」。<br>"
+        u8"3. 按住热键，<b>左右甩动鼠标 2 ~ 3 次</b>（产生画面目标相对位移）。<br>"
+        u8"4. 进度条跑满并出现计算结果后，点击「应用回填」即可！"));
+    guide->setWordWrap(true);
+    layout->addWidget(guide);
+
+    auto* statusLbl = new QLabel(QString::fromUtf8(u8"状态：等待开始..."));
+    statusLbl->setStyleSheet("font-weight: bold; color: #4da3ff; margin-top: 8px;");
+    layout->addWidget(statusLbl);
+
+    auto* pbar = new QProgressBar;
+    pbar->setRange(0, 100);
+    pbar->setValue(0);
+    layout->addWidget(pbar);
+
+    auto* resultLbl = new QLabel(QString::fromUtf8(u8"当前估算 k: -- px/count"));
+    resultLbl->setStyleSheet("font-size: 15px; font-weight: bold; color: #3fb950; margin: 6px 0;");
+    layout->addWidget(resultLbl);
+
+    auto* btnRow = new QWidget;
+    auto* hl = new QHBoxLayout(btnRow);
+    hl->setContentsMargins(0, 0, 0, 0);
+
+    auto* btnToggle = new QPushButton(QString::fromUtf8(u8"开始采集"));
+    btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
+
+    auto* btnApply = new QPushButton(QString::fromUtf8(u8"应用回填"));
+    btnApply->setEnabled(false);
+    btnApply->setStyleSheet("padding: 6px 16px;");
+
+    auto* btnCancel = new QPushButton(QString::fromUtf8(u8"关闭"));
+    btnCancel->setStyleSheet("padding: 6px 16px;");
+
+    hl->addWidget(btnToggle);
+    hl->addWidget(btnApply);
+    hl->addWidget(btnCancel);
+    layout->addWidget(btnRow);
+
+    auto* timer = new QTimer(dlg);
+
+    connect(btnToggle, &QPushButton::clicked, dlg, [btnToggle, timer]() {
+        auto& calib = control::globalSensitivityCalibrator();
+        if (!calib.isRunning())
+        {
+            calib.start();
+            btnToggle->setText(QString::fromUtf8(u8"停止采集"));
+            btnToggle->setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 6px 16px;");
+            timer->start(50);
+        }
+        else
+        {
+            calib.stop();
+            btnToggle->setText(QString::fromUtf8(u8"开始采集"));
+            btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
+            timer->stop();
+        }
+    });
+
+    connect(timer, &QTimer::timeout, dlg, [statusLbl, pbar, resultLbl, btnApply]() {
+        auto& calib = control::globalSensitivityCalibrator();
+        auto st = calib.status();
+        statusLbl->setText(QString::fromUtf8(u8"状态：%1").arg(QString::fromUtf8(st.hint)));
+        pbar->setValue(static_cast<int>(st.progress * 100.0));
+        if (st.estimatedK > 0.0)
+        {
+            resultLbl->setText(QString::fromUtf8(u8"当前估算 k: %1 px/count").arg(st.estimatedK, 0, 'f', 4));
+        }
+        if (st.ready)
+        {
+            btnApply->setEnabled(true);
+            btnApply->setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 6px 16px;");
+        }
+    });
+
+    connect(btnApply, &QPushButton::clicked, dlg, [dlg, spinK]() {
+        auto& calib = control::globalSensitivityCalibrator();
+        if (calib.estimatedK() > 0.0)
+        {
+            spinK->setValue(calib.estimatedK());
+        }
+        calib.stop();
+        dlg->accept();
+    });
+
+    connect(btnCancel, &QPushButton::clicked, dlg, [dlg]() {
+        control::globalSensitivityCalibrator().stop();
+        dlg->reject();
+    });
+
+    connect(dlg, &QDialog::finished, dlg, []() {
+        control::globalSensitivityCalibrator().stop();
+    });
+
+    dlg->exec();
 }
 
 void AimSettingsPage::buildTriggerCard()
@@ -987,11 +1195,10 @@ void AimSettingsPage::buildTriggerCard()
         u8"★ 固件侧带硬超时自解除 —— 就算上位机崩了，时间一到输入也会自己回来。\n"
         u8"★ 太短：停不下来；太长：屏蔽期间你会觉得键盘没反应。范围 20~300。")));
 
-    auto* note = makeHint(QString::fromUtf8(
+    card->setToolTip(QString::fromUtf8(
         u8"★ 扳机用的是【以框为基准】的命中区，和瞄点解耦 —— 换瞄点（胸口/头部）"
         u8"不会改变触发几何。\n"
         u8"★ 判定输入是【原始准星】，不是平滑过的值。"));
-    cl->addWidget(note);
 
     auto commit = [this, enable, scopeCombo, stopCombo, scopeCtlCombo]() {
         if (m_loading) return;
@@ -1078,6 +1285,11 @@ const ScopeRowDesc kScopeLimitRows[] = {
       0.0, 999999.0, 1.0, 0.0, 0 },
 };
 
+const ScopeRowDesc kScopeSensitivityRows[] = {
+    { "ctlKPxPerCount", "scopeKPxPerCount", "灵敏度折算系数 k (像素/计数, 0=关)",
+      0.0, 10.0, 0.005, 0.0, 4 },
+};
+
 const ScopeRowDesc kScopePredictRows[] = {
     { "ctlPredictLeadMs", "scopePredictLeadMs", "预测提前时间 (毫秒, 0=关闭)",
       0.0, 1000.0, 1.0, 0.0, 3 },
@@ -1085,6 +1297,11 @@ const ScopeRowDesc kScopePredictRows[] = {
       "速度上限 (像素/秒, 0=不限)", 0.0, 100000.0, 10.0, 0.0, 3 },
     { "ctlPredictMaxLeadRatio", "scopePredictMaxLeadRatio",
       "预测距离上限 (框对角线倍数, 0=不限)", 0.0, 100.0, 0.05, 0.0, 3 },
+};
+
+const ScopeRowDesc kScopeInflightRows[] = {
+    { "ctlInflightBeta", "scopeInflightBeta", "在途补偿强度 (无量纲, 0=关闭)",
+      0.0, 3.0, 0.05, 1.6, 3 },
 };
 
 
@@ -1104,11 +1321,13 @@ void AimSettingsPage::buildScopeCtlCard()
                                 QStringLiteral("adjustments"));
     auto* cl = card->contentLayout();
 
-    cl->addWidget(makeHint(QString::fromUtf8(
+    card->setToolTip(QString::fromUtf8(
         u8"这里的参数【整组取代】「瞄准控制器」卡里的同名参数, 只在「自动扳机 → "
         u8"自动开镜」真的按下右键、并且你还按着热键的那几拍生效。\n"
         u8"★ 开关在「自动扳机 → 自动开镜 → 开镜期间」。\n"
-        u8"★ 量程与默认值跟「瞄准控制器」卡逐条一致; 说明文字直接取那张卡的, 只有一份。")));
+        u8"★ 量程与默认值跟「瞄准控制器」卡逐条一致; 说明文字直接取那张卡的, 只有一份。\n"
+        u8"★ 选靶 / 稳定器 / 滞回倍数 / 瞄点 Y 这些【不属于控制器增益】的参数仍然"
+        u8"只有热键一份, 不随开镜切档 —— 它们管的是「瞄谁」, 不是「用多大力」。"));
 
     m_scopeOffHint = makeHint(QString::fromUtf8(
         u8"当前是「跟随热键」：开镜前后用同一套参数, 下面这些【不生效】(已置灰)。\n"
@@ -1171,7 +1390,7 @@ void AimSettingsPage::buildScopeCtlCard()
 
             if (d.decimals <= 0)
             {
-                auto* sp = new QSpinBox;
+                auto* sp = new NoWheelSpinBox;
                 sp->setRange(static_cast<int>(d.lo), static_cast<int>(d.hi));
                 sp->setSingleStep(static_cast<int>(d.step));
                 sp->setObjectName(QString::fromUtf8(d.scopeObj));
@@ -1181,7 +1400,7 @@ void AimSettingsPage::buildScopeCtlCard()
             }
             else
             {
-                auto* sp = new QDoubleSpinBox;
+                auto* sp = new NoWheelDoubleSpinBox;
                 sp->setRange(d.lo, d.hi);
                 sp->setSingleStep(d.step);
                 sp->setDecimals(d.decimals);
@@ -1200,11 +1419,10 @@ void AimSettingsPage::buildScopeCtlCard()
     addGroup("增益（水平 x = 跟枪 / 垂直 y = 压枪）",
              kScopeGainRows, std::size(kScopeGainRows));
     addGroup("输出限幅与随机化", kScopeLimitRows, std::size(kScopeLimitRows));
+    addGroup("灵敏度折算系数 (修正预测速度)",
+             kScopeSensitivityRows, std::size(kScopeSensitivityRows));
     addGroup("在途补偿 (预测提前量)", kScopePredictRows, std::size(kScopePredictRows));
-
-    cl->addWidget(makeHint(QString::fromUtf8(
-        u8"★ 选靶 / 稳定器 / 滞回倍数 / 瞄点 Y 这些【不属于控制器增益】的参数仍然"
-        u8"只有热键一份, 不随开镜切档 —— 它们管的是「瞄谁」, 不是「用多大力」。")));
+    addGroup("在途自身位移补偿 (Smith)", kScopeInflightRows, std::size(kScopeInflightRows));
 
     auto commitScope = [this]() {
         if (m_loading) return;
@@ -1231,6 +1449,8 @@ void AimSettingsPage::buildScopeCtlCard()
         p.predict_lead_ms  = d("scopePredictLeadMs");
         p.predict_max_velocity_px_s = d("scopePredictMaxVelocityPxPerSec");
         p.predict_max_lead_ratio    = d("scopePredictMaxLeadRatio");
+        p.k_px_per_count   = d("scopeKPxPerCount");
+        p.inflight_beta    = d("scopeInflightBeta");
         p.random_seed      = i("scopeRandomSeed");
 
         ConfigBridge::instance().markDirty();
@@ -1338,6 +1558,9 @@ void AimSettingsPage::buildTrajectoryCard()
     auto* card = new CardWidget(QString::fromUtf8(u8"轨迹曲线"),
                                 QStringLiteral("vector-spline"));
     auto* cl = card->contentLayout();
+    card->setToolTip(QString::fromUtf8(
+        u8"轨迹只有在【瞄准控制器开启】时才有意义 —— 它整形的是控制器算出来的位移。\n"
+        u8"四种模式都只旋转不缩放：每拍走多远仍由 PID 决定，曲线只决定往哪个方向走。"));
 
     auto* modeCombo = new QComboBox;
     modeCombo->setObjectName("aimPathMode");
@@ -1355,7 +1578,7 @@ void AimSettingsPage::buildTrajectoryCard()
         u8"  旁路走直线 —— 小修正保精度，只有大甩枪才走拟人路径。"));
     cl->addWidget(modeRow);
 
-    auto* infl = new QSpinBox;
+    auto* infl = new NoWheelSpinBox;
     infl->setRange(0, 100);
     infl->setObjectName("aimPathInfluence");
     infl->setValue(25);
@@ -1460,11 +1683,6 @@ void AimSettingsPage::buildTrajectoryCard()
             if (m_curveCanvas) m_curveCanvas->clearCurve();
         });
     }
-
-    auto* note = makeHint(QString::fromUtf8(
-        u8"轨迹只有在【瞄准控制器开启】时才有意义 —— 它整形的是控制器算出来的位移。\n"
-        u8"四种模式都只旋转不缩放：每拍走多远仍由 PID 决定，曲线只决定往哪个方向走。"));
-    cl->addWidget(note);
 
     auto commit = [this, modeCombo]() {
         if (m_loading) return;
@@ -1701,6 +1919,8 @@ void AimSettingsPage::reloadProfileToUi()
             sd("ctlPredictLeadMs", hp.ctl_predict_lead_ms);
             sd("ctlPredictMaxVelocityPxPerSec", hp.ctl_predict_max_velocity_px_s);
             sd("ctlPredictMaxLeadRatio", hp.ctl_predict_max_lead_ratio);
+            sd("ctlKPxPerCount", hp.ctl_k_px_per_count);
+            sd("ctlInflightBeta", hp.ctl_inflight_beta);
             si("ctlMaxOutputCounts", hp.ctl_max_output_counts);
             si("ctlRandomSeed", hp.ctl_random_seed);
 
@@ -1747,6 +1967,8 @@ void AimSettingsPage::reloadProfileToUi()
             sd("scopePredictLeadMs",   hp.ctl_scope.predict_lead_ms);
             sd("scopePredictMaxVelocityPxPerSec", hp.ctl_scope.predict_max_velocity_px_s);
             sd("scopePredictMaxLeadRatio",        hp.ctl_scope.predict_max_lead_ratio);
+            sd("scopeKPxPerCount",     hp.ctl_scope.k_px_per_count);
+            sd("scopeInflightBeta",    hp.ctl_scope.inflight_beta);
             si("scopeMaxOutputCounts", hp.ctl_scope.max_output_counts);
             si("scopeRandomSeed",      hp.ctl_scope.random_seed);
 

@@ -64,6 +64,21 @@ struct AimCtlParams
     double predict_max_velocity_px_s = 0.0;
     double predict_max_lead_ratio = 0.0;
 
+    // ── 灵敏度折算系数 k (像素/计数) ────────────────────────────────────────
+    // 画面上观测到的目标速度会被自己的追踪动作污染：准星每追近一截，画面里
+    // 目标的相对位移就被抵消一截，导致喂给上面「预测提前时间」的速度系统性
+    // 偏小。用这个系数把自身下发速率折算回像素、加回观测速度，就能拿到目标
+    // 的真实速度。0 = 关闭这项修正(不需要标定就能用，只是预测会偏保守)。
+    // 不知道填多少可以用界面上的「测算灵敏度」在线拟合。
+    double k_px_per_count = 0.0;
+
+    // ── 在途自身位移补偿 (Smith) ────────────────────────────────────────────
+    // 扣除链路死区内已下发但画面尚未显现的自身位移，避免重复下令导致过冲振荡。
+    // 纯计数域运算，不需要任何"每计数像素"标定。inflight_beta = 0 时关闭，
+    // 与没有这个功能逐位相同。
+    double inflight_beta = 1.6;          // 补偿强度(无量纲)；0=关闭
+    double inflight_dead_time_ms = 46.0; // 补偿窗口(ms)；必须等于真实链路死区
+
     // 瞄点 Y 随机抖动的种子 (0 = 用内部固定常数)
     int random_seed = 0;
 
@@ -85,8 +100,15 @@ struct AimCtlParams
         predict_lead_ms = std::clamp(predict_lead_ms, 0.0, 1000.0);
         predict_max_velocity_px_s = std::clamp(predict_max_velocity_px_s, 0.0, 100000.0);
         predict_max_lead_ratio = std::clamp(predict_max_lead_ratio, 0.0, 100.0);
+        // ★ 物理合法范围与标定器的拟合上限一致(见 sensitivity_calibrator.h)。
+        k_px_per_count = std::clamp(k_px_per_count, 0.0, 10.0);
         max_output_counts = std::clamp(max_output_counts, 1, 1000);
         random_seed = std::max(0, random_seed);
+        // ★ 上限 3.0：实测 beta=2.0 在 60fps 已经发散(尾段 56px)，3.0 用来挡住
+        //   填错量级的配置，不是可用值。0 合法(=关闭)，不夹掉。
+        inflight_beta = std::clamp(inflight_beta, 0.0, 3.0);
+        // ★ 窗口不许离真实链路死区太远：填错窗口等于把"还没生效的位移"算错。
+        inflight_dead_time_ms = std::clamp(inflight_dead_time_ms, 0.0, 1000.0);
     }
 };
 
@@ -119,7 +141,11 @@ struct HotkeyProfile
     int    ctl_max_output_counts = 200;
     double ctl_p_full_scale_px = 0.0;
 
+    // ── 在途自身位移补偿 (Smith) ─────────────────────────────────────────
     // 扣除链路死区内已下发但画面尚未显现的自身位移，避免重复下令导致过冲振荡。
+    // 纯计数域运算，不需要任何"每计数像素"标定。0 = 关闭。
+    double ctl_inflight_beta = 1.6;
+    double ctl_inflight_dead_time_ms = 46.0;
 
     // ── 在途补偿（预测提前量）─────────────────────────────────────────────
     // 链路（采集→推理→瞄准→下发→游戏渲染）有几十毫秒延迟，等这一拍算完
@@ -143,6 +169,12 @@ struct HotkeyProfile
     // 1.0 = 最多提前一个对角线；0.5 = 半个；★ 0 = 不限制（默认）。
     // 用相对量而不是绝对像素，是为了让远近目标的保护尺度一致。
     double ctl_predict_max_lead_ratio = 0.0;
+
+    // 灵敏度折算系数 k (像素/计数)。画面观测到的目标速度会被自己的追踪动作
+    // 污染(准星追近一截，画面里目标的相对位移就被抵消一截)，导致喂给上面
+    // 预测的速度系统性偏小。这里把自身下发速率折算回像素、加回观测速度，
+    // 就能拿到目标真实速度。0 = 关闭这项修正。可以用界面「测算灵敏度」在线拟合。
+    double ctl_k_px_per_count = 0.0;
 
     double ctl_y_offset = 0.5;
     double ctl_y_offset_max = 0.5;
@@ -225,6 +257,9 @@ inline AimCtlParams ctlParamsOf(const HotkeyProfile& hk)
     p.predict_lead_ms = hk.ctl_predict_lead_ms;
     p.predict_max_velocity_px_s = hk.ctl_predict_max_velocity_px_s;
     p.predict_max_lead_ratio = hk.ctl_predict_max_lead_ratio;
+    p.k_px_per_count = hk.ctl_k_px_per_count;
+    p.inflight_beta = hk.ctl_inflight_beta;
+    p.inflight_dead_time_ms = hk.ctl_inflight_dead_time_ms;
     p.random_seed = hk.ctl_random_seed;
     return p;
 }
@@ -245,6 +280,9 @@ inline void applyCtlParams(HotkeyProfile& hk, const AimCtlParams& p)
     hk.ctl_predict_lead_ms = p.predict_lead_ms;
     hk.ctl_predict_max_velocity_px_s = p.predict_max_velocity_px_s;
     hk.ctl_predict_max_lead_ratio = p.predict_max_lead_ratio;
+    hk.ctl_k_px_per_count = p.k_px_per_count;
+    hk.ctl_inflight_beta = p.inflight_beta;
+    hk.ctl_inflight_dead_time_ms = p.inflight_dead_time_ms;
     hk.ctl_random_seed = p.random_seed;
 }
 

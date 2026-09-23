@@ -29,6 +29,12 @@ struct ControllerConfig
     PidConfig pid;
     PredictorConfig predictor;
 
+    // 灵敏度折算系数 k (像素/计数)。用于修正画面观测到的目标速度——准星追近
+    // 一截，画面里目标的相对位移就被抵消一截，导致喂给 predictor 的速度系统性
+    // 偏小；把自身下发速率按 k 折算回像素、加回观测速度，就能拿到目标真实速度。
+    // 0 = 关闭这项修正（不需要标定就能用，只是预测会偏保守）。
+    double pxPerCount = 0.0;
+
     std::vector<ClassAimPoint> classAimPoints;
 
     bool requireFreshDetection = true;
@@ -117,6 +123,9 @@ private:
 
     bool hasLastBox_ = false;
     Box lastBox_;
+
+    // 上一拍实际下发的计数，供本拍做自身速度污染修正 (见 pxPerCount)。
+    Counts lastSentCounts_{ 0, 0 };
 
     int targetIdCounter_ = 0;
 };

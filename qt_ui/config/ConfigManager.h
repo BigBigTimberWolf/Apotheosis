@@ -164,6 +164,13 @@ public:
         double ctlPredictLeadMs = 0.0;
         double ctlPredictMaxVelocityPxPerSec = 0.0;
         double ctlPredictMaxLeadRatio = 0.0;
+
+        // 灵敏度折算系数 k (像素/计数)：修正预测吃到的目标速度里的自身运动污染。
+        double ctlKPxPerCount = 0.0;
+
+        // 在途自身位移补偿 (Smith)：把已下发但画面未显现的自身位移从输出里扣掉。
+        double ctlInflightBeta = 1.6;
+
         double ctlYOffset = 0.5;
         double ctlYOffsetMax = 0.5;
         double ctlHysteresisRatio = 1.3;

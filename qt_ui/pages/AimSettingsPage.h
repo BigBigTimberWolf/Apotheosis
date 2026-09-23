@@ -56,6 +56,7 @@ private:
     void moveAimClass(int from, int to);
     void buildCrosshairCard();
     void buildControllerCard();
+    void showSensitivityCalibrateDialog(QDoubleSpinBox* spinK);
     void buildDynamicFovCard();
     void buildTriggerCard();
     void buildScopeCtlCard();
