@@ -131,11 +131,58 @@ Counts PidController::update(const Vec2& anchor, const Vec2& cross, double dtSec
     const double eX = anchor.x - cross.x;
     const double eY = anchor.y - cross.y;
 
+    if (cfg_.settleEnterPx > 0.0)
+    {
+        const double distance = std::hypot(eX, eY);
+        const double exitPx = std::max(cfg_.settleExitPx, cfg_.settleEnterPx);
+        if (settled_)
+        {
+            if (distance >= exitPx)
+            {
+                settled_ = false;
+                nearTimeSec_ = 0.0;
+            }
+        }
+        else if (distance <= cfg_.settleEnterPx)
+        {
+            // 单次卡顿不能冒充连续观察；至少等一个真实反馈窗口再停稳。
+            nearTimeSec_ += std::min(dtSec, 0.020);
+            if (nearTimeSec_ >= cfg_.settleDwellSec)
+                settled_ = true;
+        }
+        else if (distance < exitPx)
+        {
+            // 短暂测量抖动只回退部分观察时间，不让一帧噪声反复清零。
+            nearTimeSec_ = std::max(0.0, nearTimeSec_ - std::min(dtSec, 0.020) * 0.5);
+        }
+        else
+        {
+            nearTimeSec_ = 0.0;
+        }
+    }
+    else
+    {
+        settled_ = false;
+        nearTimeSec_ = 0.0;
+    }
+
+    if (settled_)
+    {
+        stateX_.hold(eX);
+        stateY_.hold(eY);
+        telemetry_ = ControlTelemetry{};
+        telemetry_.x.error = eX;
+        telemetry_.y.error = eY;
+        telemetry_.settled = true;
+        return out;
+    }
+
     bool uwX = false, uwY = false;
     stepAxis(Axis::X, eX, dtSec, stateX_, telemetry_.x, uwX);
     stepAxis(Axis::Y, eY, dtSec, stateY_, telemetry_.y, uwY);
     telemetry_.unwoundX = uwX;
     telemetry_.unwoundY = uwY;
+    telemetry_.settled = false;
 
     out.x = telemetry_.x.counts;
     out.y = telemetry_.y.counts;
@@ -147,6 +194,8 @@ void PidController::reset()
     stateX_.reset();
     stateY_.reset();
     telemetry_ = ControlTelemetry{};
+    settled_ = false;
+    nearTimeSec_ = 0.0;
 }
 
 }

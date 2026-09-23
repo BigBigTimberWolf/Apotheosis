@@ -360,6 +360,7 @@ static void testPid()
     {
         PidConfig cfg;
         cfg.kpX = cfg.kpY = 0.1;
+        cfg.settleEnterPx = 0.0; // 单独验证旧量化结转，不让停稳策略改变本组口径。
         PidController pid2(cfg);
         int total = 0;
         for (int i = 0; i < 500; ++i)
@@ -380,6 +381,102 @@ static void testPid()
         check(total4 == 1,
               "★ 余量结转生效: 0.0005 counts/拍 累加 2500 拍 ⇒ 必须出 1 "
               "(不结转的话永远是 0, 就是当年'卡在差两像素不动'的 bug)");
+    }
+
+    {
+        PidConfig cfg;
+        cfg.inflightBeta = 0.0; // 用户复现条件：不开 Smith。
+        PidController pid(cfg);
+        for (int i = 0; i < 8; ++i)
+            pid.update(Vec2{0.6, 0.2}, Vec2{}, dt);
+        check(pid.telemetry().settled, "近锚点持续 50ms 后进入停稳");
+
+        bool silent = true;
+        for (int i = 0; i < 120; ++i)
+        {
+            const double jitter = i % 2 == 0 ? 0.6 : -0.6;
+            const Counts move = pid.update(Vec2{jitter, 0.2}, Vec2{}, dt);
+            silent = silent && move.x == 0 && move.y == 0;
+        }
+        check(silent, "停稳后锚点 0.75px 内抖动不再发正反计数");
+        checkNear(pid.telemetry().x.carry, 0.0, 0.0, "停稳时清掉 X 轴小数余量");
+        checkNear(pid.telemetry().y.carry, 0.0, 0.0, "停稳时清掉 Y 轴小数余量");
+
+        const Counts withinExit = pid.update(Vec2{1.2, 0}, Vec2{}, dt);
+        check(pid.telemetry().settled && withinExit.x == 0,
+              "进入停稳后在退出半径内不反复启停");
+        const Counts moved = pid.update(Vec2{2.5, 0}, Vec2{}, dt);
+        check(!pid.telemetry().settled && moved.x > 0,
+              "目标明显离开时立即恢复追踪");
+
+        pid.reset();
+        pid.update(Vec2{0.5, 0}, Vec2{}, 0.2);
+        check(!pid.telemetry().settled, "单次卡顿不能冒充连续靠近");
+    }
+
+    {
+        PidConfig cfg;
+        cfg.inflightBeta = 0.0;
+        PidController pid(cfg);
+        for (int i = 0; i < 100; ++i)
+            pid.update(Vec2{ i % 2 == 0 ? 0.6 : 1.4, 0 }, Vec2{}, dt);
+        check(pid.telemetry().settled,
+              "短暂测量抖动不应永远阻止近点停稳");
+        const Counts jump = pid.update(Vec2{3.0, 0}, Vec2{}, dt);
+        check(!pid.telemetry().settled && jump.x > 0,
+              "明显移动的目标仍立即退出停稳");
+    }
+
+    {
+        PidConfig cfg;
+        cfg.inflightBeta = 1.6;
+        PidController pid(cfg);
+        pid.update(Vec2{10, 0}, Vec2{}, dt);
+        for (int i = 0; i < 8; ++i)
+            pid.update(Vec2{0.5, 0}, Vec2{}, dt);
+        check(pid.telemetry().settled, "Smith 开启时也能停稳");
+        pid.update(Vec2{2.5, 0}, Vec2{}, dt);
+        checkNear(pid.telemetry().x.inflight, 0.0, 1e-9,
+                  "停稳后旧的在途计数不会污染重新追踪的第一拍");
+    }
+
+    {
+        // 46ms 延迟观测 + 整数鼠标计数：比较静止目标末段与移动目标追踪。
+        struct Metrics { int tailCommands = 0; double meanError = 0.0; };
+        const auto simulate = [dt](bool settle, double noise, double targetSpeed) {
+            PidConfig cfg;
+            cfg.inflightBeta = 0.0;
+            cfg.settleEnterPx = settle ? 0.75 : 0.0;
+            PidController pid(cfg);
+            double error = 30.0;
+            double observedHistory[6] = { 30, 30, 30, 30, 30, 30 };
+            int historyHead = 0;
+            Metrics metrics;
+            for (int tick = 0; tick < 720; ++tick)
+            {
+                const double jitter = tick % 2 == 0 ? noise : -noise;
+                const Counts move = pid.update(
+                    Vec2{ observedHistory[historyHead] + jitter, 0 }, Vec2{}, dt);
+                error += targetSpeed * dt - move.x * kCountsPerPixel;
+                observedHistory[historyHead] = error;
+                historyHead = (historyHead + 1) % 6;
+                if (tick >= 360)
+                {
+                    metrics.tailCommands += std::abs(move.x);
+                    metrics.meanError += std::abs(error) / 360.0;
+                }
+            }
+            return metrics;
+        };
+
+        const Metrics staticOld = simulate(false, 0.8, 0.0);
+        const Metrics staticSettled = simulate(true, 0.8, 0.0);
+        check(staticOld.tailCommands > 20 && staticSettled.tailCommands == 0,
+              "46ms 延迟的静止目标：停稳策略消除末段反复发计数");
+        const Metrics movingOld = simulate(false, 0.4, 40.0);
+        const Metrics movingSettled = simulate(true, 0.4, 40.0);
+        check(movingSettled.meanError <= movingOld.meanError + 0.5,
+              "40px/s 移动目标：停稳策略不显著增加追踪误差");
     }
 
     {

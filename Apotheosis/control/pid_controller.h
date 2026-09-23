@@ -25,6 +25,12 @@ struct PidConfig
 
     double pFullScalePx = 0.0;
 
+    // 锚点附近停稳：连续接近后停止亚像素计数的往返结转；超过退出半径即恢复。
+    // enter=0 可关闭，供对照测试与后续实机调参使用。
+    double settleEnterPx = 0.75;
+    double settleExitPx = 1.5;
+    double settleDwellSec = 0.050;
+
     // ── 在途自身位移补偿 (Smith) ────────────────────────────────────────────
     // 把"已经发出去、游戏里已生效、只是画面还没回来"的自身位移从【输出】里扣掉，
     // 避免死区期间控制器反复对同一批位移重复下令导致的过冲/振荡。
@@ -104,6 +110,17 @@ struct AxisState
         ringHead = 0;
         ringCount = 0;
     }
+
+    void hold(double error)
+    {
+        integral = 0.0;
+        carry = 0.0;
+        derivLp = 0.0;
+        prevError = error;
+        hasPrev = true;
+        ringHead = 0;
+        ringCount = 0;
+    }
 };
 
 struct AxisTelemetry
@@ -125,6 +142,7 @@ struct ControlTelemetry
     AxisTelemetry y;
     bool unwoundX = false;
     bool unwoundY = false;
+    bool settled = false;
 };
 
 class PidController
@@ -150,6 +168,8 @@ private:
     AxisState stateX_;
     AxisState stateY_;
     ControlTelemetry telemetry_;
+    bool settled_ = false;
+    double nearTimeSec_ = 0.0;
 };
 
 inline constexpr double kCriticalGain = 0.2602;
