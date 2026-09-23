@@ -26,6 +26,7 @@ struct PidConfig
     double pFullScalePx = 0.0;
 
     // 锚点附近停稳：连续接近后停止亚像素计数的往返结转；超过退出半径即恢复。
+    // 50ms 是本策略的初版观察时间，不是实测链路延迟，也不读取下面的 Smith 窗口。
     // enter=0 可关闭，供对照测试与后续实机调参使用。
     double settleEnterPx = 0.75;
     double settleExitPx = 1.5;
@@ -42,7 +43,8 @@ struct PidConfig
     //   随检测帧率剧烈漂移（帧率越高，重复扣的次数越多）。
     // ★ inflightBeta = 0 时整段直接跳过，与没有这个功能逐位相同（安全默认）。
     double inflightBeta = 0.0;
-    // 补偿窗口(ms)。★ 必须等于真实链路死区，不能超过——超过会把已经生效的
+    // 补偿窗口(ms)。默认 46ms 来自旧实机日志的模型反推，当前硬件需重新测量。
+    // ★ 启用 Smith 时必须按真实链路死区设置，不能超过——超过会把已经生效的
     // 位移当成还在途、重复扣除、变成正反馈发散。
     double deadTimeMs = 46.0;
 };

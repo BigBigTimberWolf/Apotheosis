@@ -145,7 +145,7 @@ Counts PidController::update(const Vec2& anchor, const Vec2& cross, double dtSec
         }
         else if (distance <= cfg_.settleEnterPx)
         {
-            // 单次卡顿不能冒充连续观察；至少等一个真实反馈窗口再停稳。
+            // 单次卡顿不能冒充连续观察；50ms 是独立的停稳消抖时间。
             nearTimeSec_ += std::min(dtSec, 0.020);
             if (nearTimeSec_ >= cfg_.settleDwellSec)
                 settled_ = true;

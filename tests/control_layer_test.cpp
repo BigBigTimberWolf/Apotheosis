@@ -441,7 +441,8 @@ static void testPid()
     }
 
     {
-        // 46ms 延迟观测 + 整数鼠标计数：比较静止目标末段与移动目标追踪。
+        // 120fps 下延迟 6 拍 = 50ms（仅为模拟量级，不是当前硬件实测值）。
+        // 比较静止目标末段与移动目标追踪。
         struct Metrics { int tailCommands = 0; double meanError = 0.0; };
         const auto simulate = [dt](bool settle, double noise, double targetSpeed) {
             PidConfig cfg;
@@ -472,7 +473,7 @@ static void testPid()
         const Metrics staticOld = simulate(false, 0.8, 0.0);
         const Metrics staticSettled = simulate(true, 0.8, 0.0);
         check(staticOld.tailCommands > 20 && staticSettled.tailCommands == 0,
-              "46ms 延迟的静止目标：停稳策略消除末段反复发计数");
+              "模拟 6 拍延迟的静止目标：停稳策略消除末段反复发计数");
         const Metrics movingOld = simulate(false, 0.4, 40.0);
         const Metrics movingSettled = simulate(true, 0.4, 40.0);
         check(movingSettled.meanError <= movingOld.meanError + 0.5,
