@@ -13,6 +13,7 @@
 
 #include "latest_move_slot.h"
 #include "mouse_driver.h"
+#include "weapon_switch31.h"
 
 class MakcuConnection;
 class MakcuNewConnection;
@@ -60,6 +61,8 @@ public:
     void releaseRightButton();
 
     bool tapKey(int hid_key, int hold_ms);
+    bool requestWeaponSwitch31(int after_shot_delay_ms, int step_ms);
+    bool weaponSwitch31Busy() const;
 
     // 瞬时屏蔽【真实键盘输入】 duration_ms 毫秒(不注入任何键)。
     //
@@ -98,6 +101,7 @@ private:
     std::mutex queueMtx_;
     std::condition_variable queueCv_;
     std::thread moveWorker_;
+    std::unique_ptr<mouse_async::WeaponSwitch31> weaponSwitch31_;
     std::atomic<bool> workerStop_{ false };
     std::mutex feedbackMtx_;
     long long appliedDx_ = 0;

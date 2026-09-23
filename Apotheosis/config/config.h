@@ -214,6 +214,9 @@ struct HotkeyProfile
     int  trigger_scope_delay_ms = 0;
     int  trigger_auto_stop = 0;
     int  trigger_stop_ms   = 60;
+    bool trigger_weapon_switch31 = false;
+    int  trigger_switch31_delay_ms = 50;
+    int  trigger_switch31_step_ms = 20;
 
     int   aim_path_mode = 0;
     int   aim_path_influence = 25;

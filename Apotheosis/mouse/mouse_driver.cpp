@@ -75,6 +75,8 @@ int hidUsageToVk(int hid)
 {
     switch (hid)
     {
+    case 0x1E: return 0x31; // 主键盘 1
+    case 0x20: return 0x33; // 主键盘 3
     case 0x1A: return 0x57;
     case 0x04: return 0x41;
     case 0x16: return 0x53;

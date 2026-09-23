@@ -1204,12 +1204,26 @@ void AimSettingsPage::buildTriggerCard()
         u8"★ 固件侧带硬超时自解除 —— 就算上位机崩了，时间一到输入也会自己回来。\n"
         u8"★ 太短：停不下来；太长：屏蔽期间你会觉得键盘没反应。范围 20~300。")));
 
+    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"开火后切枪")));
+    auto* switch31Enable = new QCheckBox(QString::fromUtf8(u8"开火后按 3 → 1 切枪"));
+    switch31Enable->setObjectName("triggerWeaponSwitch31");
+    cl->addWidget(switch31Enable);
+    attachTip(switch31Enable, QString::fromUtf8(
+        u8"每次自动扳机开火并松开左键后，只执行一次 3 → 1。\n"
+        u8"★ 即使「单次按住时长」为 0（原本长按），开启切枪后也会改成至少 20ms 的单次开火。\n"
+        u8"★ 需要已连接且支持键盘注入的设备；没有键盘设备时保持原来的开火行为。\n"
+        u8"★ 切枪期间暂停瞄准移动和自动扳机，切回 1 后才允许下一发。默认关闭。"));
+    cl->addWidget(makeIntRow("triggerSwitch31DelayMs", "开火后等待 (ms)", 0, 2000, 5, 50,
+        QString::fromUtf8(u8"左键松开后等多久才开始按 3；Lua 的 Q 延迟默认 50ms。")));
+    cl->addWidget(makeIntRow("triggerSwitch31StepMs", "按键时长/间隔 (ms)", 5, 100, 1, 20,
+        QString::fromUtf8(u8"按住 3、松开后的间隔、按住 1 都使用这个时长；Lua 默认 20ms。范围 5～100ms。")));
+
     card->setToolTip(QString::fromUtf8(
         u8"★ 扳机用的是【以框为基准】的命中区，和瞄点解耦 —— 换瞄点（胸口/头部）"
         u8"不会改变触发几何。\n"
         u8"★ 判定输入是【原始准星】，不是平滑过的值。"));
 
-    auto commit = [this, enable, scopeCombo, stopCombo, scopeCtlCombo]() {
+    auto commit = [this, enable, scopeCombo, stopCombo, scopeCtlCombo, switch31Enable]() {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
         if (ri < 0) return;
@@ -1232,6 +1246,9 @@ void AimSettingsPage::buildTriggerCard()
         hp.trigger_scope_delay_ms     = i("triggerScopeDelay");
         hp.trigger_auto_stop          = stopCombo->currentData().toInt();
         hp.trigger_stop_ms            = i("triggerStopMs");
+        hp.trigger_weapon_switch31    = switch31Enable->isChecked();
+        hp.trigger_switch31_delay_ms  = i("triggerSwitch31DelayMs");
+        hp.trigger_switch31_step_ms   = i("triggerSwitch31StepMs");
         // 开镜期间是否用独立那一套 (与「开镜独立瞄准参数」卡联动显隐)。
         hp.scope_ctl_enabled          = scopeCtlCombo->currentData().toInt();
 
@@ -1240,6 +1257,7 @@ void AimSettingsPage::buildTriggerCard()
     };
 
     connect(enable, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    connect(switch31Enable, &QCheckBox::toggled, this, [commit](bool) { commit(); });
     connect(scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [commit](int) { commit(); });
     connect(stopCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1949,6 +1967,8 @@ void AimSettingsPage::reloadProfileToUi()
                 const int k = c->findData(hp.trigger_auto_stop > 0 ? 1 : 0);
                 c->setCurrentIndex(k >= 0 ? k : 0);
             }
+            if (auto* c = findChild<QCheckBox*>("triggerWeaponSwitch31"))
+                c->setChecked(hp.trigger_weapon_switch31);
             si("triggerYPercent",         hp.trigger_y_percent);
             si("triggerFireDelay",        hp.trigger_fire_delay);
             si("triggerFireDuration",     hp.trigger_fire_duration);
@@ -1959,6 +1979,8 @@ void AimSettingsPage::reloadProfileToUi()
             si("triggerSwitchCooldown",   hp.trigger_switch_cooldown_ms);
             si("triggerScopeDelay",       hp.trigger_scope_delay_ms);
             si("triggerStopMs",           hp.trigger_stop_ms);
+            si("triggerSwitch31DelayMs",   hp.trigger_switch31_delay_ms);
+            si("triggerSwitch31StepMs",    hp.trigger_switch31_step_ms);
 
             // 开镜期间: 跟随热键 / 用独立那一套。
             if (auto* c = findChild<QComboBox*>("scopeCtlMode"))

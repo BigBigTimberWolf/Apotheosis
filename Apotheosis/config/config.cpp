@@ -635,6 +635,12 @@ bool Config::loadConfig(const std::string& filename)
             hk.trigger_scope_delay_ms = static_cast<int>(get_double(sec, "trigger_scope_delay_ms", hk.trigger_scope_delay_ms));
             hk.trigger_auto_stop = static_cast<int>(get_double(sec, "trigger_auto_stop", hk.trigger_auto_stop));
             hk.trigger_stop_ms = static_cast<int>(get_double(sec, "trigger_stop_ms", hk.trigger_stop_ms));
+            hk.trigger_weapon_switch31 = get_bool(
+                sec, "trigger_weapon_switch31", hk.trigger_weapon_switch31);
+            hk.trigger_switch31_delay_ms = static_cast<int>(get_double(
+                sec, "trigger_switch31_delay_ms", hk.trigger_switch31_delay_ms));
+            hk.trigger_switch31_step_ms = static_cast<int>(get_double(
+                sec, "trigger_switch31_step_ms", hk.trigger_switch31_step_ms));
 
             hk.aim_path_mode = static_cast<int>(get_double(sec, "aim_path_mode", hk.aim_path_mode));
             hk.aim_path_influence = static_cast<int>(get_double(sec, "aim_path_influence", hk.aim_path_influence));
@@ -732,6 +738,8 @@ bool Config::loadConfig(const std::string& filename)
         hk.trigger_auto_scope = std::clamp(hk.trigger_auto_scope, 0, 2);
         hk.trigger_auto_stop = hk.trigger_auto_stop > 0 ? 1 : 0;
         hk.trigger_stop_ms = std::clamp(hk.trigger_stop_ms, 20, 300);
+        hk.trigger_switch31_delay_ms = std::clamp(hk.trigger_switch31_delay_ms, 0, 2000);
+        hk.trigger_switch31_step_ms = std::clamp(hk.trigger_switch31_step_ms, 5, 100);
 
         hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 3);
         hk.aim_path_influence = std::clamp(hk.aim_path_influence, 0, 100);
@@ -988,7 +996,10 @@ bool Config::saveConfig(const std::string& filename)
              << "trigger_auto_scope = "     << hk.trigger_auto_scope << "\n"
              << "trigger_scope_delay_ms = " << hk.trigger_scope_delay_ms << "\n"
              << "trigger_auto_stop = "      << hk.trigger_auto_stop << "\n"
-             << "trigger_stop_ms = "        << hk.trigger_stop_ms << "\n";
+             << "trigger_stop_ms = "        << hk.trigger_stop_ms << "\n"
+             << "trigger_weapon_switch31 = " << to_bool_str(hk.trigger_weapon_switch31) << "\n"
+             << "trigger_switch31_delay_ms = " << hk.trigger_switch31_delay_ms << "\n"
+             << "trigger_switch31_step_ms = " << hk.trigger_switch31_step_ms << "\n";
 
         file << "aim_path_mode = "          << hk.aim_path_mode << "\n"
              << "aim_path_influence = "     << hk.aim_path_influence << "\n"

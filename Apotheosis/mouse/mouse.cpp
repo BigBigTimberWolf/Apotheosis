@@ -36,11 +36,19 @@ MouseThread::MouseThread(
 {
     updateParams(params);
     refreshDriver();
+    weaponSwitch31_ = std::make_unique<mouse_async::WeaponSwitch31>(
+        [this](int hidKey, int holdMs) {
+            const bool ok = tapKey(hidKey, holdMs);
+            if (!ok)
+                std::cerr << "[Switch31] keyboard tap failed: HID " << hidKey << std::endl;
+            return ok;
+        });
     moveWorker_ = std::thread(&MouseThread::moveWorkerLoop, this);
 }
 
 MouseThread::~MouseThread()
 {
+    weaponSwitch31_.reset();
     {
         std::lock_guard<std::mutex> lock(queueMtx_);
         workerStop_.store(true);
@@ -197,6 +205,17 @@ bool MouseThread::tapKey(int hid_key, int hold_ms)
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     if (!driver_ || !driver_->capabilities()) return false;
     return driver_->tapKey(hid_key, hold_ms);
+}
+
+bool MouseThread::requestWeaponSwitch31(int after_shot_delay_ms, int step_ms)
+{
+    if (!supports(mouse_driver::kCapKeyboard) || !weaponSwitch31_) return false;
+    return weaponSwitch31_->request(after_shot_delay_ms, step_ms);
+}
+
+bool MouseThread::weaponSwitch31Busy() const
+{
+    return weaponSwitch31_ && weaponSwitch31_->busy();
 }
 
 bool MouseThread::maskRealKeyboard(int duration_ms)

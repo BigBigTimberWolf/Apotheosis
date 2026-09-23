@@ -93,6 +93,37 @@ bool g_scopeCtlLast = false;
 // ★ mode 2(长按)不用它: 那种档右键真的按着才算在镜内, engaged() 就是真值。
 bool g_scopeTapped = false;
 
+struct PendingSwitch31
+{
+    bool armed = false;
+    int delayMs = 50;
+    int stepMs = 20;
+};
+PendingSwitch31 g_pendingSwitch31;
+bool g_warnedSwitch31Unavailable = false;
+
+// 只在本次自动扳机真的按下并松开左键后启动切枪。键盘线程独立运行，
+// 即使之后丢框或松开热键，已经开出的这一枪仍会完成 3 → 1。
+void finishSwitch31Shot(MouseThread* mouse)
+{
+    if (!g_pendingSwitch31.armed) return;
+    const PendingSwitch31 pending = g_pendingSwitch31;
+    g_pendingSwitch31 = {};
+    if (!mouse)
+    {
+        std::cerr << "[Switch31] could not start keyboard sequence." << std::endl;
+        return;
+    }
+    // 长按开镜必须在切枪前松右键；点按档的开镜状态仍由玩家自己负责。
+    if (g_scope.mode() >= 2)
+    {
+        const auto scopeRelease = g_scope.forceRelease();
+        if (scopeRelease.release_right) mouse->releaseRightButton();
+    }
+    if (!mouse->requestWeaponSwitch31(pending.delayMs, pending.stepMs))
+        std::cerr << "[Switch31] could not start keyboard sequence." << std::endl;
+}
+
 // 热键松开 / 控制器关闭时把还按着的鼠标键放开。
 //
 // ★★ 这两种情况下 tick() 会在函数最前面直接 return —— g_trigger/g_scope 再
@@ -111,11 +142,16 @@ void releaseHeldButtons()
     const auto act = g_scope.forceRelease();
     if (MouseThread* mouse = ensureMouse())
     {
-        if (releaseLeft)
-            mouse->releaseLeftButton();
         if (act.release_right)
             mouse->releaseRightButton();
+        if (releaseLeft)
+        {
+            mouse->releaseLeftButton();
+            finishSwitch31Shot(mouse);
+        }
     }
+    else
+        g_pendingSwitch31 = {};
 }
 
 void releaseTargetButtons(int scopeMode)
@@ -124,9 +160,15 @@ void releaseTargetButtons(int scopeMode)
     const auto release = boss::releaseOnTargetLoss(g_trigger, g_scope, scopeMode);
     if (MouseThread* mouse = ensureMouse())
     {
-        if (release.left) mouse->releaseLeftButton();
         if (release.right) mouse->releaseRightButton();
+        if (release.left)
+        {
+            mouse->releaseLeftButton();
+            finishSwitch31Shot(mouse);
+        }
     }
+    else
+        g_pendingSwitch31 = {};
 }
 
 boss::AimPathDriver::Params pathParamsFrom(const HotkeyProfile& hk)
@@ -406,6 +448,16 @@ bool tick()
         g_last_tick = now;
     }
 
+    if (MouseThread* mouse = ensureMouse(); mouse && mouse->weaponSwitch31Busy())
+    {
+        // Lua 切枪期间暂停整条瞄准/扳机链。清掉 PID 与轨迹余量，避免切回 1 后
+        // 把切枪期间积累的误差一下子发出去；时钟仍逐拍更新。
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_controller) g_controller->reset();
+        g_path.reset();
+        return false;
+    }
+
     {
         // 只在【切档那一刻】打一行, 不刷屏 —— 用户要能确认它真的切了。
         if (scopeCtlActive != g_scopeCtlLast)
@@ -518,6 +570,18 @@ bool tick()
         const int scopeDelay = std::max(0, hk.trigger_scope_delay_ms);
 
         {
+            const bool switchCapable = hk.trigger_weapon_switch31 &&
+                mouse->supports(mouse_driver::kCapKeyboard);
+            if (hk.trigger_weapon_switch31 && !switchCapable &&
+                !g_warnedSwitch31Unavailable)
+            {
+                std::cerr << "[Switch31] keyboard device unavailable; firing without weapon switch."
+                          << std::endl;
+                g_warnedSwitch31Unavailable = true;
+            }
+            if (!hk.trigger_weapon_switch31 || switchCapable)
+                g_warnedSwitch31Unavailable = false;
+
             const auto scopeAct = g_scope.tick(inZone, scopeAllowed, scopeMode, scopeDelay, ms);
             if (scopeAct.release_right) mouse->releaseRightButton();
             if (scopeAct.press_right)
@@ -530,7 +594,13 @@ bool tick()
 
             const bool scopeReady = g_scope.ready(scopeAllowed, scopeMode, scopeDelay, ms);
 
-            const bool holdMode = (hk.trigger_fire_duration <= 0);
+            // 开火后即使用户临时关掉切枪或键盘断开，本次已按下的左键仍按短按
+            // 语义完成，不能中途退回「长按直到离区」。
+            const bool switchPulse = switchCapable || g_pendingSwitch31.armed;
+            const bool holdMode = (hk.trigger_fire_duration <= 0) && !switchPulse;
+            const int fireDuration = switchPulse
+                ? std::max(hk.trigger_fire_duration, 20)
+                : hk.trigger_fire_duration;
 
             boss::TriggerFsm::Input tin;
             tin.in_zone  = inZone;
@@ -541,22 +611,34 @@ bool tick()
             if (hk.trigger_enabled && scopeReady)
             {
                 tAct = g_trigger.tick(tin, holdMode,
-                    hk.trigger_fire_delay, hk.trigger_fire_duration,
+                    hk.trigger_fire_delay, fireDuration,
                     hk.trigger_fire_interval, hk.trigger_switch_cooldown_ms,
-                    hk.trigger_delay_jitter_ms, hk.trigger_duration_jitter_ms,
+                    hk.trigger_delay_jitter_ms,
+                    switchPulse ? 0 : hk.trigger_duration_jitter_ms,
                     hk.trigger_interval_jitter_ms);
             }
             else if (boss::releaseTriggerIfUnavailable(
                          g_trigger, hk.trigger_enabled, scopeReady))
             {
                 mouse->releaseLeftButton();
+                finishSwitch31Shot(mouse);
             }
 
-            if (tAct.release_left) mouse->releaseLeftButton();
+            if (tAct.release_left)
+            {
+                mouse->releaseLeftButton();
+                finishSwitch31Shot(mouse);
+            }
             if (tAct.press_left)   mouse->pressLeftButton();
 
             if (tAct.fired)
             {
+                if (switchCapable)
+                {
+                    g_pendingSwitch31.armed = true;
+                    g_pendingSwitch31.delayMs = hk.trigger_switch31_delay_ms;
+                    g_pendingSwitch31.stepMs = hk.trigger_switch31_step_ms;
+                }
                 const auto snap = runtime_config::read();
                 const bool methodOk = snap && (snap->input_method == "MAKCU" ||
                                                snap->input_method == "MAKCUNEW" ||
@@ -606,6 +688,14 @@ bool tick()
             out.filteredCenter.x, movementFeedback.dx, dtSec);
     }
 
+    if (MouseThread* mouse = ensureMouse(); mouse && mouse->weaponSwitch31Busy())
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_controller) g_controller->reset();
+        g_path.reset();
+        return false;
+    }
+
     if (move_x == 0 && move_y == 0)
         return false;
 
@@ -629,6 +719,8 @@ void reset()
         g_last_tick = std::chrono::steady_clock::time_point{};
         g_scopeCtlLast = false;
         g_scopeTapped = false;
+        g_pendingSwitch31 = {};
+        g_warnedSwitch31Unavailable = false;
     }
     resetMouse();
 }

@@ -99,7 +99,34 @@ int main()
             check(hp.dynamic_fov_strength > 0.59f && hp.dynamic_fov_strength < 0.61f,
                   "缺键 -> dynamic_fov_strength 默认 0.60");
             check(hp.aim_classes.empty(), "缺键 -> aim_classes 为空");
+            check(!hp.trigger_weapon_switch31,
+                  "旧配置缺键时开火后切枪默认关闭");
         }
+    }
+
+    {
+        const std::string p = write_config("switch31.ini",
+            "trigger_weapon_switch31 = true\n"
+            "trigger_switch31_delay_ms = 75\n"
+            "trigger_switch31_step_ms = 25\n");
+        Config c;
+        check(c.loadConfig(p), "31 切枪配置能加载");
+        if (!c.hotkeys.empty())
+        {
+            const auto& hk = c.hotkeys[0];
+            check(hk.trigger_weapon_switch31 &&
+                  hk.trigger_switch31_delay_ms == 75 &&
+                  hk.trigger_switch31_step_ms == 25,
+                  "31 切枪开关、开火后等待和按键间隔正确读取");
+        }
+        check(c.saveConfig("switch31_roundtrip.ini"), "31 切枪配置能保存");
+        Config loaded;
+        check(loaded.loadConfig("switch31_roundtrip.ini"), "31 切枪配置能重新加载");
+        if (!loaded.hotkeys.empty())
+            check(loaded.hotkeys[0].trigger_weapon_switch31 &&
+                  loaded.hotkeys[0].trigger_switch31_delay_ms == 75 &&
+                  loaded.hotkeys[0].trigger_switch31_step_ms == 25,
+                  "31 切枪配置保存后不丢失");
     }
 
     std::printf("\n[3] 旧三槽 -> aim_classes 的迁移(唯一还活着的迁移)\n");
