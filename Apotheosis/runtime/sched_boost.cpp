@@ -11,12 +11,13 @@
 namespace sched_boost
 {
 
-bool boostProcessPriority()
+bool boostProcessPriority(bool enabled)
 {
-    if (SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+    const DWORD priority = enabled ? HIGH_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
+    if (SetPriorityClass(GetCurrentProcess(), priority))
         return true;
 
-    std::cerr << "[Sched] SetPriorityClass(HIGH) failed, gle=" << GetLastError()
+    std::cerr << "[Sched] SetPriorityClass failed, gle=" << GetLastError()
               << " (继续以默认优先级运行)" << std::endl;
     return false;
 }
@@ -42,7 +43,7 @@ void* registerCurrentThreadWithMmcss(const char* taskName)
         return nullptr;
     }
 
-    if (!AvSetMmThreadPriority(h, AVRT_PRIORITY_CRITICAL))
+    if (!AvSetMmThreadPriority(h, AVRT_PRIORITY_HIGH))
     {
         std::cerr << "[Sched] AvSetMmThreadPriority failed, gle=" << GetLastError()
                   << " (保持 MMCSS 默认档)" << std::endl;
@@ -59,6 +60,8 @@ void unregisterCurrentThread(void* handle)
 
 ScopedThreadBoost::ScopedThreadBoost(const char* taskName)
 {
+    original_priority_ = GetThreadPriority(GetCurrentThread());
+    priority_raised_ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) != 0;
     handle_ = registerCurrentThreadWithMmcss(taskName);
 }
 
@@ -66,6 +69,20 @@ ScopedThreadBoost::~ScopedThreadBoost()
 {
     unregisterCurrentThread(handle_);
     handle_ = nullptr;
+    if (priority_raised_ && original_priority_ != THREAD_PRIORITY_ERROR_RETURN)
+        SetThreadPriority(GetCurrentThread(), original_priority_);
+}
+
+void LiveThreadBoost::update(bool enabled, const char* taskName)
+{
+    const std::string wanted = taskName && *taskName ? taskName : "Games";
+    if (enabled == enabled_ && (!enabled || task_name_ == wanted))
+        return;
+    boost_.reset();
+    enabled_ = enabled;
+    task_name_ = enabled ? wanted : std::string{};
+    if (enabled_)
+        boost_ = std::make_unique<ScopedThreadBoost>(task_name_.c_str());
 }
 
 }

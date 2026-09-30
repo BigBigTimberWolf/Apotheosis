@@ -16,6 +16,7 @@
 #include "active_hotkey.h"
 
 #include "capture.h"
+#include "capture/auto_capture.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "trt_detector.h"
@@ -233,7 +234,9 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
             }
             if (!trt_detector.initialize(model_path))
             {
-                last_error_ = "TensorRT detector initialization failed";
+                last_error_ = trt_detector.lastError();
+                if (last_error_.empty()) last_error_ = "TensorRT detector initialization failed";
+                trt_detector.shutdown();
                 return false;
             }
             detector_raw_ = &trt_detector;
@@ -310,6 +313,9 @@ void InferenceSession::stop_locked()
 
     join_all_locked();
 
+    if (detector_raw_ == &trt_detector)
+        trt_detector.shutdown();
+
     runtime::aim_loop::reset();
 
     g_detector = nullptr;
@@ -330,6 +336,7 @@ void InferenceSession::stop_locked()
         latestFrame.release();
         frameQueue.clear();
     }
+    AutoCapture::clear_frames();
     captureFps.store(0);
     captureSourceFps.store(0);
     runtime::latency::reset();

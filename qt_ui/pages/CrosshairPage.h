@@ -16,7 +16,7 @@ class CrosshairPage : public QWidget {
     Q_OBJECT
 
 public:
-    explicit CrosshairPage(QWidget* parent = nullptr);
+    explicit CrosshairPage(QWidget* parent = nullptr, bool laserMode = false);
 
 private:
     void loadConfig();
@@ -34,9 +34,19 @@ private:
 
     QSpinBox* m_rectW{};
     QSpinBox* m_rectH{};
+    QSpinBox* m_offsetY{};
 
     QSpinBox* m_minPixels{};
     QSpinBox* m_closeRadius{};
+    bool m_laserMode = false;
+    QSpinBox* m_laserCenterX{};
+    QSpinBox* m_laserCenterY{};
+    QSpinBox* m_laserTargetCenterX{};
+    QSpinBox* m_laserTargetCenterY{};
+    QSpinBox* m_laserTargetRectW{};
+    QSpinBox* m_laserTargetRectH{};
+    QDoubleSpinBox* m_laserElongation{};
+    QDoubleSpinBox* m_laserSmooth{};
 
     QList<ConfigManager::ColorProfile> m_colors;
     QWidget* m_colorListContainer{};

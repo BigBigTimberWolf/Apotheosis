@@ -49,11 +49,17 @@ DebugPage::DebugPage(QWidget* parent)
         if (!m_replayStatus) return;
         const auto count = runtime::ReplayBuffer::instance().size();
         if (g_replay_playback_active.load()) {
-            m_replayStatus->setText(QStringLiteral("正在回放：第 %1 / %2 帧")
-                .arg(g_replay_playback_frame.load() + 1)
-                .arg(count));
+            const int total = g_replay_playback_total.load();
+            m_replayStatus->setText(total > 0
+                ? QStringLiteral("正在回放：第 %1 / %2 帧")
+                    .arg(g_replay_playback_frame.load() + 1).arg(total)
+                : QStringLiteral("正在准备回放…"));
         } else {
-            m_replayStatus->setText(QStringLiteral("当前缓冲：%1 帧").arg(count));
+            m_replayStatus->setText(count > 0
+                ? QStringLiteral("当前缓冲：%1 帧").arg(count)
+                : (m_enableRecording->isChecked()
+                    ? QStringLiteral("等待瞄准帧录入…")
+                    : QStringLiteral("录制已关闭")));
         }
     });
     statusTimer->start();
@@ -160,11 +166,14 @@ void DebugPage::buildReplayCard(QVBoxLayout* layout) {
         }
         ConfigManager::instance().setShowWindow(true);
         g_replay_playback_frame.store(0);
+        g_replay_playback_total.store(0);
+        g_replay_playback_request.fetch_add(1);
         g_replay_playback_active.store(true);
     });
     connect(m_stopReplay, &QPushButton::clicked, this, [] {
         g_replay_playback_active.store(false);
         g_replay_playback_frame.store(0);
+        g_replay_playback_total.store(0);
     });
 
     layout->addWidget(card);

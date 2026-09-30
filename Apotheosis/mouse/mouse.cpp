@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <iostream>
 
@@ -11,6 +12,9 @@
 #include "kmboxNetConnection.h"
 #include "mouse_driver.h"
 #include "runtime/latency_probe.h"
+#include "runtime/config_snapshot.h"
+#include "runtime/sched_boost.h"
+#include "config.h"
 
 namespace
 {
@@ -28,11 +32,13 @@ MouseThread::MouseThread(
     MakcuConnection* makcuConnection,
     MakcuNewConnection* makcuNewConnection,
     KmboxNetConnection* kmboxNetConnection,
-    MakcuNewConnection* makcuNewConnectionKbd)
+    MakcuNewConnection* makcuNewConnectionKbd,
+    std::shared_ptr<mouse_driver::IDriver> extraDriver)
     : makcu_(makcuConnection),
       makcu_new_(makcuNewConnection),
       makcu_new_kbd_(makcuNewConnectionKbd),
-      kmbox_net_(kmboxNetConnection)
+      kmbox_net_(kmboxNetConnection),
+      extra_driver_(std::move(extraDriver))
 {
     updateParams(params);
     refreshDriver();
@@ -59,28 +65,28 @@ MouseThread::~MouseThread()
         moveWorker_.join();
 }
 
-void MouseThread::sendLeftDownToDriver()
+bool MouseThread::sendLeftDownToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (driver_) driver_->leftDown();
+    return driver_ && driver_->leftDown();
 }
 
-void MouseThread::sendLeftUpToDriver()
+bool MouseThread::sendLeftUpToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (driver_) driver_->leftUp();
+    return driver_ && driver_->leftUp();
 }
 
-void MouseThread::sendRightDownToDriver()
+bool MouseThread::sendRightDownToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (driver_) driver_->rightDown();
+    return driver_ && driver_->rightDown();
 }
 
-void MouseThread::sendRightUpToDriver()
+bool MouseThread::sendRightUpToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (driver_) driver_->rightUp();
+    return driver_ && driver_->rightUp();
 }
 
 void MouseThread::updateParams(const MouseRuntimeParams& in)
@@ -109,8 +115,13 @@ void MouseThread::moveWorkerLoop()
 {
     try
     {
+        sched_boost::LiveThreadBoost threadBoost;
+        auto lastFerrumSlowLog = std::chrono::steady_clock::time_point{};
         while (!workerStop_.load())
         {
+            const auto scheduling = runtime_config::read();
+            threadBoost.update(scheduling->use_mmcss,
+                               scheduling->mmcss_task_name.c_str());
             std::unique_lock<std::mutex> ul(queueMtx_);
             queueCv_.wait(ul, [&] {
                 return workerStop_.load() || moveSlot_.hasPending();
@@ -123,15 +134,35 @@ void MouseThread::moveWorkerLoop()
                 continue;
             ul.unlock();
 
-            if (!moveSlot_.isCurrent(move.generation))
+            // Handoff waits for a send already in progress, then cancels any
+            // worker-local move before the macro's first command is dispatched.
+            std::lock_guard<std::mutex> dispatchLock(moveDispatchMutex_);
+            if (automaticMovesSuspended_ || !moveSlot_.isCurrent(move.generation))
                 continue;
 
+            const auto sendStarted = std::chrono::steady_clock::now();
             const bool sent = sendMovementToDriver(move.dx, move.dy);
+            const auto sendFinished = std::chrono::steady_clock::now();
+            if (extra_driver_ && std::strcmp(extra_driver_->name(), "FERRUM") == 0 &&
+                sendFinished - move.queued_at >= std::chrono::milliseconds(10) &&
+                sendFinished - lastFerrumSlowLog >= std::chrono::seconds(1)) {
+                lastFerrumSlowLog = sendFinished;
+                const auto queueUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                    sendStarted - move.queued_at).count();
+                const auto sendUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                    sendFinished - sendStarted).count();
+                std::cerr << "[Ferrum] Move dispatch: queue=" << queueUs / 1000.0
+                          << "ms, serial send=" << sendUs / 1000.0 << "ms" << std::endl;
+            }
             if (sent) {
                 runtime::latency::markMoveSent(move.capture_ns, move.aim_ns);
                 std::lock_guard<std::mutex> feedbackLock(feedbackMtx_);
                 appliedDx_ += move.dx;
                 appliedDy_ += move.dy;
+                const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                appliedEvents_.push_back({ move.dx, move.dy, stamp, 0 });
+                if (appliedEvents_.size() > 128) appliedEvents_.pop_front();
             } else {
                 failedMoves_.fetch_add(1, std::memory_order_release);
             }
@@ -153,6 +184,13 @@ void MouseThread::moveWorkerLoop()
 void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns)
 {
     if (dx == 0 && dy == 0) return;
+    // The extra serial driver has a fixed shared lifetime. Queue its writes
+    // without waiting for an in-progress USB WriteFile on input_method_mutex.
+    if (extra_driver_ && !extra_driver_->directSend())
+    {
+        queueMove(dx, dy, capture_ns, aim_ns);
+        return;
+    }
     {
         std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
         if (driver_ && driver_->directSend())
@@ -169,6 +207,10 @@ void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns
                 std::lock_guard<std::mutex> feedbackLock(feedbackMtx_);
                 appliedDx_ += dx;
                 appliedDy_ += dy;
+                const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                appliedEvents_.push_back({ dx, dy, stamp, 0 });
+                if (appliedEvents_.size() > 128) appliedEvents_.pop_front();
             }
             else
             {
@@ -180,24 +222,24 @@ void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns
     queueMove(dx, dy, capture_ns, aim_ns);
 }
 
-void MouseThread::pressLeftButton()
+bool MouseThread::pressLeftButton()
 {
-    sendLeftDownToDriver();
+    return sendLeftDownToDriver();
 }
 
-void MouseThread::releaseLeftButton()
+bool MouseThread::releaseLeftButton()
 {
-    sendLeftUpToDriver();
+    return sendLeftUpToDriver();
 }
 
-void MouseThread::pressRightButton()
+bool MouseThread::pressRightButton()
 {
-    sendRightDownToDriver();
+    return sendRightDownToDriver();
 }
 
-void MouseThread::releaseRightButton()
+bool MouseThread::releaseRightButton()
 {
-    sendRightUpToDriver();
+    return sendRightUpToDriver();
 }
 
 bool MouseThread::tapKey(int hid_key, int hold_ms)
@@ -207,10 +249,10 @@ bool MouseThread::tapKey(int hid_key, int hold_ms)
     return driver_->tapKey(hid_key, hold_ms);
 }
 
-bool MouseThread::requestWeaponSwitch31(int after_shot_delay_ms, int step_ms)
+bool MouseThread::requestWeaponSwitch31(int after_shot_delay_ms)
 {
     if (!supports(mouse_driver::kCapKeyboard) || !weaponSwitch31_) return false;
-    return weaponSwitch31_->request(after_shot_delay_ms, step_ms);
+    return weaponSwitch31_->request(after_shot_delay_ms);
 }
 
 bool MouseThread::weaponSwitch31Busy() const
@@ -223,6 +265,12 @@ bool MouseThread::maskRealKeyboard(int duration_ms)
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     if (!driver_) return false;
     return driver_->maskRealKeyboard(duration_ms);
+}
+
+bool MouseThread::keyboardMaskExpires() const
+{
+    std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex&>(input_method_mutex));
+    return driver_ ? driver_->keyboardMaskExpires() : true;
 }
 
 bool MouseThread::supports(uint32_t capability) const
@@ -259,6 +307,9 @@ bool MouseThread::sendMovementToDriver(int dx, int dy)
     if (dx == 0 && dy == 0)
         return true;
 
+    if (extra_driver_)
+        return extra_driver_->move(dx, dy);
+
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     if (!driver_) return false;
     return driver_->move(dx, dy);
@@ -272,6 +323,15 @@ void MouseThread::clearQueuedMoves()
     if (driver_) driver_->cancelMove();
 }
 
+void MouseThread::suspendAutomaticMoves(bool suspend)
+{
+    {
+        std::lock_guard<std::mutex> lock(moveDispatchMutex_);
+        automaticMovesSuspended_ = suspend;
+    }
+    if (suspend) clearQueuedMoves();
+}
+
 MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
 {
     MovementFeedback out;
@@ -281,6 +341,8 @@ MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
         out.dy = static_cast<int>(appliedDy_);
         appliedDx_ = 0;
         appliedDy_ = 0;
+        out.events.assign(appliedEvents_.begin(), appliedEvents_.end());
+        appliedEvents_.clear();
     }
     out.latency_ms = static_cast<double>(
         lastLatencyUs_.load(std::memory_order_acquire)) / 1000.0;
@@ -296,6 +358,8 @@ void MouseThread::refreshDriver()
 {
     driver_owned_.reset();
     driver_ = nullptr;
+
+    if (extra_driver_) { driver_ = extra_driver_.get(); return; }
 
     if (makcu_ && makcu_new_kbd_)
     {

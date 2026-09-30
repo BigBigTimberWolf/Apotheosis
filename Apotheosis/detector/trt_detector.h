@@ -18,6 +18,7 @@
 
 #include "i_detector.h"
 #include "postProcess.h"
+#include "raw_yolo_postprocess.h"
 #include "../mem/gpu_image.h"
 
 class TrtDetector : public IDetector
@@ -44,6 +45,8 @@ public:
     std::chrono::duration<double, std::milli> lastNmsTime() const override { return lastNmsTimeValue; }
 
     void requestExit() override;
+    void shutdown();
+    const std::string& lastError() const noexcept { return last_error_; }
 
     float img_scale;
 
@@ -56,6 +59,7 @@ public:
     std::chrono::duration<double, std::milli> lastCopyTimeValue{};
     std::chrono::duration<double, std::milli> lastPostprocessTimeValue{};
     std::chrono::duration<double, std::milli> lastNmsTimeValue{};
+    double frameAimTickMs = 0.0;
 
 private:
     std::unique_ptr<nvinfer1::IRuntime> runtime;
@@ -76,7 +80,8 @@ private:
     bool captureCudaGraph(int slot);
     void launchCudaGraph(int slot);
     void destroyCudaGraph();
-    bool ensureGraphStaging(int rows, int cols, int channels);
+    enum class GraphStagingResult { Failed, Reuse, Capture };
+    GraphStagingResult ensureGraphStaging(int rows, int cols, int channels);
 
     std::unordered_map<std::string, void*> pinnedOutputBuffers;
     std::unordered_map<std::string, void*> pinnedOutputBuffersB;
@@ -86,6 +91,7 @@ private:
     }
     void allocatePinnedOutputs();
     void freePinnedOutputs();
+    void releaseModelResources();
 
     void waitForEvent(cudaEvent_t ev);
     double lastSyncSpinMs = 0.0;
@@ -135,6 +141,12 @@ private:
     std::unordered_map<std::string, std::vector<int64_t>> outputShapes;
     int numClasses;
     std::vector<std::string> class_names_;
+    std::string last_error_;
+    std::vector<detector::RawYoloCandidate> raw_candidates_;
+    std::vector<detector::RawYoloCandidate> raw_selected_;
+    std::vector<Detection> detection_scratch_;
+    int model_input_width_ = 0;
+    int model_input_height_ = 0;
 
     size_t getSizeByDim(const nvinfer1::Dims& dims);
     size_t getElementSize(nvinfer1::DataType dtype);

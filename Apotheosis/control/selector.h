@@ -42,40 +42,4 @@ struct SelectorConfig
     }
 };
 
-struct SelectorState
-{
-    Box lockedBox;
-    int lockedClassId = -1;
-    bool locked = false;
-    int lockedFrames = 0;
-
-    void reset()
-    {
-        locked = false;
-        lockedFrames = 0;
-        lockedClassId = -1;
-        lockedBox = Box{};
-    }
-};
-
-struct TargetSelection
-{
-    bool found = false;
-    size_t index = 0;
-    Box box;
-    int classId = -1;
-    double confidence = 0.0;
-    double distancePx = 0.0;
-};
-
-std::vector<size_t> filterAimCandidates(const std::vector<Candidate>& candidates,
-                                        const ClassBuckets& buckets,
-                                        const SelectorConfig& cfg);
-
-TargetSelection selectTarget(const std::vector<Candidate>& candidates,
-                             const std::vector<size_t>& aimIndices,
-                             const Vec2& cross,
-                             const SelectorConfig& cfg,
-                             SelectorState& state);
-
 }

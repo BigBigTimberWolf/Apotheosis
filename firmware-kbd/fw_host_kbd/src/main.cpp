@@ -244,6 +244,13 @@ void loop()
 
         // (2) ★ 经板间链路送给左板 -> 左板转到 CH343。这是键盘插着时唯一可见的通道。
         sendDiagHeartbeat();
+
+        // 左板可能晚于右板启动。重复身份帧，确保其枚举前的等待窗口能收到。
+        if (EspUsbHost::deviceConnected && (g_isKeyboard || g_isMouse)) {
+            kbdHostSendIdentity(usbHost.descriptor_device.idVendor,
+                                usbHost.descriptor_device.idProduct,
+                                usbHost.descriptor_device.bcdDevice);
+        }
     }
     delay(10);
 }

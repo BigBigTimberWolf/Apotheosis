@@ -6,6 +6,7 @@
 #include <QVector>
 
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <string>
 
@@ -13,6 +14,7 @@ class QStackedWidget;
 class QTimer;
 class QLabel;
 class QPropertyAnimation;
+class QProgressDialog;
 class StatusBar;
 class TopNavBar;
 class SideNav;
@@ -51,10 +53,14 @@ private slots:
 private:
     void beginSessionOperation(bool start);
     void pollSessionOperation();
+    void pollTrtBuildProgress();
     std::future<std::string> m_sessionOperation;
     bool m_starting = false;
     bool m_closeRequested = false;
     bool m_cleanupRequested = false;
+    QProgressDialog* m_trtBuildDialog{};
+    uint64_t m_trtBuildGeneration = 0;
+    long long m_trtBuildFinishedMs = 0;
     void setupPages();
     QWidget* createPage(const QString& name);
     void switchPage(int index);

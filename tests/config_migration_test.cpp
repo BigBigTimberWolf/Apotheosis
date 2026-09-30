@@ -57,12 +57,201 @@ int main()
 {
     std::printf("=== config_migration_test: 配置解析 ===\n");
 
+
+    {
+        const auto path = write_config("whole_profile_activation.ini",
+            "activation_key = Key2\nactivation_selected = true\n"
+            "recovered_pid_kp_x = 0.8\nrecovered_secondary_pid_kp_x = 1.5\n");
+        Config c;
+        check(c.loadConfig(path) && c.hotkeys.size() == 1 &&
+              c.hotkeys[0].activation_key == "Key2" && c.hotkeys[0].activation_selected,
+              "new activation profile loads without expanding legacy secondary data");
+        check(c.saveConfig("whole_profile_activation_roundtrip.ini"), "activation profile saves");
+        Config restored;
+        check(restored.loadConfig("whole_profile_activation_roundtrip.ini") && restored.hotkeys.size() == 1 &&
+              restored.hotkeys[0].activation_key == "Key2" && restored.hotkeys[0].activation_selected,
+              "activation key and choice survive a save/load roundtrip");
+        const auto old = write_config("whole_profile_legacy.ini",
+            "primary_select_key = Key1\nsecondary_select_key = Key2\n"
+            "recovered_pid_kp_x = 0.8\nrecovered_secondary_pid_kp_x = 1.5\n"
+            "aim_classes = 3:0.5:0.5:0.5:0.5:0.5\n");
+        check(c.loadConfig(old) && c.hotkeys.size() == 2 &&
+              c.hotkeys[0].activation_key == "Key1" && c.hotkeys[0].activation_selected &&
+              c.hotkeys[1].activation_key == "Key2" && !c.hotkeys[1].activation_selected &&
+              c.hotkeys[1].recovered_pid.kpX == 1.5f &&
+              c.hotkeys[1].keys == c.hotkeys[0].keys && c.hotkeys[1].group == c.hotkeys[0].group,
+              "legacy secondary parameters become an independent profile with original binding");
+        check(c.saveConfig("whole_profile_legacy_roundtrip.ini"), "migrated profiles save");
+        check(restored.loadConfig("whole_profile_legacy_roundtrip.ini") && restored.hotkeys.size() == 2,
+              "legacy migration is not repeated on subsequent loads");
+    }
+    {
+        const std::string p = write_config("direct_parameter_keys.ini",
+            "primary_select_key = Key1\n"
+            "secondary_select_key = Key2\n"
+            "secondary_toggle_key = F8\n");
+        Config c;
+        check(c.loadConfig(p) && !c.hotkeys.empty() &&
+              c.hotkeys.front().primary_select_key == "Key1" &&
+              c.hotkeys.front().secondary_select_key == "Key2",
+              "explicit parameter selectors take precedence over legacy toggle binding");
+        check(c.saveConfig("direct_parameter_keys_roundtrip.ini"), "direct parameter selectors save");
+        Config restored;
+        check(restored.loadConfig("direct_parameter_keys_roundtrip.ini") &&
+              !restored.hotkeys.empty() &&
+              restored.hotkeys.front().primary_select_key == "Key1" &&
+              restored.hotkeys.front().secondary_select_key == "Key2",
+              "both direct parameter selectors survive roundtrip");
+        std::ifstream saved("direct_parameter_keys_roundtrip.ini");
+        const std::string contents((std::istreambuf_iterator<char>(saved)), {});
+        check(contents.find("secondary_toggle_key") == std::string::npos,
+              "legacy toggle key is not written again");
+    }
+
+    {
+        const std::string p = write_config("secondary_aim.ini",
+            "secondary_toggle_key = X1MouseButton\n"
+            "recovered_pid_kp_x = 0.7\n"
+            "recovered_pid_follow_x = 2.5\n"
+            "recovered_pid_follow_y = 1.5\n"
+            "recovered_secondary_pid_kp_x = 1.2\n"
+            "recovered_secondary_pid_follow_x = 6.5\n"
+            "recovered_scope_pid_follow_x = 3.5\n"
+            "recovered_secondary_pid_ff_y = 0.125\n"
+            "recovered_secondary_pid_segment_enabled = true\n");
+        Config c;
+        check(c.loadConfig(p) && !c.hotkeys.empty(), "lead profiles load");
+        if (!c.hotkeys.empty())
+        {
+            const auto& h = c.hotkeys.front();
+            check(h.recovered_pid.kpX == 0.7f && h.recovered_secondary_pid.kpX == 1.2f,
+                  "existing PID values remain independent");
+            check(h.recovered_pid.followX == 2.5 && h.recovered_pid.followY == 1.5 &&
+                  h.recovered_secondary_pid.followX == 6.5 &&
+                  h.recovered_scope_pid.followX == 3.5,
+                  "three profiles have independent following compensation");
+        }
+        check(c.saveConfig("secondary_aim_roundtrip.ini"), "lead profiles save");
+        Config restored;
+        check(restored.loadConfig("secondary_aim_roundtrip.ini"), "lead profiles reload");
+        if (!restored.hotkeys.empty())
+        {
+            const auto& h = restored.hotkeys.front();
+            check(h.primary_select_key == "Key1" && h.secondary_select_key == "X1MouseButton" &&
+                  h.recovered_secondary_pid.feedforwardY == 0.125f &&
+                  h.recovered_secondary_pid.segmentEnabled &&
+                  h.recovered_pid.followX == 2.5 && h.recovered_pid.followY == 1.5 &&
+                  h.recovered_secondary_pid.followX == 6.5 &&
+                  h.recovered_scope_pid.followX == 3.5,
+                  "lead, FF and original settings survive roundtrip");
+        }
+    }
+    {
+        const std::string p = write_config("lead_legacy.ini",
+            "recovered_pid_engine = 2\n"
+            "recovered_pid_lead_time_ms = 50\n"
+            "recovered_pid_lead_frames = 5\n"
+            "recovered_secondary_pid_lead_time_ms = 100\n"
+            "recovered_scope_pid_lead_time_ms = 20\n"
+            "recovered_predicted_video_delay_ms = 80\n"
+            "recovered_predicted_follow_gain = 1.25\n"
+            "recovered_predicted_pixels_per_count = 0.8\n"
+            "recovered_ava_x_kp = 3\n"
+            "recovered_pid_high_speed_lead_enabled = true\n"
+            "recovered_pid_kp_x = 0.75\n"
+            "recovered_pid_ff_x = 0.12\n");
+        Config c;
+        check(c.loadConfig(p) && !c.hotkeys.empty(), "legacy experimental config loads");
+        if (!c.hotkeys.empty())
+        {
+            const auto& h = c.hotkeys.front();
+            check(h.recovered_pid.followX == 0 &&
+                  h.recovered_secondary_pid.followX == 0 &&
+                  h.recovered_scope_pid.followX == 0 &&
+                  h.recovered_pid.kpX == 0.75f && h.recovered_pid.feedforwardX == 0.12f,
+                  "old experimental values do not silently enable anticipation");
+        }
+        check(c.saveConfig("lead_legacy_roundtrip.ini"), "legacy config saves cleanly");
+        std::ifstream saved("lead_legacy_roundtrip.ini");
+        const std::string contents((std::istreambuf_iterator<char>(saved)), {});
+        check(contents.find("pid_engine") == std::string::npos &&
+              contents.find("predicted_") == std::string::npos &&
+              contents.find("_ava_") == std::string::npos &&
+              contents.find("_pid_lead_time_ms") == std::string::npos &&
+              contents.find("_pid_lead_frames") == std::string::npos,
+              "removed algorithm settings are not saved again");
+    }
+    {
+        const std::string p = write_config("lead_clamp.ini",
+            "recovered_pid_follow_x = -10\n"
+            "recovered_secondary_pid_follow_x = 200\n"
+            "recovered_scope_pid_follow_x = nan\n");
+        Config c;
+        check(c.loadConfig(p) && !c.hotkeys.empty(), "invalid anticipation values load safely");
+        if (!c.hotkeys.empty())
+            check(c.hotkeys.front().recovered_pid.followX == 0 &&
+                  c.hotkeys.front().recovered_secondary_pid.followX == 50 &&
+                  c.hotkeys.front().recovered_scope_pid.followX == 0,
+                  "following strength is finite and clamped to UI range");
+    }
+
+    {
+        const std::string p = write_config("secondary_trigger.ini",
+            "secondary_toggle_key = F8\n"
+            "trigger_enabled = true\n"
+            "trigger_fire_delay = 50\n"
+            "secondary_trigger_custom = true\n"
+            "secondary_trigger_enabled = true\n"
+            "secondary_trigger_fire_delay = 140\n"
+            "secondary_trigger_auto_stop = 2\n"
+            "secondary_trigger_auto_scope = 3\n");
+        Config c;
+        check(c.loadConfig(p) && !c.hotkeys.empty(), "键盘切换键和第二套扳机配置能加载");
+        if (!c.hotkeys.empty())
+        {
+            const auto& h = c.hotkeys.front();
+            check(h.secondary_select_key == "F8" && h.secondary_trigger_custom,
+                  "键盘切换键及独立扳机开关正确读取");
+            check(h.trigger_fire_delay == 50 && h.secondary_trigger.trigger_fire_delay == 140 &&
+                  h.secondary_trigger.trigger_auto_stop == 2 &&
+                  h.secondary_trigger.trigger_auto_scope == 0,
+                  "两套扳机参数独立且旧瞬狙值被清理");
+        }
+        check(c.saveConfig("secondary_trigger_roundtrip.ini"), "第二套扳机配置能保存");
+        Config restored;
+        check(restored.loadConfig("secondary_trigger_roundtrip.ini") &&
+              !restored.hotkeys.empty() &&
+              restored.hotkeys.front().secondary_trigger.trigger_fire_delay == 140 &&
+              restored.hotkeys.front().secondary_trigger_custom,
+              "第二套扳机配置往返不丢失");
+    }
+
+    {
+        const std::string p = write_global_config("network_source.ini",
+            "capture_source = udp\n"
+            "capture_stream_url = udp://0.0.0.0:23000?fifo_size=500000\n");
+        Config c;
+        check(c.loadConfig(p), "网络采集配置能加载");
+        check(c.capture_source == "udp" &&
+              c.capture_stream_url == "udp://0.0.0.0:23000?fifo_size=500000",
+              "UDP 模式及地址正确读取");
+        check(c.saveConfig("network_source_roundtrip.ini"), "网络采集配置能保存");
+        Config restored;
+        check(restored.loadConfig("network_source_roundtrip.ini"),
+              "网络采集配置能重新加载");
+        check(restored.capture_source == c.capture_source &&
+              restored.capture_stream_url == c.capture_stream_url,
+              "网络采集配置往返后保持一致");
+    }
+
     std::printf("\n[1] 热键字段的解析往返\n");
     {
         const std::string p = write_config("basic.ini",
             "fovX = 120\nfovY = 90\n"
             "crosshair_detect_enabled = true\n"
             "dynamic_fov_enabled = true\ndynamic_fov_strength = 0.40\n"
+            "dynamic_fov_size = 32\ndynamic_fov_expand_ms = 300\n"
+            "dynamic_fov_shrink_ms = 450\nmask_x = true\nmask_y = false\n"
             "aim_classes = 3:0.100:0.900:0.250\n");
 
         Config c;
@@ -75,11 +264,13 @@ int main()
             check(hp.keys.size() == 1 && hp.keys[0] == "RightMouseButton",
                   "keys 原样读回");
             check(hp.fovX == 120 && hp.fovY == 90, "fovX/fovY 原样读回");
+            check(hp.mask_x && !hp.mask_y && hp.dynamic_fov_shrink_ms==450,
+                  "axis masks and FOV contraction time load independently");
             check(hp.crosshair_detect_enabled,
                   "crosshair_detect_enabled 原样读回");
             check(hp.dynamic_fov_enabled, "dynamic_fov_enabled 原样读回");
-            check(hp.dynamic_fov_strength > 0.39f && hp.dynamic_fov_strength < 0.41f,
-                  "dynamic_fov_strength 原样读回");
+            check(hp.dynamic_fov_size==32 && hp.dynamic_fov_expand_ms==300,
+                  "explicit FOV size and expansion time replace legacy strength");
             check(hp.aim_classes.size() == 1 && hp.aim_classes[0].class_id == 3,
                   "aim_classes 原样读回");
         }
@@ -96,8 +287,10 @@ int main()
             check(hp.fovX == 106 && hp.fovY == 74, "缺键 -> fovX/fovY 取默认 106/74");
             check(!hp.crosshair_detect_enabled, "缺键 -> 准星找色默认关闭");
             check(!hp.dynamic_fov_enabled, "缺键 -> 动态 FOV 默认关闭");
-            check(hp.dynamic_fov_strength > 0.59f && hp.dynamic_fov_strength < 0.61f,
-                  "缺键 -> dynamic_fov_strength 默认 0.60");
+            check(!hp.mask_x && !hp.mask_y && hp.dynamic_fov_shrink_ms==200,
+                  "legacy configs retain both axes and default FOV contraction time");
+            check(hp.dynamic_fov_size==40 && hp.dynamic_fov_expand_ms==120,
+                  "missing FOV size and expansion time use defaults");
             check(hp.aim_classes.empty(), "缺键 -> aim_classes 为空");
             check(!hp.trigger_weapon_switch31,
                   "旧配置缺键时开火后切枪默认关闭");
@@ -186,7 +379,7 @@ int main()
     std::printf("\n[4] aim_classes 的解析与夹取\n");
     {
         const std::string p = write_config("clamp.ini",
-            "aim_classes = 1:2.0:-1.0:5.0;7:0.500:0.500:0.0\n");
+            "aim_classes = 1:2.0:-1.0:5.0:1.5:-0.5;7:0.500:0.500:0.0\n");
         Config c;
         c.loadConfig(p);
         if (!c.hotkeys.empty())
@@ -206,10 +399,53 @@ int main()
                       "越界 min_conf 被夹到 [0,1]");
                 check(hp.aim_classes[0].y_offset <= hp.aim_classes[0].y_offset_max,
                       "★ 夹取后 y_offset <= y_offset_max(顺序被修正)");
+                check(hp.aim_classes[0].x_offset == 0.0f &&
+                      hp.aim_classes[0].x_offset_max == 1.0f,
+                      "X 偏移越界及反向区间被修正");
+                check(hp.aim_classes[1].x_offset == 0.5f &&
+                      hp.aim_classes[1].x_offset_max == 0.5f,
+                      "旧格式未提供 X 时保持框中心");
                 check(hp.aim_classes[1].y_offset == hp.aim_classes[1].y_offset_max,
                       "两端相等 -> 固定锁点(允许)");
             }
         }
+    }
+
+    {
+        Config saved;
+        saved.hotkeys.emplace_back();
+        HotkeyAimClass ac;
+        ac.class_id = 4;
+        ac.y_offset = 0.8f;
+        ac.y_offset_max = 0.9f;
+        ac.x_offset = 0.2f;
+        ac.x_offset_max = 0.8f;
+        saved.hotkeys[0].aim_classes = { ac };
+        saved.hotkeys[0].ctl_x_offset = 0.3;
+        saved.hotkeys[0].ctl_x_offset_max = 0.7;
+        saved.hotkeys[0].recovered_pid.kpX = 0.73f;
+        saved.hotkeys[0].recovered_pid.deadzoneY = 12.0f;
+        saved.hotkeys[0].recovered_pid.segmentEnabled = true;
+        saved.hotkeys[0].recovered_pid.segment = 2.0f;
+        saved.hotkeys[0].recovered_scope_pid.kpX = 0.31f;
+        check(saved.saveConfig("x_offset_roundtrip.ini"), "X 偏移能保存");
+        Config loaded;
+        check(loaded.loadConfig("x_offset_roundtrip.ini"), "X 偏移能回读");
+        if (!loaded.hotkeys.empty() && !loaded.hotkeys[0].aim_classes.empty())
+            check(std::abs(loaded.hotkeys[0].aim_classes[0].x_offset - 0.2f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].aim_classes[0].x_offset_max - 0.8f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].aim_classes[0].y_offset - 0.8f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].aim_classes[0].y_offset_max - 0.9f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].ctl_x_offset - 0.3) < 1e-6 &&
+                  std::abs(loaded.hotkeys[0].ctl_x_offset_max - 0.7) < 1e-6,
+                  "逐类与热键级 X 偏移保存后不丢失");
+        if (!loaded.hotkeys.empty())
+            check(std::abs(loaded.hotkeys[0].recovered_pid.kpX - 0.73f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].recovered_pid.deadzoneY - 12.0f) < 1e-4f &&
+                  loaded.hotkeys[0].recovered_pid.segmentEnabled &&
+                  std::abs(loaded.hotkeys[0].recovered_pid.segment - 2.0f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].recovered_scope_pid.kpX - 0.31f) < 1e-4f,
+                  "移植版 PID 默认档和开镜档可保存回读");
     }
 
     std::printf("\n[5] ★★ 已删除的瞄准控制键: 不报错、不污染活着的键\n");
@@ -280,8 +516,8 @@ int main()
             check(hp.crosshair_detect_enabled,
                   "★★ 活着的 crosshair_detect_enabled 读到 true");
             check(hp.dynamic_fov_enabled, "★★ 活着的 dynamic_fov_enabled 读到 true");
-            check(hp.dynamic_fov_strength > 0.34f && hp.dynamic_fov_strength < 0.36f,
-                  "★★ 活着的 dynamic_fov_strength 读到 0.35");
+            check(hp.dynamic_fov_size==40 && hp.dynamic_fov_expand_ms==120,
+                  "legacy strength is not misread as a pixel diameter");
             check(hp.aim_classes.size() == 1 && hp.aim_classes[0].class_id == 4,
                   "★★ 活着的 aim_classes 读到 class_id = 4");
             check(hp.name == "Aim" && hp.keys.size() == 1 &&
@@ -352,7 +588,8 @@ int main()
                 check(e.trigger_y_percent == 150, "trigger_y_percent 读到 150");
                 check(e.trigger_auto_scope == 1, "trigger_auto_scope 读到 1");
                 check(e.trigger_auto_stop == 1, "trigger_auto_stop 读到 1");
-                check(e.trigger_stop_ms == 77, "trigger_stop_ms 读到 77");
+                check(e.trigger_stop_before_ms == 0 && e.trigger_stop_after_ms == 77,
+                      "旧 trigger_stop_ms 迁移到开枪后时间");
                 check(e.aim_path_mode == 3, "aim_path_mode 读到 3");
                 check(e.aim_path_influence == 63, "aim_path_influence 读到 63");
                 check(e.aim_path_wind_gravity > 7.4f && e.aim_path_wind_gravity < 7.6f,
@@ -362,6 +599,42 @@ int main()
                 check(e.aim_path_wind_threshold == 12, "aim_path_wind_threshold 读到 12");
             }
         }
+    }
+
+    {
+        const std::string p = write_config("stop_timing.ini",
+            "trigger_auto_stop = 1\ntrigger_stop_ms = 99\n"
+            "trigger_stop_before_ms = 125\ntrigger_stop_after_ms = 240\n");
+        Config c;
+        check(c.loadConfig(p), "双时间急停配置加载");
+        check(!c.hotkeys.empty() && c.hotkeys[0].trigger_stop_before_ms == 125 &&
+              c.hotkeys[0].trigger_stop_after_ms == 240,
+              "新字段覆盖旧时长并独立读取");
+        check(c.saveConfig("stop_timing_roundtrip.ini"), "双时间急停配置保存");
+        Config roundtrip;
+        check(roundtrip.loadConfig("stop_timing_roundtrip.ini") &&
+              !roundtrip.hotkeys.empty() &&
+              roundtrip.hotkeys[0].trigger_stop_before_ms == 125 &&
+              roundtrip.hotkeys[0].trigger_stop_after_ms == 240,
+              "双时间急停配置往返不丢失");
+    }
+
+    {
+        const std::string p = write_config("stop_continuous.ini",
+            "trigger_auto_stop = 2\ntrigger_auto_scope = 3\n");
+        Config c;
+        check(c.loadConfig(p) && !c.hotkeys.empty() &&
+              c.hotkeys[0].trigger_auto_stop == 2 &&
+              c.hotkeys[0].trigger_auto_scope == 0,
+              "旧瞬狙模式迁移为关闭开镜，持续急停保留");
+        check(c.saveConfig("stop_continuous_roundtrip.ini"),
+              "持续急停模式保存");
+        Config roundtrip;
+        check(roundtrip.loadConfig("stop_continuous_roundtrip.ini") &&
+              !roundtrip.hotkeys.empty() &&
+              roundtrip.hotkeys[0].trigger_auto_stop == 2 &&
+              roundtrip.hotkeys[0].trigger_auto_scope == 0,
+              "迁移后的开镜关闭和持续急停往返不丢失");
     }
 
     // 双硬件(方案 A): 一台鼠标 + 一台键盘。
@@ -557,6 +830,186 @@ int main()
             check(hp.ctl_hysteresis_ratio > 2.39 && hp.ctl_hysteresis_ratio < 2.41,
                   "★ 选靶滞回只有一份, 不随开镜档走");
         }
+    }
+
+    {
+        Config c;
+        check(c.loadConfig(write_config("trigger_loss.ini",
+            "trigger_loss_delay_ms = 170\nsecondary_trigger_custom = true\n"
+            "secondary_trigger_loss_delay_ms = 250\n")), "load target-loss grace");
+        check(!c.hotkeys.empty(), "grace config contains a hotkey");
+        if (!c.hotkeys.empty()) {
+            check(c.hotkeys[0].trigger_loss_delay_ms == 170 &&
+                  c.hotkeys[0].secondary_trigger.trigger_loss_delay_ms == 250,
+                  "primary and legacy secondary grace are independent");
+            c.saveConfig("trigger_loss_roundtrip.ini");
+            Config again;
+            check(again.loadConfig("trigger_loss_roundtrip.ini") && !again.hotkeys.empty() &&
+                  again.hotkeys[0].trigger_loss_delay_ms == 170 &&
+                  again.hotkeys[0].secondary_trigger.trigger_loss_delay_ms == 250,
+                  "grace survives config roundtrip");
+        }
+        Config limits;
+        check(limits.loadConfig(write_config("trigger_loss_limits.ini",
+            "trigger_loss_delay_ms = -1\nsecondary_trigger_custom = true\n"
+            "secondary_trigger_loss_delay_ms = 9999\n")) && !limits.hotkeys.empty() &&
+              limits.hotkeys[0].trigger_loss_delay_ms == 0 &&
+              limits.hotkeys[0].secondary_trigger.trigger_loss_delay_ms == 2000,
+              "grace is clamped to 0..2000 ms");
+        Config defaults;
+        check(defaults.loadConfig(write_config("trigger_loss_default.ini", "trigger_enabled = true\n")) &&
+              !defaults.hotkeys.empty() && defaults.hotkeys[0].trigger_loss_delay_ms == 100,
+              "existing configs without grace use 100 ms");
+    }
+
+    {
+        Config c;
+        check(c.loadConfig(write_config("aimpoint_recoil.ini",
+            "aimpoint_recoil_enabled = true\n"
+            "aimpoint_recoil_speed_px_s = 45.5\n"
+            "aimpoint_recoil_max_px = 72\n")) && !c.hotkeys.empty() &&
+            c.hotkeys[0].aimpoint_recoil_enabled &&
+            c.aimpoint_recoil_speed_px_s == 45.5 &&
+            c.aimpoint_recoil_max_px == 72.0 &&
+            c.aimpoint_recoil_fire_key == "LeftMouseButton",
+            "legacy recoil parameters migrate to global settings");
+        check(c.saveConfig("aimpoint_recoil_roundtrip.ini"), "aimpoint recoil settings save");
+        Config restored;
+        check(restored.loadConfig("aimpoint_recoil_roundtrip.ini") &&
+            !restored.hotkeys.empty() && restored.hotkeys[0].aimpoint_recoil_enabled &&
+            restored.aimpoint_recoil_speed_px_s == 45.5 &&
+            restored.aimpoint_recoil_max_px == 72.0 &&
+            restored.aimpoint_recoil_fire_key == "LeftMouseButton",
+            "aimpoint recoil settings survive save/load");
+        Config global;
+        check(global.loadConfig(write_global_config("aimpoint_recoil_global.ini",
+            "aimpoint_recoil_speed_px_s = 60.5\n"
+            "aimpoint_recoil_max_px = 100\n"
+            "aimpoint_recoil_fire_key = X1MouseButton\n")) &&
+            global.aimpoint_recoil_speed_px_s == 60.5 &&
+            global.aimpoint_recoil_max_px == 100.0 &&
+            global.aimpoint_recoil_fire_key == "X1MouseButton",
+            "shared recoil parameters load without a separate hotkey selector");
+        check(global.saveConfig("aimpoint_recoil_global_roundtrip.ini"),
+              "recoil fire key saves");
+        Config fireKeyRestored;
+        check(fireKeyRestored.loadConfig("aimpoint_recoil_global_roundtrip.ini") &&
+              fireKeyRestored.aimpoint_recoil_fire_key == "X1MouseButton",
+              "recoil fire key survives save/load");
+        Config exclusive;
+        check(exclusive.loadConfig(write_config("aimpoint_recoil_exclusive.ini",
+            "crosshair_detect_enabled = true\n"
+            "laser_detect_enabled = true\n"
+            "aimpoint_recoil_enabled = true\n")) &&
+            !exclusive.hotkeys.empty() && exclusive.hotkeys[0].crosshair_detect_enabled &&
+            !exclusive.hotkeys[0].laser_detect_enabled &&
+            !exclusive.hotkeys[0].aimpoint_recoil_enabled,
+            "older conflicting mode flags resolve to one mode");
+    }
+
+    {
+        Config c;
+        check(c.loadConfig(write_config("trigger_snap_modes.ini",
+            "trigger_mode = 2\n"
+            "trigger_snap_px_per_count = 1.75\n"
+            "trigger_spin_turns = 3\n"
+            "trigger_spin_counts_per_turn = 120000\n"
+            "trigger_spin_step_degrees = 120\n"
+            "trigger_spin_step_ms = 25\n"
+            "trigger_spin_hold_ms = 750\n"
+            "trigger_spin_counts_per_second = 180000\n"
+            "trigger_return_y_percent = 60\n"
+            "trigger_snap_fire_hold_ms = 45\n"
+            "trigger_snap_cooldown_ms = 280\n"
+            "trigger_flash_disappear_ms = 120\n"
+            "secondary_trigger_custom = true\n"
+            "secondary_trigger_mode = 1\n"
+            "secondary_trigger_return_counts_per_second = 2500\n"
+            "secondary_trigger_spin_step_degrees = 180\n"
+            "secondary_trigger_spin_step_ms = 35\n"
+            "secondary_trigger_spin_hold_ms = 450\n"
+            "secondary_trigger_return_y_percent = 85\n"
+            "secondary_trigger_snap_fire_hold_ms = 70\n"
+            "secondary_trigger_flash_disappear_ms = 240\n")) &&
+            !c.hotkeys.empty() && c.hotkeys[0].trigger_mode == 2 &&
+            c.hotkeys[0].trigger_snap_px_per_count == 1.75 &&
+            c.hotkeys[0].trigger_spin_turns == 3 &&
+            c.hotkeys[0].trigger_spin_counts_per_turn == 120000 &&
+            c.hotkeys[0].trigger_spin_step_degrees == 120 &&
+            c.hotkeys[0].trigger_spin_step_ms == 25 &&
+            c.hotkeys[0].trigger_spin_hold_ms == 750 &&
+            c.hotkeys[0].trigger_spin_counts_per_second == 180000 &&
+            c.hotkeys[0].trigger_return_y_percent == 60 &&
+            c.hotkeys[0].trigger_snap_fire_hold_ms == 45 &&
+            c.hotkeys[0].trigger_snap_cooldown_ms == 280 &&
+            c.hotkeys[0].trigger_flash_disappear_ms == 120 &&
+            c.hotkeys[0].secondary_trigger.trigger_mode == 1 &&
+            c.hotkeys[0].secondary_trigger.trigger_return_counts_per_second == 2500 &&
+            c.hotkeys[0].secondary_trigger.trigger_spin_step_degrees == 180 &&
+            c.hotkeys[0].secondary_trigger.trigger_spin_step_ms == 35 &&
+            c.hotkeys[0].secondary_trigger.trigger_spin_hold_ms == 450 &&
+            c.hotkeys[0].secondary_trigger.trigger_return_y_percent == 85 &&
+            c.hotkeys[0].secondary_trigger.trigger_snap_fire_hold_ms == 70 &&
+            c.hotkeys[0].secondary_trigger.trigger_flash_disappear_ms == 240,
+            "both trigger modes load independent settings");
+        check(c.saveConfig("trigger_snap_modes_roundtrip.ini"), "snap modes save");
+        Config restored;
+        check(restored.loadConfig("trigger_snap_modes_roundtrip.ini") &&
+            !restored.hotkeys.empty() && restored.hotkeys[0].trigger_mode == 2 &&
+            restored.hotkeys[0].secondary_trigger.trigger_mode == 1 &&
+            restored.hotkeys[0].trigger_snap_fire_hold_ms == 45 &&
+            restored.hotkeys[0].trigger_spin_counts_per_turn == 120000 &&
+            restored.hotkeys[0].trigger_spin_step_degrees == 120 &&
+            restored.hotkeys[0].trigger_spin_step_ms == 25 &&
+            restored.hotkeys[0].trigger_spin_hold_ms == 750 &&
+            restored.hotkeys[0].trigger_spin_counts_per_second == 180000 &&
+            restored.hotkeys[0].trigger_return_y_percent == 60 &&
+            restored.hotkeys[0].trigger_flash_disappear_ms == 120 &&
+            restored.hotkeys[0].secondary_trigger.trigger_snap_fire_hold_ms == 70 &&
+            restored.hotkeys[0].secondary_trigger.trigger_return_y_percent == 85 &&
+            restored.hotkeys[0].secondary_trigger.trigger_spin_step_degrees == 180 &&
+            restored.hotkeys[0].secondary_trigger.trigger_spin_step_ms == 35 &&
+            restored.hotkeys[0].secondary_trigger.trigger_spin_hold_ms == 450 &&
+            restored.hotkeys[0].secondary_trigger.trigger_flash_disappear_ms == 240,
+            "snap mode settings survive save/load");
+    }
+
+    {
+        Config c;
+        check(c.loadConfig(write_config("trigger_classes.ini",
+            "aim_classes = 0:0.5:0.5:0.0:0.5:0.5\n"
+            "trigger_classes = 2:0.250:0.800:30:45;1:0.500:0.500:100:120\n")) &&
+            !c.hotkeys.empty() && c.hotkeys[0].trigger_classes.size() == 2 &&
+            c.hotkeys[0].trigger_classes[0].class_id == 2 &&
+            c.hotkeys[0].trigger_classes[0].range_y_percent == 45 &&
+            c.hotkeys[0].aim_classes[0].class_id == 0,
+            "trigger target classes have independent order, point and range");
+        check(c.saveConfig("trigger_classes_roundtrip.ini"), "trigger class rules save");
+        Config restored;
+        check(restored.loadConfig("trigger_classes_roundtrip.ini") &&
+            !restored.hotkeys.empty() && restored.hotkeys[0].trigger_classes.size() == 2 &&
+            restored.hotkeys[0].trigger_classes[0].x_offset == 0.25f &&
+            restored.hotkeys[0].trigger_classes[1].range_y_percent == 120,
+            "trigger class rules survive save/load");
+
+        Config wide;
+        check(wide.loadConfig(write_config("trigger_range_1000.ini",
+            "trigger_y_percent = 1000\n"
+            "trigger_classes = 2:0.500:0.500:1000:1000\n")) &&
+            !wide.hotkeys.empty() && wide.hotkeys[0].trigger_y_percent == 1000 &&
+            wide.hotkeys[0].trigger_classes.size() == 1 &&
+            wide.hotkeys[0].trigger_classes[0].range_x_percent == 1000 &&
+            wide.hotkeys[0].trigger_classes[0].range_y_percent == 1000,
+            "trigger range accepts 1000 percent");
+        check(wide.saveConfig("trigger_range_1000_roundtrip.ini"),
+            "1000 percent trigger range saves");
+        Config wideRestored;
+        check(wideRestored.loadConfig("trigger_range_1000_roundtrip.ini") &&
+            !wideRestored.hotkeys.empty() &&
+            wideRestored.hotkeys[0].trigger_y_percent == 1000 &&
+            wideRestored.hotkeys[0].trigger_classes.size() == 1 &&
+            wideRestored.hotkeys[0].trigger_classes[0].range_y_percent == 1000,
+            "1000 percent trigger range survives save/load");
     }
 
     std::printf("\n=== %d 项失败 ===\n", g_failures);

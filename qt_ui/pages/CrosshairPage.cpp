@@ -17,6 +17,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -54,8 +55,8 @@ QColor computePreviewColor(int hLo, int hHi, int sLo, int sHi, int vLo, int vHi)
 
 }
 
-CrosshairPage::CrosshairPage(QWidget* parent)
-    : QWidget(parent) {
+CrosshairPage::CrosshairPage(QWidget* parent, bool laserMode)
+    : QWidget(parent), m_laserMode(laserMode) {
     auto* outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(0, 0, 0, 0);
 
@@ -73,29 +74,66 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     auto& cfg = ConfigManager::instance();
 
     auto* regionCard = new CardWidget(
-        QStringLiteral("取样区域"),
+        m_laserMode ? QStringLiteral("镭射取样区域") : QStringLiteral("取样区域"),
         QStringLiteral("color-swatch"));
 
     QSlider* wSlider = nullptr;
     regionCard->contentLayout()->addWidget(
         FormKit::sliderRow(
             QStringLiteral("宽度（px）"),
-            4, 256, cfg.crosshairRectW(), wSlider, m_rectW));
+            4, m_laserMode ? 4096 : 256,
+            m_laserMode ? cfg.laserRectW() : cfg.crosshairRectW(), wSlider, m_rectW));
     connect(m_rectW, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) { ConfigManager::instance().setCrosshairRectW(v); });
+            this, [this](int v) { if (m_laserMode) ConfigManager::instance().setLaserRectW(v);
+                              else ConfigManager::instance().setCrosshairRectW(v); });
 
     QSlider* hSlider = nullptr;
     regionCard->contentLayout()->addWidget(
         FormKit::sliderRow(
             QStringLiteral("高度（px）"),
-            4, 256, cfg.crosshairRectH(), hSlider, m_rectH));
+            4, m_laserMode ? 4096 : 256,
+            m_laserMode ? cfg.laserRectH() : cfg.crosshairRectH(), hSlider, m_rectH));
     connect(m_rectH, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) { ConfigManager::instance().setCrosshairRectH(v); });
+            this, [this](int v) { if (m_laserMode) ConfigManager::instance().setLaserRectH(v);
+                              else ConfigManager::instance().setCrosshairRectH(v); });
+
+    if (!m_laserMode) {
+        QSlider* offsetSlider = nullptr;
+        regionCard->contentLayout()->addWidget(
+            FormKit::sliderRow(QStringLiteral("垂直偏移（px，正数向下）"),
+                               -2048, 2048, cfg.crosshairOffsetY(), offsetSlider, m_offsetY));
+        connect(m_offsetY, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, [](int v) { ConfigManager::instance().setCrosshairOffsetY(v); });
+    }
+
+    if (m_laserMode) {
+        auto addInt = [this, regionCard](const QString& label, int value, int min, int max,
+                                         QSpinBox*& spin, void (ConfigManager::*setter)(int)) {
+            spin = new QSpinBox(this);
+            spin->setRange(min, max);
+            spin->setValue(value);
+            regionCard->contentLayout()->addWidget(FormKit::fieldRow(label, spin));
+            connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+                    [setter](int v) { (ConfigManager::instance().*setter)(v); });
+        };
+        addInt(QStringLiteral("取样中心 X（检测画面 px）"), cfg.laserCenterX(), 0, 8192,
+               m_laserCenterX, &ConfigManager::setLaserCenterX);
+        addInt(QStringLiteral("取样中心 Y（检测画面 px）"), cfg.laserCenterY(), 0, 8192,
+               m_laserCenterY, &ConfigManager::setLaserCenterY);
+        addInt(QStringLiteral("瞄点区域中心 X"), cfg.laserTargetCenterX(), 0, 8192,
+               m_laserTargetCenterX, &ConfigManager::setLaserTargetCenterX);
+        addInt(QStringLiteral("瞄点区域中心 Y"), cfg.laserTargetCenterY(), 0, 8192,
+               m_laserTargetCenterY, &ConfigManager::setLaserTargetCenterY);
+        addInt(QStringLiteral("瞄点区域宽度"), cfg.laserTargetRectW(), 4, 4096,
+               m_laserTargetRectW, &ConfigManager::setLaserTargetRectW);
+        addInt(QStringLiteral("瞄点区域高度"), cfg.laserTargetRectH(), 4, 4096,
+               m_laserTargetRectH, &ConfigManager::setLaserTargetRectH);
+    }
 
     layout->addWidget(regionCard);
 
     auto* colorCard = new CardWidget(
-        QStringLiteral("准星颜色"),
+        m_laserMode ? QStringLiteral("镭射颜色") : QStringLiteral("准星颜色"),
         QStringLiteral("palette"));
 
     auto* toolBar = new QHBoxLayout;
@@ -156,24 +194,46 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     connect(m_pickTimer, &QTimer::timeout, this, &CrosshairPage::pollPickedColor);
 
     auto* shapeCard = new CardWidget(
-        QStringLiteral("找色参数"),
+        m_laserMode ? QStringLiteral("镭射找色参数") : QStringLiteral("找色参数"),
         QStringLiteral("target"));
 
     QSlider* mpSlider = nullptr;
     shapeCard->contentLayout()->addWidget(
         FormKit::sliderRow(
             QStringLiteral("最小像素阈值"),
-            1, 200, cfg.crosshairMinPixelCount(), mpSlider, m_minPixels));
+            1, m_laserMode ? 10000 : 200,
+            m_laserMode ? cfg.laserMinPixelCount() : cfg.crosshairMinPixelCount(), mpSlider, m_minPixels));
     connect(m_minPixels, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) { ConfigManager::instance().setCrosshairMinPixelCount(v); });
+            this, [this](int v) { if (m_laserMode) ConfigManager::instance().setLaserMinPixelCount(v);
+                              else ConfigManager::instance().setCrosshairMinPixelCount(v); });
 
     QSlider* crSlider = nullptr;
     shapeCard->contentLayout()->addWidget(
         FormKit::sliderRow(
             QStringLiteral("闭合滤波半径"),
-            0, 7, cfg.crosshairCloseRadius(), crSlider, m_closeRadius));
+            0, m_laserMode ? 9 : 7,
+            m_laserMode ? cfg.laserCloseRadius() : cfg.crosshairCloseRadius(), crSlider, m_closeRadius));
     connect(m_closeRadius, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) { ConfigManager::instance().setCrosshairCloseRadius(v); });
+            this, [this](int v) { if (m_laserMode) ConfigManager::instance().setLaserCloseRadius(v);
+                              else ConfigManager::instance().setCrosshairCloseRadius(v); });
+
+    if (m_laserMode) {
+        m_laserElongation = new QDoubleSpinBox(this);
+        m_laserElongation->setRange(1.0, 30.0);
+        m_laserElongation->setSingleStep(0.1);
+        m_laserElongation->setValue(cfg.laserMinElongation());
+        shapeCard->contentLayout()->addWidget(FormKit::fieldRow(QStringLiteral("最小线条长宽比"), m_laserElongation));
+        connect(m_laserElongation, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                [](double v) { ConfigManager::instance().setLaserMinElongation(static_cast<float>(v)); });
+        m_laserSmooth = new QDoubleSpinBox(this);
+        m_laserSmooth->setRange(0.0, 1.0);
+        m_laserSmooth->setSingleStep(0.05);
+        m_laserSmooth->setDecimals(2);
+        m_laserSmooth->setValue(cfg.laserSmooth());
+        shapeCard->contentLayout()->addWidget(FormKit::fieldRow(QStringLiteral("端点平滑强度"), m_laserSmooth));
+        connect(m_laserSmooth, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                [](double v) { ConfigManager::instance().setLaserSmooth(static_cast<float>(v)); });
+    }
 
     layout->addWidget(shapeCard);
 
@@ -185,13 +245,30 @@ CrosshairPage::CrosshairPage(QWidget* parent)
 
 void CrosshairPage::loadConfig() {
     auto& cfg = ConfigManager::instance();
+    const QSignalBlocker blockWidth(m_rectW), blockHeight(m_rectH);
+    const QSignalBlocker blockPixels(m_minPixels), blockRadius(m_closeRadius);
 
-    m_rectW->setValue(cfg.crosshairRectW());
-    m_rectH->setValue(cfg.crosshairRectH());
-    m_minPixels->setValue(cfg.crosshairMinPixelCount());
-    m_closeRadius->setValue(cfg.crosshairCloseRadius());
+    m_rectW->setValue(m_laserMode ? cfg.laserRectW() : cfg.crosshairRectW());
+    m_rectH->setValue(m_laserMode ? cfg.laserRectH() : cfg.crosshairRectH());
+    if (m_offsetY) {
+        const QSignalBlocker blockOffset(m_offsetY);
+        m_offsetY->setValue(cfg.crosshairOffsetY());
+    }
+    m_minPixels->setValue(m_laserMode ? cfg.laserMinPixelCount() : cfg.crosshairMinPixelCount());
+    m_closeRadius->setValue(m_laserMode ? cfg.laserCloseRadius() : cfg.crosshairCloseRadius());
+    if (m_laserMode) {
+        const auto set = [](auto* spin, auto value) { const QSignalBlocker blocker(spin); spin->setValue(value); };
+        set(m_laserCenterX, cfg.laserCenterX());
+        set(m_laserCenterY, cfg.laserCenterY());
+        set(m_laserTargetCenterX, cfg.laserTargetCenterX());
+        set(m_laserTargetCenterY, cfg.laserTargetCenterY());
+        set(m_laserTargetRectW, cfg.laserTargetRectW());
+        set(m_laserTargetRectH, cfg.laserTargetRectH());
+        set(m_laserElongation, cfg.laserMinElongation());
+        set(m_laserSmooth, cfg.laserSmooth());
+    }
 
-    m_colors = cfg.crosshairColors();
+    m_colors = m_laserMode ? cfg.laserColors() : cfg.crosshairColors();
     rebuildColorList();
 }
 
@@ -205,7 +282,9 @@ void CrosshairPage::rebuildColorList() {
     }
 
     if (m_colors.isEmpty()) {
-        auto* emptyLabel = new QLabel(QStringLiteral("暂未配置准星颜色，可从上方选择预设或点击屏幕取色添加。"), m_colorListContainer);
+        auto* emptyLabel = new QLabel(m_laserMode
+            ? QStringLiteral("暂未配置镭射颜色，可从上方选择预设或点击屏幕取色添加。")
+            : QStringLiteral("暂未配置准星颜色，可从上方选择预设或点击屏幕取色添加。"), m_colorListContainer);
         emptyLabel->setStyleSheet(QStringLiteral("color:#98A1B0; font-size:12px; padding:12px;"));
         emptyLabel->setAlignment(Qt::AlignCenter);
         m_colorListLayout->addWidget(emptyLabel);
@@ -261,14 +340,17 @@ void CrosshairPage::rebuildColorList() {
             "QLineEdit:focus{border-color:#5E6AD2;}"));
         headerRow->addWidget(nameEdit, 1);
 
-        auto* delBtn = new QPushButton(QStringLiteral("✕"), itemFrame);
-        delBtn->setFixedSize(24, 24);
+        auto* delBtn = new QPushButton(QStringLiteral("删除"), itemFrame);
+        delBtn->setObjectName(QStringLiteral("removeColorButton"));
+        delBtn->setFixedSize(46, 26);
         delBtn->setCursor(Qt::PointingHandCursor);
         delBtn->setToolTip(QStringLiteral("移除该颜色"));
         delBtn->setStyleSheet(QStringLiteral(
-            "QPushButton{color:#A1A1AA; background:transparent; border:none;"
-            " font-size:13px; font-weight:bold; border-radius:4px;}"
-            "QPushButton:hover{color:#D23B3B; background:rgba(210,59,59,0.08);}"));
+            "QPushButton#removeColorButton{color:#B4232F; background-color:#FFF1F2;"
+            " border:1px solid #F4B7BD; border-radius:5px; padding:0;"
+            " font-size:12px; font-weight:600;}"
+            "QPushButton#removeColorButton:hover{color:#FFFFFF;"
+            " background-color:#D23B3B; border-color:#D23B3B;}"));
         headerRow->addWidget(delBtn);
 
         frameLayout->addLayout(headerRow);
@@ -356,7 +438,8 @@ void CrosshairPage::rebuildColorList() {
 }
 
 void CrosshairPage::saveCrosshairColors() {
-    ConfigManager::instance().setCrosshairColors(m_colors);
+    if (m_laserMode) ConfigManager::instance().setLaserColors(m_colors);
+    else ConfigManager::instance().setCrosshairColors(m_colors);
 }
 
 void CrosshairPage::addPreset(int presetIdx) {
@@ -395,8 +478,8 @@ void CrosshairPage::addNewColor() {
     ConfigManager::ColorProfile c;
     c.name = QStringLiteral("自定义 %1").arg(m_colors.size() + 1);
     c.enabled = true;
-    c.hLow = 40;
-    c.hHigh = 85;
+    c.hLow = m_laserMode ? 0 : 40;
+    c.hHigh = m_laserMode ? 10 : 85;
     c.sMin = 100;
     c.sMax = 255;
     c.vMin = 100;

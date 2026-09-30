@@ -7,6 +7,7 @@
 #include "capture/capture_card_caps.h"
 
 class QComboBox;
+class QLineEdit;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
@@ -26,6 +27,8 @@ private slots:
     void onFormatChanged(int index);
     void onResolutionChanged(int index);
     void onFpsChanged(int index);
+    void onSourceChanged(int index);
+    void onStreamUrlEdited();
 
 private:
     void applySelectionToConfig();
@@ -40,8 +43,12 @@ private:
     void updateCapabilitySummary();
     void showError(const QString& text);
     void clearError();
+    void updateSourceUi();
 
     CardWidget*   m_cardCard{};
+    QComboBox*    m_sourceCombo{};
+    QLineEdit*    m_streamUrl{};
+    QWidget*      m_streamRow{};
     QComboBox*    m_devCombo{};
     QComboBox*    m_fmtCombo{};
     QComboBox*    m_resCombo{};

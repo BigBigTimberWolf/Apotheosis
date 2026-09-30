@@ -48,20 +48,12 @@ bool CPUAffinityManager::reserveCPUCores(int numCores)
                       << GetLastError() << std::endl;
     }
 
-    if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
-    {
-        std::cerr << "[CPU] Failed to set process priority. GetLastError="
-                  << GetLastError() << std::endl;
-    }
-
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-
     std::cout << "[CPU] Affinity tuned: mask=0x" << std::hex << mask << std::dec
               << " -> 绑定 " << want << "/" << totalCores << " 个逻辑核 (";
     for (DWORD i = 0; i < totalCores; ++i)
         if (mask & (static_cast<DWORD_PTR>(1) << i))
             std::cout << " " << i;
-    std::cout << " ) with HIGH priority." << std::endl;
+    std::cout << " ); process priority unchanged." << std::endl;
 
     return true;
 }

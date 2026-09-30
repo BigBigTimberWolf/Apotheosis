@@ -38,13 +38,24 @@ MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate
 
         if (device_.connect(port))
         {
-            if (baud_rate > 0)
+            const std::string version = device_.getVersion();
+            const bool customFirmware = version.find("CUSTOM") != std::string::npos ||
+                version.find("PASSTHROUGH") != std::string::npos;
+            if (baud_rate > 115200 && customFirmware)
             {
                 if (!device_.setBaudRate(baud_rate, true))
                 {
                     std::cerr << "[Makcu] Failed to set baud rate to " << baud_rate
-                        << ", continuing with current baud rate." << std::endl;
+                        << ", reopening at 115200 for official-firmware compatibility."
+                        << std::endl;
+                    device_.disconnect();
+                    if (!device_.connect(port)) return;
                 }
+            }
+            else if (baud_rate > 115200 && !customFirmware)
+            {
+                std::cout << "[Makcu] Official firmware detected; keeping its current"
+                             " working serial baud rate." << std::endl;
             }
 
             // ★ 必须在 connect() 之后才启用按键监控.
@@ -86,6 +97,8 @@ MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate
 
 MakcuConnection::~MakcuConnection()
 {
+    for(int b=1;b<=5;++b) if(ownedMasks_[b]) maskPhysicalButton(b,false);
+    for(int a=0;a<2;++a) if(ownedAxisMasks_[a]) maskPhysicalAxis(a,false);
     try
     {
         device_.disconnect();
@@ -99,6 +112,48 @@ MakcuConnection::~MakcuConnection()
 bool MakcuConnection::isOpen() const
 {
     return is_open_ && device_.isConnected();
+}
+
+bool MakcuConnection::maskPhysicalButton(int button, bool enabled)
+{
+    if(button<1 || button>5 || !isOpen()) return false;
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    try {
+        bool existing=false;
+        if(!enabled && !ownedMasks_[button]) return true;
+        // Old custom firmware echoes unknown commands. A write alone is not proof.
+        if(enabled && !device_.queryMouseButtonLock(button,existing)) return false;
+        if(enabled && existing && !ownedMasks_[button]) return true;
+        if(enabled) ownedMasks_[button]=true;
+        bool ok=false;
+        switch(button) {
+        case 1: ok=device_.lockMouseLeft(enabled); break;
+        case 2: ok=device_.lockMouseRight(enabled); break;
+        case 3: ok=device_.lockMouseMiddle(enabled); break;
+        case 4: ok=device_.lockMouseSide1(enabled); break;
+        case 5: ok=device_.lockMouseSide2(enabled); break;
+        }
+        bool actual=false;
+        ok=ok && device_.queryMouseButtonLock(button,actual) && actual==enabled;
+        if(ok && !enabled) ownedMasks_[button]=false;
+        return ok;
+    } catch(...) { return false; }
+}
+
+bool MakcuConnection::maskPhysicalAxis(int axis, bool enabled) {
+    if(axis<0 || axis>1 || !isOpen()) return false;
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if(!enabled && !ownedAxisMasks_[axis]) return true;
+    try {
+        bool actual=false;
+        if(enabled && !device_.queryMouseAxisLock(axis,actual)) return false;
+        if(enabled && actual && !ownedAxisMasks_[axis]) return true;
+        if(enabled) ownedAxisMasks_[axis]=true;
+        const bool sent=axis==0 ? device_.lockMouseX(enabled) : device_.lockMouseY(enabled);
+        const bool ok=sent && device_.queryMouseAxisLock(axis,actual) && actual==enabled;
+        if(ok && !enabled) ownedAxisMasks_[axis]=false;
+        return ok;
+    } catch(...) { return false; }
 }
 
 void MakcuConnection::move(int x, int y)

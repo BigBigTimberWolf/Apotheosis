@@ -2,8 +2,8 @@
 // 采集卡链路 bench —— 把「卡/MF 投递速率」和「程序消费速率」分开量。
 //
 // 为什么要分开量: 这两个数在 UI 上长得一样, 但瓶颈位置完全不同。
-//   投递速率(GetSourceFpsEstimate = 读循环里 TickFps 记的 sample 到达率):
-//       低 => 问题在 MF 读循环本身 (每帧同步开销、串行的 ReadSample 往返)
+//   投递速率(GetSourceFpsEstimate = MF 回调实际收到 sample 的速率):
+//       低 => 优先检查设备模式、USB/驱动和 MF 交付，不能归因于解码队列
 //   消费速率(本 bench 从输出队列取到帧的速率):
 //       低而投递高 => 问题在解码 worker / 输出队列 (背压丢帧)
 //
@@ -87,7 +87,7 @@ int main(int argc, char** argv)
         return 3;
     }
     printf("\n开始采集 %.1f 秒, 全速消费输出队列...\n", seconds);
-    printf("%8s %10s %10s %12s %10s\n", "t(s)", "投递fps", "消费fps", "端到端延迟ms", "空轮询%");
+    printf("%8s %10s %10s %12s %12s %10s\n", "t(s)", "投递fps", "消费fps", "回调到取帧ms", "设备帧龄ms", "空轮询%");
 
     const double t0 = NowSec();
     long long consumed = 0;
@@ -95,6 +95,8 @@ int main(int argc, char** argv)
     long long emptyPolls = 0;
     double latencySumMs = 0.0;
     long long latencySamples = 0;
+    int64_t lastCaptureNs = 0;
+    long long timestampRegressions = 0;
     double lastReport = 0.0;
     long long lastReportConsumed = 0;
 
@@ -104,14 +106,14 @@ int main(int argc, char** argv)
         if (elapsed >= seconds)
             break;
 
-        // ★ 纯自旋消费, 不许 sleep。
-        // 原因: Windows 默认定时器精度 ~15.6ms, sleep_for(200us) 实际会睡满一个
-        // tick, 那样量到的是"消费者自己的睡觉粒度", 不是采集管线的天花板。
+        // Wait on the capture event when empty. A spinning consumer steals a
+        // logical core from the Media Foundation reader on four-core hosts.
         GpuImage frame = cap.GetNextFrameGpu();
         ++polls;
         if (frame.empty())
         {
             ++emptyPolls;
+            cap.WaitFrame(4);
         }
         else
         {
@@ -120,6 +122,9 @@ int main(int argc, char** argv)
             const int64_t captureNs = cap.GetLastFrameCaptureNs();
             if (captureNs > 0)
             {
+                if (lastCaptureNs > 0 && captureNs < lastCaptureNs)
+                    ++timestampRegressions;
+                lastCaptureNs = captureNs;
                 const double ms = static_cast<double>(runtime::latency::nowNs() - captureNs) / 1.0e6;
                 if (ms >= 0.0 && ms < 1000.0)
                 {
@@ -137,8 +142,10 @@ int main(int argc, char** argv)
             const double emptyPct = polls > 0
                 ? 100.0 * static_cast<double>(emptyPolls) / static_cast<double>(polls) : 0.0;
             const double latMs = latencySamples > 0 ? latencySumMs / latencySamples : -1.0;
-            printf("%8.1f %10d %10.1f %12.2f %10.1f\n",
-                   now, cap.GetSourceFpsEstimate(), consumeFps, latMs, emptyPct);
+            const int deviceAgeUs = cap.GetDeviceFrameAgeUs();
+            const double deviceAgeMs = deviceAgeUs >= 0 ? deviceAgeUs / 1000.0 : -1.0;
+            printf("%8.1f %10d %10.1f %12.2f %12.2f %10.1f\n",
+                   now, cap.GetSourceFpsEstimate(), consumeFps, latMs, deviceAgeMs, emptyPct);
             lastReport = now;
             lastReportConsumed = consumed;
         }
@@ -149,15 +156,16 @@ int main(int argc, char** argv)
     const double consumeFps = static_cast<double>(consumed) / total;
 
     printf("\n=== 结果 ===\n");
-    printf("  协商/投递 (卡->MF读循环): %d fps\n", delivered);
+    printf("  MF 回调投递: %d fps\n", delivered);
     printf("  程序消费 (输出队列出帧): %.1f fps  (%lld 帧 / %.2fs)\n", consumeFps, consumed, total);
+    printf("  输出时间戳倒退: %lld 次\n", timestampRegressions);
     if (latencySamples > 0)
-        printf("  端到端延迟 (capture->consume): 平均 %.2f ms\n", latencySumMs / latencySamples);
+        printf("  MF回调到取帧: 平均 %.2f ms (不含取帧后等待GPU就绪)\n", latencySumMs / latencySamples);
     if (delivered > 0)
         printf("  消费/投递 = %.1f%%\n", 100.0 * consumeFps / delivered);
 
     printf("\n判读:\n");
-    printf("  * 投递就低      -> 瓶颈在读循环 (ReadSample 串行往返 / 每帧拷贝开销)\n");
+    printf("  * 投递就低      -> 检查设备模式、USB/驱动和 MF 交付\n");
     printf("  * 投递高消费低  -> 瓶颈在解码 worker / 输出队列背压\n");
     printf("  * 两者都到目标  -> 链路已经到顶\n");
     return 0;

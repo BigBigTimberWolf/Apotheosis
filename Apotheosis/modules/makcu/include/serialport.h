@@ -76,6 +76,10 @@ namespace makcu {
         std::future<std::string> sendTrackedCommand(const std::string& command,
             bool expectResponse = false,
             std::chrono::milliseconds timeout = std::chrono::milliseconds(100));
+        // Send an ordinary firmware command without the private #id suffix.
+        // Official firmware rejects that suffix on some command versions.
+        std::future<std::string> sendPlainQuery(const std::string& command,
+            std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
 
         // Fast fire-and-forget commands
         bool sendCommand(const std::string& command);
@@ -100,6 +104,7 @@ namespace makcu {
         // Button callback support
         using ButtonCallback = std::function<void(uint8_t, bool)>;
         void setButtonCallback(ButtonCallback callback);
+        void setButtonStreamEnabled(bool enabled) { m_buttonStreamEnabled=enabled; }
 
     private:
         std::string m_portName;
@@ -126,6 +131,7 @@ namespace makcu {
         // High-performance listener thread
         std::thread m_listenerThread;
         std::atomic<bool> m_stopListener{ false };
+        std::atomic<bool> m_buttonStreamEnabled{ false };
 
         // Button data processing
         ButtonCallback m_buttonCallback;

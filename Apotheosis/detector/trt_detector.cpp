@@ -30,7 +30,10 @@
 #include "model_inspector.h"
 #include "model_crypto/model_crypto.h"
 #include "cuda_preprocess.h"
+#include "engine_cache_key.h"
+#include "trt_monitor.h"
 #include "capture.h"
+#include "capture/auto_capture.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
 #include "runtime/sched_boost.h"
@@ -40,6 +43,7 @@ int model_quant;
 std::vector<float> outputData;
 
 extern std::atomic<bool> detector_model_changed;
+extern std::atomic<bool> session_stop_requested;
 extern std::atomic<bool> detection_resolution_changed;
 
 static bool error_logged = false;
@@ -203,23 +207,6 @@ bool engineBytesAreFullyHalf(const void* data, size_t size)
     return true;
 }
 
-uint64_t fnv1a64(const std::string& value)
-{
-    uint64_t hash = 1469598103934665603ull;
-    for (unsigned char ch : value)
-    {
-        hash ^= static_cast<uint64_t>(ch);
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
-
-std::string hex64(uint64_t value)
-{
-    std::ostringstream oss;
-    oss << std::hex << value;
-    return oss.str();
-}
 }
 
 TrtDetector::TrtDetector()
@@ -248,13 +235,7 @@ TrtDetector::TrtDetector()
 
 TrtDetector::~TrtDetector()
 {
-    destroyCudaGraph();
-    freePinnedOutputs();
-    freeTransposedBuffers();
-
-    for (auto& binding : inputBindings) if (binding.second) cudaFree(binding.second);
-    for (auto& binding : outputBindings) if (binding.second) cudaFree(binding.second);
-    if (inputBufferDevice) cudaFree(inputBufferDevice);
+    releaseModelResources();
     for (int s = 0; s < 2; ++s)
     {
         if (preprocessStartEvent[s]) cudaEventDestroy(preprocessStartEvent[s]);
@@ -264,6 +245,43 @@ TrtDetector::~TrtDetector()
         if (slotDoneEvent[s]) { cudaEventDestroy(slotDoneEvent[s]); slotDoneEvent[s] = nullptr; }
     }
     if (stream) cudaStreamDestroy(stream);
+}
+
+void TrtDetector::releaseModelResources()
+{
+    if (stream) cudaStreamSynchronize(stream);
+    destroyCudaGraph();
+    // Deserialized contexts and engines must be destroyed before their runtime.
+    context.reset();
+    engine.reset();
+    runtime.reset();
+    freePinnedOutputs();
+    freeTransposedBuffers();
+    for (auto& binding : inputBindings) if (binding.second) cudaFree(binding.second);
+    for (auto& binding : outputBindings) if (binding.second) cudaFree(binding.second);
+    inputBindings.clear();
+    outputBindings.clear();
+    if (inputBufferDevice) cudaFree(inputBufferDevice);
+    inputBufferDevice = nullptr;
+    gpuFrameBuffer.release();
+    for (auto& frame : graphInputBuffers) frame.release();
+    inputNames.clear();
+    outputNames.clear();
+    inputSizes.clear();
+    outputSizes.clear();
+    outputShapes.clear();
+    outputTypes.clear();
+    inputName.clear();
+    numClasses = 0;
+    model_input_width_ = model_input_height_ = 0;
+    raw_candidates_.clear();
+    raw_selected_.clear();
+    detection_scratch_.clear();
+}
+
+void TrtDetector::shutdown()
+{
+    releaseModelResources();
 }
 
 void TrtDetector::freePinnedOutputs()
@@ -388,7 +406,7 @@ void TrtDetector::destroyCudaGraph()
     graphInputStep = 0;
 }
 
-bool TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
+TrtDetector::GraphStagingResult TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
 {
     const bool shapeChanged =
         (rows != graphInputRows) ||
@@ -407,7 +425,8 @@ bool TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
             {
                 std::cerr << "[Detector] Failed to allocate graph staging buffer ("
                           << rows << "x" << cols << "x" << channels << ")" << std::endl;
-                return false;
+                destroyCudaGraph();
+                return GraphStagingResult::Failed;
             }
             needsCapture = true;
         }
@@ -423,7 +442,7 @@ bool TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
     graphInputChannels = channels;
     graphInputStep = graphInputBuffers[0].step();
 
-    return needsCapture;
+    return needsCapture ? GraphStagingResult::Capture : GraphStagingResult::Reuse;
 }
 
 bool TrtDetector::captureCudaGraph(int slot)
@@ -643,9 +662,16 @@ void TrtDetector::getBindings()
 
 bool TrtDetector::initialize(const std::string& model_path)
 {
+    releaseModelResources();
+    last_error_.clear();
     shouldExit = false;
-    frameReady = false;
-    pendingFrameType = PendingFrameType::None;
+    {
+        std::lock_guard<std::mutex> lock(inferenceMutex);
+        frameReady = false;
+        pendingFrameType = PendingFrameType::None;
+        currentFrame.release();
+        currentFrameGpu.release();
+    }
 
     class_names_.clear();
     {
@@ -664,6 +690,19 @@ bool TrtDetector::initialize(const std::string& model_path)
         if (ext == ".onnx" || ext == ".oliver")
         {
             detector::ModelMetadata md = detector::inspect_onnx_model(model_path, runtime_config::read()->verbose);
+            if (!md.output_shape.empty()
+                && detector::classify_model_output(md.output_shape) == detector::ModelOutputKind::Unknown)
+            {
+                std::ostringstream shape;
+                shape << '[';
+                for (size_t i = 0; i < md.output_shape.size(); ++i)
+                    shape << (i ? ", " : "") << md.output_shape[i];
+                shape << ']';
+                last_error_ = "模型输出 " + shape.str()
+                    + " 不属于当前支持的目标检测输出格式 [1,N,6] 或 [1,4+C,N]。";
+                std::cerr << "[Detector] " << last_error_ << std::endl;
+                return false;
+            }
             if (!md.class_names.empty())
                 class_names_ = std::move(md.class_names);
         }
@@ -685,9 +724,14 @@ bool TrtDetector::initialize(const std::string& model_path)
     }
 
     runtime.reset(nvinfer1::createInferRuntime(gLogger));
+    const uint64_t buildGeneration = TrtBuildRead().generation;
     loadEngine(model_path);
     if (!engine)
     {
+        const TrtBuildSnapshot build = TrtBuildRead();
+        if (build.generation > buildGeneration && build.stage == TrtBuildStage::Failed)
+            last_error_ = build.detail;
+        if (last_error_.empty()) last_error_ = "TensorRT 引擎加载失败，请查看日志";
         std::cerr << "[Detector] Engine loading failed" << std::endl;
         return false;
     }
@@ -841,6 +885,8 @@ bool TrtDetector::initialize(const std::string& model_path)
                   << h << "x" << w << "). Use a square detection model." << std::endl;
         return false;
     }
+    model_input_width_ = w;
+    model_input_height_ = h;
 
     {
         nvinfer1::DataType inDt = engine->getTensorDataType(inputName.c_str());
@@ -869,25 +915,30 @@ bool TrtDetector::initialize(const std::string& model_path)
     for (const auto& outName : outputNames)
     {
         const auto& shape = outputShapes[outName];
-        const bool isEnd2End = shape.size() == 3 && shape[0] == 1
-                            && shape[2] == 6 && shape[1] > 0;
-        if (!isEnd2End)
+        const auto kind = detector::classify_model_output(shape);
+        if (kind == detector::ModelOutputKind::Unknown
+            || shape.size() != 3 || shape[0] != 1 || shape[1] <= 0 || shape[2] <= 0)
         {
             std::cerr << "[Detector] 不支持的模型输出形状: " << outName << " = [";
             for (size_t i = 0; i < shape.size(); ++i)
                 std::cerr << (i ? ", " : "") << shape[i];
             std::cerr << "]\n"
-                      << "[Detector] 本程序只接受 end2end 形态 [1, N, 6] "
-                         "(NMS/解码已烘进图内)。\n"
-                      << "[Detector] 请重新导出: yolo export model=<你的.pt> "
-                         "format=onnx end2end=True simplify=True\n"
-                      << "[Detector] 然后重新生成 .engine。"
+                      << "[Detector] 支持 end2end [1,N,6] 和原始 YOLO [1,4+C,N] / [1,N,4+C]。"
                       << std::endl;
+            last_error_ = "不支持的模型输出形状；支持 [1,N,6] 或原始 YOLO [1,4+C,N]";
             return false;
+        }
+        if (kind == detector::ModelOutputKind::RawChannelsFirst
+            || kind == detector::ModelOutputKind::RawRowsFirst)
+        {
+            const auto count = static_cast<size_t>(
+                kind == detector::ModelOutputKind::RawChannelsFirst ? shape[2] : shape[1]);
+            raw_candidates_.reserve(count);
+            raw_selected_.reserve(kFixedMaxDetections);
         }
     }
 
-    std::cout << "[Detector] Pipeline: single-buffer (published as soon as ready)"
+    std::cout << "[Detector] Pipeline: latest-frame (publish after GPU completion)"
               << " cuda_graph=" << (runtime_config::read()->use_cuda_graph ? "on" : "off")
               << std::endl;
 
@@ -895,7 +946,8 @@ bool TrtDetector::initialize(const std::string& model_path)
     {
         if (slotDoneEvent[s]) { cudaEventDestroy(slotDoneEvent[s]); slotDoneEvent[s] = nullptr; }
     }
-    cudaEventCreateWithFlags(&slotDoneEvent[0], cudaEventDisableTiming);
+    for (int s = 0; s < 2; ++s)
+        cudaEventCreateWithFlags(&slotDoneEvent[s], cudaEventDisableTiming);
 
     allocatePinnedOutputs();
 
@@ -920,7 +972,7 @@ bool TrtDetector::initialize(const std::string& model_path)
         cudaEventCreate(&inferenceStartEvent[s]);
         cudaEventCreate(&inferenceCompleteEvent[s]);
         // ★ copyCompleteEvent 是每帧热路径上唯一真正被等待的事件
-        //   (waitForEvent(copyCompleteEvent[slot]), 见下面两处调用)。
+        //   (waitForEvent(copyCompleteEvent[slot]), 在本帧发布前调用)。
         //   必须加 cudaEventBlockingSync, 否则"关闭自旋"根本不起作用 ——
         //   实测 (build\cuda\Release\spin_vs_block_bench.exe, 5ms 等待, 本机 i5-4590):
         //     自旋 cudaEventQuery + _mm_pause : 5.10 ms CPU / 5.20 ms 墙钟 =  98%
@@ -1010,7 +1062,13 @@ void TrtDetector::loadEngine(const std::string& modelFile)
             return;
         }
 
-        const std::string cacheStem = makeAsciiEngineStem(modelPath) + "_" + hex64(fnv1a64(modelPath.u8string()));
+        const std::string fingerprint = engineCacheFingerprint(modelPath, *runtime_config::read());
+        if (fingerprint.empty())
+        {
+            std::cerr << "[Detector] Failed to fingerprint encrypted model or build settings" << std::endl;
+            return;
+        }
+        const std::string cacheStem = makeAsciiEngineStem(modelPath) + "_" + fingerprint;
         const fs::path encryptedEngineCache = engineCacheDir / (cacheStem + ".engine.olivercache");
 
         if (fileExists(encryptedEngineCache.u8string()))
@@ -1071,21 +1129,26 @@ void TrtDetector::loadEngine(const std::string& modelFile)
 
         std::cout << "[Detector] Building engine from encrypted ONNX model -> "
                   << encryptedEngineCache.u8string() << std::endl;
+        TrtBuildScope buildProgress(modelPath.filename().u8string());
         auto serializedEngine = buildSerializedEngineFromOnnxMemory(modelPayload.bytes.data(), modelPayload.bytes.size(), gLogger);
         if (!serializedEngine)
             return;
 
+        TrtBuildSetStage(TrtBuildStage::Loading);
         engine.reset(loadEngineFromMemory(serializedEngine->data(), serializedEngine->size(), runtime.get()));
         if (!engine)
             return;
 
+        TrtBuildSetStage(TrtBuildStage::Saving);
         std::vector<uint8_t> engineBytes(static_cast<size_t>(serializedEngine->size()));
         std::memcpy(engineBytes.data(), serializedEngine->data(), engineBytes.size());
         std::vector<uint8_t> encrypted;
         if (sourceModelId.empty())
             sourceModelId = modelPayload.model_id;
-        if (oliver::encrypt_bytes(engineBytes, oliver::PayloadType::TensorRtEngine, sourceModelId, encrypted, error) &&
-            oliver::write_file_bytes(encryptedEngineCache.u8string(), encrypted, error))
+        const bool cacheSaved =
+            oliver::encrypt_bytes(engineBytes, oliver::PayloadType::TensorRtEngine, sourceModelId, encrypted, error) &&
+            oliver::write_file_bytes(encryptedEngineCache.u8string(), encrypted, error);
+        if (cacheSaved)
         {
             std::cout << "[Detector] Encrypted engine cache saved to: "
                       << encryptedEngineCache.u8string() << std::endl;
@@ -1094,6 +1157,7 @@ void TrtDetector::loadEngine(const std::string& modelFile)
         {
             std::cerr << "[Detector] Failed to save encrypted engine cache: " << error << std::endl;
         }
+        buildProgress.succeed(cacheSaved ? "" : "引擎可运行，但缓存未保存");
         return;
     }
     else if (extension == ".onnx")
@@ -1104,13 +1168,13 @@ void TrtDetector::loadEngine(const std::string& modelFile)
             return;
         }
 
-        engineFilePath = engineCacheDir / (makeAsciiEngineStem(modelPath) + ".engine");
-
-        const fs::path legacyEnginePath = fs::path(modelPath).replace_extension(".engine");
-        if (!fileExists(engineFilePath.u8string()) && fileExists(legacyEnginePath.u8string()))
+        const std::string fingerprint = engineCacheFingerprint(modelPath, *runtime_config::read());
+        if (fingerprint.empty())
         {
-            engineFilePath = legacyEnginePath;
+            std::cerr << "[Detector] Failed to fingerprint ONNX model or build settings" << std::endl;
+            return;
         }
+        engineFilePath = engineCacheDir / (makeAsciiEngineStem(modelPath) + "_" + fingerprint + ".engine");
 
         if (fileExists(engineFilePath.u8string()) && !engineIsFullyHalf(engineFilePath))
         {
@@ -1124,36 +1188,65 @@ void TrtDetector::loadEngine(const std::string& modelFile)
             }
         }
 
-        if (!fileExists(engineFilePath.u8string()))
+        if (fileExists(engineFilePath.u8string()))
+        {
+            engine.reset(loadEngineFromFile(engineFilePath.u8string(), runtime.get()));
+            if (engine) return;
+            std::cerr << "[Detector] Cached engine could not be loaded; rebuilding from ONNX." << std::endl;
+            ec.clear();
+            fs::remove(engineFilePath, ec);
+            if (ec)
+            {
+                std::cerr << "[Detector] Could not remove invalid engine cache: "
+                          << ec.message() << std::endl;
+            }
+        }
+
+        if (!engine)
         {
             std::cout << "[Detector] Building engine from ONNX model -> "
                       << engineFilePath.u8string() << std::endl;
+            TrtBuildScope buildProgress(modelPath.filename().u8string());
 
             std::filesystem::path temporaryParserPath;
             const std::string parserModelFile = makeTensorRtParserPath(modelPath, engineCacheDir, &temporaryParserPath);
-            std::unique_ptr<nvinfer1::ICudaEngine> builtEngine(
-                buildEngineFromOnnx(parserModelFile, gLogger));
-            if (builtEngine)
+            auto serializedEngine = buildSerializedEngineFromOnnxFile(parserModelFile, gLogger);
+            bool cacheSaved = false;
+            if (serializedEngine)
             {
-                std::unique_ptr<nvinfer1::IHostMemory> serializedEngine(
-                    builtEngine->serialize());
-                if (serializedEngine)
+                TrtBuildSetStage(TrtBuildStage::Loading);
+                engine.reset(loadEngineFromMemory(
+                    serializedEngine->data(), serializedEngine->size(), runtime.get()));
+                if (engine)
                 {
-                    std::ofstream engineFile(engineFilePath, std::ios::binary);
+                    TrtBuildSetStage(TrtBuildStage::Saving);
+                    fs::path temporaryEnginePath = engineFilePath;
+                    temporaryEnginePath += ".tmp";
+                    std::ofstream engineFile(temporaryEnginePath, std::ios::binary | std::ios::trunc);
                     if (engineFile)
                     {
                         engineFile.write(
                             reinterpret_cast<const char*>(serializedEngine->data()),
                             serializedEngine->size());
                         engineFile.close();
-
-                        std::cout << "[Detector] Engine saved to: "
-                                  << engineFilePath.u8string() << std::endl;
+                        if (engineFile)
+                        {
+                            ec.clear();
+                            fs::rename(temporaryEnginePath, engineFilePath, ec);
+                            if (!ec)
+                            {
+                                cacheSaved = true;
+                                std::cout << "[Detector] Engine saved to: "
+                                          << engineFilePath.u8string() << std::endl;
+                            }
+                        }
                     }
-                    else
+                    if (!engineFile || ec)
                     {
-                        std::cerr << "[Detector] Could not open engine file for write: "
-                                  << engineFilePath.u8string() << std::endl;
+                        std::cerr << "[Detector] Could not save engine cache: "
+                                  << (ec ? ec.message() : temporaryEnginePath.u8string()) << std::endl;
+                        ec.clear();
+                        fs::remove(temporaryEnginePath, ec);
                     }
                 }
             }
@@ -1162,6 +1255,8 @@ void TrtDetector::loadEngine(const std::string& modelFile)
             {
                 fs::remove(temporaryParserPath, ec);
             }
+            if (engine) buildProgress.succeed(cacheSaved ? "" : "引擎可运行，但缓存未保存");
+            return;
         }
     }
     else
@@ -1202,56 +1297,112 @@ void TrtDetector::processFrameGpu(GpuImage frame, runtime::FrameContext context)
 
 void TrtDetector::inferenceThread()
 {
-    auto mmcssTask = runtime_config::read()->mmcss_task_name;
-    const bool wantMmcss = runtime_config::read()->use_mmcss;
+    std::string mmcssTask;
     std::unique_ptr<sched_boost::ScopedThreadBoost> threadBoost;
-    if (wantMmcss)
-    {
-        threadBoost = std::make_unique<sched_boost::ScopedThreadBoost>(mmcssTask.c_str());
-        if (threadBoost->active())
-            std::cout << "[Detector] Inference thread boosted (MMCSS task="
-                      << mmcssTask << ")" << std::endl;
-    }
 
-    const int curr_slot = 0;
+    int curr_slot = 0;
 
     int64_t slotCaptureNs[2] = {0, 0};
     runtime::FrameContext slotContexts[2]{};
     int64_t slotSubmitNs[2]  = {0, 0};
+    bool slotUsedGraph[2] = {false, false};
+    std::array<GpuImage, 2> inflightGpu;
+    std::array<cv::Mat, 2> inflightCpu;
 
     bool graphCaptureGivenUp = false;
 
+    auto publishSlot = [&](int slot)
+    {
+        if (slot < 0) return;
+        waitForEvent(copyCompleteEvent[slot]);
+        publishContext = slotContexts[slot];
+        publishCaptureNs = slotCaptureNs[slot];
+        publishSubmitNs = slotSubmitNs[slot];
+        // The source image is still owned by this inference slot. Refresh its
+        // cache entry before publishing detections so the sampler can save the
+        // exact frame even if inference took longer than the capture cache.
+        if (runtime_config::read()->auto_capture_enabled)
+        {
+            if (!inflightGpu[slot].empty())
+                AutoCapture::submit_frame(inflightGpu[slot], publishContext);
+            else if (!inflightCpu[slot].empty())
+                AutoCapture::submit_frame(inflightCpu[slot], publishContext);
+        }
+
+        const auto postStart = std::chrono::steady_clock::now();
+        frameAimTickMs = 0.0;
+        auto& pinned = pinnedSlot(slot);
+        for (const auto& name : outputNames)
+        {
+            const auto it = pinned.find(name);
+            if (it != pinned.end() && it->second)
+                postProcess(it->second, name, outputTypes[name], &lastNmsTimeValue);
+        }
+        const auto postEnd = std::chrono::steady_clock::now();
+
+        float preprocessMs = 0.0f;
+        float inferenceMs = 0.0f;
+        float copyMs = 0.0f;
+        cudaEventElapsedTime(&preprocessMs, preprocessStartEvent[slot], inferenceStartEvent[slot]);
+        cudaEventElapsedTime(&inferenceMs, inferenceStartEvent[slot], inferenceCompleteEvent[slot]);
+        cudaEventElapsedTime(&copyMs, inferenceCompleteEvent[slot], copyCompleteEvent[slot]);
+        const double postprocessMs = std::max(
+            0.0, std::chrono::duration<double, std::milli>(postEnd - postStart).count()
+                     - frameAimTickMs);
+        const bool usedGraph = slotUsedGraph[slot];
+        lastPreprocessTimeValue = std::chrono::duration<double, std::milli>(
+            usedGraph ? -1.0 : preprocessMs);
+        lastInferenceTimeValue = std::chrono::duration<double, std::milli>(
+            usedGraph ? preprocessMs + inferenceMs + copyMs : inferenceMs);
+        runtime::latency::notePipelineTimes(
+            usedGraph, preprocessMs, inferenceMs, copyMs, postprocessMs, frameAimTickMs);
+        runtime::latency::noteSyncWait(lastSyncSpinMs, lastSyncUsedSpin, syncFallbackCount);
+        lastCopyTimeValue = std::chrono::duration<double, std::milli>(
+            usedGraph ? -1.0 : copyMs);
+        lastPostprocessTimeValue = std::chrono::duration<double, std::milli>(postprocessMs);
+        inflightGpu[slot].release();
+        inflightCpu[slot].release();
+    };
+
     while (!shouldExit)
     {
+        const auto scheduling = runtime_config::read();
+        if (!scheduling->use_mmcss)
+        {
+            threadBoost.reset();
+            mmcssTask.clear();
+        }
+        else if (!threadBoost || mmcssTask != scheduling->mmcss_task_name)
+        {
+            threadBoost.reset();
+            mmcssTask = scheduling->mmcss_task_name;
+            threadBoost = std::make_unique<sched_boost::ScopedThreadBoost>(mmcssTask.c_str());
+            if (threadBoost->active())
+                std::cout << "[Detector] Inference thread boosted (MMCSS task="
+                          << mmcssTask << ")" << std::endl;
+        }
         if (detector_model_changed.load())
         {
             {
                 std::unique_lock<std::mutex> lock(inferenceMutex);
-                destroyCudaGraph();
-                context.reset();
-                engine.reset();
-
-                freePinnedOutputs();
-                freeTransposedBuffers();
-
-                for (auto& binding : inputBindings)
-                    if (binding.second) cudaFree(binding.second);
-                inputBindings.clear();
-                for (auto& binding : outputBindings)
-                    if (binding.second) cudaFree(binding.second);
-                outputBindings.clear();
-
                 currentFrame.release();
                 currentFrameGpu.release();
                 frameReady = false;
                 pendingFrameType = PendingFrameType::None;
             }
-            initialize("models/" + runtime_config::read()->ai_model);
+            if (!initialize("models/" + runtime_config::read()->ai_model))
+            {
+                std::cerr << "[Detector] Model switch failed; stopping inference session." << std::endl;
+                session_stop_requested.store(true);
+                requestExit();
+                break;
+            }
             publishTrtModelMetadata(*this);
             detection_resolution_changed.store(true);
             detector_model_changed.store(false);
             slotCaptureNs[0] = slotCaptureNs[1] = 0;
             slotSubmitNs[0]  = slotSubmitNs[1]  = 0;
+            curr_slot = 0;
             graphCaptureGivenUp = false;
         }
 
@@ -1259,9 +1410,7 @@ void TrtDetector::inferenceThread()
         {
             useCudaGraph = runtime_config::read()->use_cuda_graph;
             if (!useCudaGraph)
-            {
                 destroyCudaGraph();
-            }
         }
 
         cv::Mat frame;
@@ -1333,8 +1482,6 @@ void TrtDetector::inferenceThread()
                         cudaStreamWaitEvent(stream, frameReadyEvent, 0);
                 }
 
-                cudaEventRecord(preprocessStartEvent[curr_slot], stream);
-
                 bool usedGraph = false;
                 if (useCudaGraph && !graphCaptureGivenUp)
                 {
@@ -1356,10 +1503,16 @@ void TrtDetector::inferenceThread()
 
                     if (frameRows > 0 && frameCols > 0 && frameChannels > 0)
                     {
-                        bool needsCapture = ensureGraphStaging(frameRows, frameCols, frameChannels);
-                        if (needsCapture)
+                        const GraphStagingResult staging =
+                            ensureGraphStaging(frameRows, frameCols, frameChannels);
+                        if (staging == GraphStagingResult::Failed)
                         {
-                            bool captureOk = captureCudaGraph(0);
+                            graphCaptureGivenUp = true;
+                        }
+                        else if (staging == GraphStagingResult::Capture ||
+                                 !cudaGraphExecs[curr_slot])
+                        {
+                            bool captureOk = captureCudaGraph(curr_slot);
                             if (!captureOk)
                             {
                                 std::cerr << "[Detector] CUDA graph capture failed; "
@@ -1371,8 +1524,9 @@ void TrtDetector::inferenceThread()
                         }
                     }
 
-                    if (cudaGraphCaptured)
+                    if (cudaGraphExecs[curr_slot])
                     {
+                        cudaEventRecord(preprocessStartEvent[curr_slot], stream);
                         auto& staging = graphInputBuffers[curr_slot];
                         if (hasGpuFrame)
                         {
@@ -1398,12 +1552,12 @@ void TrtDetector::inferenceThread()
                         cudaEventRecord(slotDoneEvent[curr_slot], stream);
                         usedGraph = true;
 
-                        waitForEvent(copyCompleteEvent[curr_slot]);
                     }
                 }
 
                 if (!usedGraph)
                 {
+                    cudaEventRecord(preprocessStartEvent[curr_slot], stream);
                     if (hasGpuFrame)
                         preProcess(frameGpu);
                     else
@@ -1428,52 +1582,16 @@ void TrtDetector::inferenceThread()
                     cudaEventRecord(copyCompleteEvent[curr_slot], stream);
                     cudaEventRecord(slotDoneEvent[curr_slot], stream);
 
-                    waitForEvent(copyCompleteEvent[curr_slot]);
                 }
 
-                const int post_slot = curr_slot;
-                const bool do_post = true;
-
-                publishContext = do_post ? slotContexts[post_slot] : runtime::FrameContext{};
-                publishCaptureNs = do_post ? slotCaptureNs[post_slot] : 0;
-                publishSubmitNs  = do_post ? slotSubmitNs[post_slot]  : 0;
-
-                auto t_post_start = std::chrono::steady_clock::now();
-
-                if (do_post)
-                {
-
-                    auto& postPinned = pinnedSlot(post_slot);
-                    for (const auto& name : outputNames)
-                    {
-                        const auto itPinned = postPinned.find(name);
-                        if (itPinned == postPinned.end() || !itPinned->second)
-                            continue;
-
-                        postProcess(reinterpret_cast<const void*>(itPinned->second),
-                                    name, outputTypes[name], &lastNmsTimeValue);
-                    }
-                }
-
-                auto t_post_end = std::chrono::steady_clock::now();
-
-                float preprocessMs = 0.0f;
-                float inferenceMs = 0.0f;
-                float copyMs = 0.0f;
-
-                if (post_slot >= 0)
-                {
-                    cudaEventElapsedTime(&preprocessMs, preprocessStartEvent[post_slot], inferenceStartEvent[post_slot]);
-                    cudaEventElapsedTime(&inferenceMs, inferenceStartEvent[post_slot], inferenceCompleteEvent[post_slot]);
-                    cudaEventElapsedTime(&copyMs, inferenceCompleteEvent[post_slot], copyCompleteEvent[post_slot]);
-                }
-
-                lastPreprocessTimeValue = std::chrono::duration<double, std::milli>(preprocessMs);
-                lastInferenceTimeValue = std::chrono::duration<double, std::milli>(inferenceMs);
-                if (post_slot >= 0) runtime::latency::noteEngineInferenceMs(inferenceMs);
-                runtime::latency::noteSyncWait(lastSyncSpinMs, lastSyncUsedSpin, syncFallbackCount);
-                lastCopyTimeValue = std::chrono::duration<double, std::milli>(copyMs);
-                lastPostprocessTimeValue = t_post_end - t_post_start;
+                // Keep input storage alive until its asynchronous GPU work finishes.
+                inflightGpu[curr_slot] = std::move(frameGpu);
+                inflightCpu[curr_slot] = std::move(frame);
+                slotUsedGraph[curr_slot] = usedGraph;
+                // 本帧完成就发布；推理期间待提交槽只保留最新到达的帧。
+                const int completed_slot = curr_slot;
+                curr_slot = 1 - curr_slot;
+                publishSlot(completed_slot);
             }
             catch (const std::exception& e)
             {
@@ -1543,58 +1661,114 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
     if (shapeIt == outputShapes.end())
         return;
     const std::vector<int64_t>& shape = shapeIt->second;
-    if (shape.size() != 3 || shape[0] != 1 || shape[2] != 6 || shape[1] <= 0)
+    const auto kind = detector::classify_model_output(shape);
+    if (kind == detector::ModelOutputKind::Unknown)
         return;
 
-    const int64_t rows = shape[1];
     const float img_scale_local = img_scale;
     const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
     const float baseConf = std::max(runtime.confidenceThreshold, 0.0f);
 
-    auto rowPtr = [&](int64_t i) -> const float* {
-        const size_t off = static_cast<size_t>(i) * 6;
-        if (dtype == nvinfer1::DataType::kHALF)
-        {
-            static thread_local std::array<float, 6> row{};
-            const __half* h = reinterpret_cast<const __half*>(output) + off;
-            for (int k = 0; k < 6; ++k) row[k] = __half2float(h[k]);
-            return row.data();
-        }
-        return reinterpret_cast<const float*>(output) + off;
-    };
+    auto& detections = detection_scratch_;
+    detections.clear();
+    if (detections.capacity() < kFixedMaxDetections)
+        detections.reserve(kFixedMaxDetections);
 
-    std::vector<Detection> detections;
-    detections.reserve(static_cast<size_t>(std::min<int64_t>(rows, kFixedMaxDetections)));
-
-    for (int64_t i = 0; i < rows; ++i)
+    if (kind == detector::ModelOutputKind::RawChannelsFirst
+        || kind == detector::ModelOutputKind::RawRowsFirst)
     {
-        const float* det = rowPtr(i);
-        const float confidence = det[4];
-        if (!(confidence > baseConf))
-            continue;
+        const auto read = [&](size_t offset) -> float {
+            if (dtype == nvinfer1::DataType::kHALF)
+                return __half2float(reinterpret_cast<const __half*>(output)[offset]);
+            return reinterpret_cast<const float*>(output)[offset];
+        };
+        detector::decode_raw_yolo(
+            shape, kind, read, baseConf, img_scale_local,
+            static_cast<float>(model_input_width_), static_cast<float>(model_input_height_),
+            raw_candidates_);
+        // Discard excluded classes before the top-20 NMS cap so they cannot
+        // crowd out valid detections from other classes.
+        const auto filters = runtime_config::read();
+        if (std::any_of(filters->class_filters.begin(), filters->class_filters.end(),
+                [](const auto& filter) { return filter.bucket == ClassBucket::Delete; }))
+        {
+            raw_candidates_.erase(
+                std::remove_if(raw_candidates_.begin(), raw_candidates_.end(),
+                    [&filters](const detector::RawYoloCandidate& candidate) {
+                        return std::any_of(filters->class_filters.begin(), filters->class_filters.end(),
+                            [&candidate](const auto& filter) {
+                                return filter.bucket == ClassBucket::Delete
+                                    && filter.class_id == candidate.class_id;
+                            });
+                    }),
+                raw_candidates_.end());
+        }
+        const auto nmsStart = std::chrono::steady_clock::now();
+        detector::nms_raw_yolo(raw_candidates_, runtime.nmsThreshold,
+                               kFixedMaxDetections, raw_selected_);
+        if (nmsTime)
+            *nmsTime = std::chrono::steady_clock::now() - nmsStart;
 
-        const int classId = static_cast<int>(det[5]);
+        for (const auto& raw : raw_selected_)
+        {
+            Detection d;
+            d.preciseBox = cv::Rect2f(raw.x1, raw.y1,
+                                      raw.x2 - raw.x1, raw.y2 - raw.y1);
+            d.box = cv::Rect(
+                static_cast<int>(std::lround(d.preciseBox.x)),
+                static_cast<int>(std::lround(d.preciseBox.y)),
+                static_cast<int>(std::lround(d.preciseBox.width)),
+                static_cast<int>(std::lround(d.preciseBox.height)));
+            d.confidence = raw.score;
+            d.classId = raw.class_id;
+            detections.push_back(d);
+        }
+    }
+    else
+    {
+        const int64_t rows = shape[1];
 
-        Detection d;
-        d.preciseBox = cv::Rect2f(
-            det[0] * img_scale_local, det[1] * img_scale_local,
-            (det[2] - det[0]) * img_scale_local,
-            (det[3] - det[1]) * img_scale_local);
-        d.box.x = static_cast<int>(std::lround(d.preciseBox.x));
-        d.box.y = static_cast<int>(std::lround(d.preciseBox.y));
-        d.box.width  = static_cast<int>(std::lround(d.preciseBox.width));
-        d.box.height = static_cast<int>(std::lround(d.preciseBox.height));
-        d.confidence = confidence;
-        d.classId = classId;
-        detections.push_back(d);
+        auto rowPtr = [&](int64_t i) -> const float* {
+            const size_t off = static_cast<size_t>(i) * 6;
+            if (dtype == nvinfer1::DataType::kHALF)
+            {
+                static thread_local std::array<float, 6> row{};
+                const __half* h = reinterpret_cast<const __half*>(output) + off;
+                for (int k = 0; k < 6; ++k) row[k] = __half2float(h[k]);
+                return row.data();
+            }
+            return reinterpret_cast<const float*>(output) + off;
+        };
+
+        for (int64_t i = 0; i < rows; ++i)
+        {
+            const float* det = rowPtr(i);
+            const float confidence = det[4];
+            if (!(confidence > baseConf))
+                continue;
+
+            const int classId = static_cast<int>(det[5]);
+
+            Detection d;
+            d.preciseBox = cv::Rect2f(
+                det[0] * img_scale_local, det[1] * img_scale_local,
+                (det[2] - det[0]) * img_scale_local,
+                (det[3] - det[1]) * img_scale_local);
+            d.box.x = static_cast<int>(std::lround(d.preciseBox.x));
+            d.box.y = static_cast<int>(std::lround(d.preciseBox.y));
+            d.box.width  = static_cast<int>(std::lround(d.preciseBox.width));
+            d.box.height = static_cast<int>(std::lround(d.preciseBox.height));
+            d.confidence = confidence;
+            d.classId = classId;
+            detections.push_back(d);
+        }
+
+        capDetectionsToMax(detections, kFixedMaxDetections);
+        if (nmsTime)
+            *nmsTime = std::chrono::duration<double, std::milli>(0);
     }
 
-    capDetectionsToMax(detections, kFixedMaxDetections);
-
     applyDeleteBucketFilter(detections);
-
-    if (nmsTime)
-        *nmsTime = std::chrono::duration<double, std::milli>(0);
 
     {
         std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
@@ -1616,6 +1790,7 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
         detectionBuffer.cv.notify_all();
     }
 
+    const auto tickStart = std::chrono::steady_clock::now();
     try
     {
         runtime::aim_loop::tick();
@@ -1623,4 +1798,6 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
     catch (...)
     {
     }
+    frameAimTickMs += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tickStart).count();
 }

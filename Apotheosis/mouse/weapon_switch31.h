@@ -11,7 +11,7 @@
 
 namespace mouse_async {
 
-// 开火后切枪：等待 → 点按 3 → 留出松键间隔 → 点按 1。
+// 开火后切枪：等待 → 3 → 1 → 1 → 1，每次松键后间隔 20ms。
 // 键盘动作由独立线程执行，不占用采集/推理拍；析构时可中断等待并收尾。
 class WeaponSwitch31
 {
@@ -36,12 +36,11 @@ public:
     WeaponSwitch31(const WeaponSwitch31&) = delete;
     WeaponSwitch31& operator=(const WeaponSwitch31&) = delete;
 
-    bool request(int afterShotDelayMs, int stepMs)
+    bool request(int afterShotDelayMs)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || busy_.load(std::memory_order_acquire)) return false;
         jobDelayMs_ = std::clamp(afterShotDelayMs, 0, 2000);
-        jobStepMs_ = std::clamp(stepMs, 5, 100);
         pending_ = true;
         busy_.store(true, std::memory_order_release);
         cv_.notify_one();
@@ -71,27 +70,45 @@ private:
         for (;;)
         {
             int delayMs = 0;
-            int stepMs = 0;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait(lock, [this] { return stopping_ || pending_; });
                 if (stopping_) break;
                 delayMs = jobDelayMs_;
-                stepMs = jobStepMs_;
                 pending_ = false;
             }
 
             const bool waited = waitUntil(Clock::now() + std::chrono::milliseconds(delayMs));
-            if (waited)
+            const auto threeStart = Clock::now();
+            if (waited && send(0x20, 20))
             {
-                const auto threeStart = Clock::now();
-                if (send(0x20, stepMs) &&
-                    waitUntil(threeStart + std::chrono::milliseconds(stepMs * 2)))
+                auto previousStart = threeStart;
+                bool completed = true;
+                for (int i = 0; i < 3; ++i)
                 {
-                    const auto oneStart = Clock::now();
-                    if (send(0x1E, stepMs))
-                        waitUntil(oneStart + std::chrono::milliseconds(stepMs));
+                    // MAKCUNEW 的 tap 交给固件异步执行；KMBOXNET 的 tap 会
+                    // 等按键抬起才返回。两种后端都要留足 20ms 按住 + 20ms 间隔。
+                    const auto nextAt = std::max(
+                        Clock::now() + std::chrono::milliseconds(20),
+                        previousStart + std::chrono::milliseconds(40));
+                    if (!waitUntil(nextAt))
+                    {
+                        completed = false;
+                        break;
+                    }
+                    previousStart = Clock::now();
+                    if (!send(0x1E, 20))
+                    {
+                        completed = false;
+                        break;
+                    }
                 }
+                // The serial keyboard acknowledges the tap before the game
+                // has equipped weapon 1. Keep the next scope/shot blocked
+                // through the final release and a short equip settling time.
+                constexpr int kEquipSettleMs = 120;
+                const int settleMs = completed ? 20 + kEquipSettleMs : 20;
+                waitUntil(previousStart + std::chrono::milliseconds(settleMs));
             }
             busy_.store(false, std::memory_order_release);
         }
@@ -106,7 +123,6 @@ private:
     bool pending_ = false;
     bool stopping_ = false;
     int jobDelayMs_ = 50;
-    int jobStepMs_ = 20;
 };
 
 }

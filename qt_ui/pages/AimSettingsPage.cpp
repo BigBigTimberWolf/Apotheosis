@@ -4,11 +4,13 @@
 
 #include <QCheckBox>
 #include <QDialog>
+#include <QDropEvent>
 #include <QProgressBar>
 #include <QTimer>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFrame>          // QFrame::NoFrame
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -16,8 +18,10 @@
 #include <QListWidget>
 #include <QListWidgetItem> // 显式包含, 不依赖 QListWidget 的传递包含
 #include <QMessageBox>     // 删除热键组的确认框
+#include <QMenu>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QShowEvent>      // showEvent 的参数类型
 #include <QSpinBox>
 #include <QSplitter>       // 左栏/右栏可拖动分隔（旧页的写法）
@@ -25,6 +29,8 @@
 #include <QWheelEvent>     // NoWheelSpinBox/NoWheelDoubleSpinBox 的 wheelEvent 参数类型
 
 #include <algorithm>
+#include <cmath>
+#include <functional>
 #include <iterator>   // std::size (开镜档的行表)
 #include <mutex>
 
@@ -32,10 +38,16 @@
 #include "config.h"
 #include "config/ConfigManager.h"
 #include "config/config_bridge.h"
+#include "macro/macro_config.h"
 #include "pages/TargetPage.h"    // setTargetPage(): 取 &TargetPage::classFiltersChanged 需要完整定义
 #include "runtime/config_snapshot.h"
+#include "keyboard/hotkey_blocking.h"
+#include "keyboard/hotkey_selection.h"
+#include "widgets/HotkeyActivationWidget.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
+#include "widgets/TriggerWorkflowEditor.h"
+#include "widgets/TriggerTargetEditor.h"
 #include "widgets/NeuralCurveTrainer.h"
 #include "widgets/ToggleSwitch.h"
 
@@ -68,6 +80,59 @@ protected:
         if (!hasFocus()) { e->ignore(); return; }
         QDoubleSpinBox::wheelEvent(e);
     }
+};
+
+class ReorderableHotkeyList final : public QListWidget
+{
+public:
+    using QListWidget::QListWidget;
+    std::function<void(int, int)> moveRequested;
+
+protected:
+    void startDrag(Qt::DropActions supportedActions) override
+    {
+        draggedRow_ = currentRow();
+        QListWidget::startDrag(supportedActions);
+        draggedRow_ = -1;
+    }
+
+    void dropEvent(QDropEvent* event) override
+    {
+        if (event->source() != this || !moveRequested) {
+            event->ignore();
+            return;
+        }
+        const int from = draggedRow_;
+        if (from < 0) {
+            event->ignore();
+            return;
+        }
+        const auto* target = itemAt(event->position().toPoint());
+        int insertion = target ? row(target) : count();
+        if (target && dropIndicatorPosition() == QAbstractItemView::BelowItem)
+            ++insertion;
+        if (!target) {
+            for (int rowIndex = 0; rowIndex < count(); ++rowIndex)
+                if (event->position().y() < visualItemRect(item(rowIndex)).center().y()) {
+                    insertion = rowIndex;
+                    break;
+                }
+        }
+        const int to = insertion > from ? insertion - 1 : insertion;
+        if (to == from || to < 0 || to >= count()) {
+            event->ignore();
+            return;
+        }
+        // Reorder the config ourselves. Reject Qt's model-level MoveAction so
+        // the drag source cannot also remove a row from the QListWidget.
+        event->ignore();
+        QTimer::singleShot(0, this, [this, from, to] {
+            if (moveRequested) moveRequested(from, to);
+        });
+    }
+
+private:
+    int draggedRow_ = -1;
 };
 
 struct KeyEntry { const char* id; const char* label; };
@@ -151,8 +216,7 @@ QWidget* AimSettingsPage::makeIntRow(const char* obj, const char* label, int lo,
 {
     std::vector<QSpinBox*>* sink = &m_ctlInts;
     const QString name = QString::fromUtf8(obj);
-    if (name.startsWith(QLatin1String("trigger")))      sink = &m_triggerInts;
-    else if (name.startsWith(QLatin1String("wind")) ||
+    if (name.startsWith(QLatin1String("wind")) ||
              name.startsWith(QLatin1String("aimPath"))) sink = &m_pathInts;
 
     auto* sp = new NoWheelSpinBox;
@@ -218,7 +282,7 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
     lay->setContentsMargins(12, 14, 6, 12);
     lay->setSpacing(8);
 
-    auto* groupLabel = new QLabel(QStringLiteral("热键组"));
+    auto* groupLabel = new QLabel(QStringLiteral("热键组（当前生效）"));
     groupLabel->setStyleSheet("color:#A1A1AA; font-size:11px; font-weight:500;");
     lay->addWidget(groupLabel);
 
@@ -256,13 +320,23 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
 
     auto* header = new QHBoxLayout;
     header->setContentsMargins(4, 6, 4, 0);
-    m_leftTitle = new QLabel(QStringLiteral("热键"));
+    m_leftTitle = new QLabel(QStringLiteral("热键 · 拖动排序"));
     m_leftTitle->setStyleSheet("color:#A1A1AA; font-size:11px; font-weight:500;");
+    m_leftTitle->setToolTip(QStringLiteral("相同按键使用已激活配置；不同按键同时按住时，下方优先，组合键优先。"));
     header->addWidget(m_leftTitle);
     header->addStretch();
     lay->addLayout(header);
 
-    m_profileList = new QListWidget;
+    auto* profileList = new ReorderableHotkeyList;
+    m_profileList = profileList;
+    profileList->setDragDropMode(QAbstractItemView::InternalMove);
+    profileList->setDefaultDropAction(Qt::MoveAction);
+    profileList->setDragEnabled(true);
+    profileList->setAcceptDrops(true);
+    profileList->setDropIndicatorShown(true);
+    profileList->moveRequested = [this](int from, int to) {
+        moveProfileInGroup(from, to);
+    };
     m_profileList->setContextMenuPolicy(Qt::CustomContextMenu);
     m_profileList->setFrameShape(QFrame::NoFrame);
     m_profileList->setStyleSheet(
@@ -272,8 +346,31 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
         "QListWidget::item:selected{background:#EEF0FC; border:1px solid #EEF0FC;}");
     lay->addWidget(m_profileList, 1);
 
+    m_profileList->setToolTip(m_leftTitle->toolTip());
+
     connect(m_profileList, &QListWidget::currentRowChanged,
             this, &AimSettingsPage::onProfileSelected);
+    connect(m_profileList, &QListWidget::customContextMenuRequested, this,
+            [this](const QPoint& pos) {
+        QMenu menu(this);
+        if (auto* item = m_profileList->itemAt(pos)) {
+            const int row = m_profileList->row(item);
+            auto* copy = menu.addAction(QStringLiteral("复制热键"));
+            auto* remove = menu.addAction(QStringLiteral("删除热键"));
+            const QAction* action = menu.exec(m_profileList->viewport()->mapToGlobal(pos));
+            if (!action) return;
+            m_profileList->setCurrentRow(row);
+            if (action == copy) onCopyProfile();
+            else if (action == remove) onDeleteProfile();
+        } else {
+            auto* paste = menu.addAction(QStringLiteral("粘贴热键"));
+            paste->setEnabled(static_cast<bool>(m_copiedProfile));
+            auto* add = menu.addAction(QStringLiteral("新增热键"));
+            const QAction* action = menu.exec(m_profileList->viewport()->mapToGlobal(pos));
+            if (action == paste) onPasteProfile();
+            else if (action == add) onAddProfile();
+        }
+    });
 
     auto* row = new QHBoxLayout;
     auto* addBtn = new QPushButton(QStringLiteral("+"));
@@ -308,9 +405,8 @@ void AimSettingsPage::buildRightPanel(QWidget* parent)
     buildAimClassCard();
     buildCrosshairCard();
     buildDynamicFovCard();
-    buildControllerCard();
+    buildRecoveredControllerCard();
     buildTriggerCard();
-    buildScopeCtlCard();
     buildTrajectoryCard();
 
     m_rightLayout->addStretch();
@@ -327,9 +423,73 @@ void AimSettingsPage::buildKeyBindCard()
     for (int i = 0; kKeyEntries[i].id; ++i)
         combo->addItem(QString::fromUtf8(kKeyEntries[i].label), QString::fromUtf8(kKeyEntries[i].id));
     combo->setObjectName("keyCombo");
-    cl->addWidget(FormKit::fieldRow(QStringLiteral("按住此键时瞄准生效"), combo));
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("主按键"), combo));
+    auto* chord = new QCheckBox(QStringLiteral("启用双键组合（两键同时按住才瞄准）"));
+    chord->setObjectName("keyChord");
+    cl->addWidget(chord);
+    auto* second = new QComboBox;
+    second->setObjectName("keyComboSecond");
+    second->addItem(QStringLiteral("请选择第二个按键"), QString());
+    for (int i = 1; kKeyEntries[i].id; ++i)
+        second->addItem(QString::fromUtf8(kKeyEntries[i].label), QString::fromUtf8(kKeyEntries[i].id));
+    for (const auto& key : macros::keys()) {
+        const QString id = QString::fromStdString(key.id);
+        second->addItem(QString::fromStdString(key.label), id);
+        combo->addItem(QString::fromStdString(key.label), id);
+    }
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("组合第二键"), second));
+    second->setEnabled(chord->isChecked());
+    auto* blockHotkey = new QCheckBox(QStringLiteral("屏蔽热键（仍触发瞄准，不传递原始按键）"));
+    blockHotkey->setObjectName("blockAimHotkey");
+    cl->addWidget(blockHotkey);
+    blockHotkey->setToolTip(QStringLiteral("按当前热键组生效，已接入所有输入方式。硬件屏蔽被控端的鼠标热键，Windows 原生屏蔽本机；MAKCU 自定义旧固件需更新。修改后请松开再按。"));
+    auto* blockStatus = makeHint(QString::fromUtf8(hotkey_blocking::status().c_str()));
+    cl->addWidget(blockStatus);
+    auto* blockTimer = new QTimer(card);
+    connect(blockTimer, &QTimer::timeout, card, [blockStatus] {
+        if (blockStatus->isVisible()) blockStatus->setText(QString::fromUtf8(hotkey_blocking::status().c_str()));
+    });
+    blockTimer->start(500);
+    connect(blockHotkey, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (ri < 0 || ri >= static_cast<int>(config.hotkeys.size())) return;
+            config.hotkeys[ri].block_hotkey = checked;
+        }
+        ConfigBridge::instance().markDirty();
+    });
 
-    connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, combo](int) {
+    m_activationWidget = new HotkeyActivationWidget(card);
+    cl->addWidget(m_activationWidget);
+    connect(m_activationWidget, &HotkeyActivationWidget::activateRequested, this, [this] {
+        const int index = currentRuntimeIndex();
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (!activateHotkey(config.hotkeys, index)) return;
+        }
+        ConfigBridge::instance().markDirty();
+        refreshActivation();
+    });
+    connect(m_activationWidget, &HotkeyActivationWidget::activationKeyChanged, this, [this](const QString& key) {
+        if (m_loading) return;
+        const int index = currentRuntimeIndex();
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (index < 0 || index >= static_cast<int>(config.hotkeys.size())) return;
+            config.hotkeys[index].activation_key = key.toStdString();
+        }
+        ConfigBridge::instance().markDirty();
+        refreshActivation();
+    });
+    auto* activationTimer = new QTimer(card);
+    connect(activationTimer, &QTimer::timeout, this, [this] {
+        if (isVisible()) refreshActivation();
+    });
+    activationTimer->start(200);
+
+    auto commitKeys = [this, combo, second, chord] {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
         if (ri < 0) return;
@@ -337,12 +497,26 @@ void AimSettingsPage::buildKeyBindCard()
             std::lock_guard<std::recursive_mutex> lk(configMutex);
             if (ri >= static_cast<int>(config.hotkeys.size())) return;
             const QString id = combo->currentData().toString();
+            const QString secondId = second->currentData().toString();
+            const bool validChord = chord->isChecked() && !id.isEmpty() &&
+                !secondId.isEmpty() && id != secondId;
             config.hotkeys[ri].keys.clear();
             if (!id.isEmpty())
                 config.hotkeys[ri].keys.push_back(id.toStdString());
+            if (validChord) config.hotkeys[ri].keys.push_back(secondId.toStdString());
+            config.hotkeys[ri].keys_chord = chord->isChecked();
+
         }
         ConfigBridge::instance().markDirty();
         rebuildProfileList();
+    };
+    connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [commitKeys](int) { commitKeys(); });
+    connect(second, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [commitKeys](int) { commitKeys(); });
+    connect(chord, &QCheckBox::toggled, this, [second, commitKeys](bool enabled) {
+        second->setEnabled(enabled);
+        commitKeys();
     });
 
     m_rightLayout->addWidget(card);
@@ -357,6 +531,39 @@ void AimSettingsPage::buildFovCard()
     auto* fy = new NoWheelSpinBox; fy->setRange(1, 4096); fy->setObjectName("fovY");
     cl->addWidget(FormKit::fieldRow(QStringLiteral("水平直径 (检测像素)"), fx));
     cl->addWidget(FormKit::fieldRow(QStringLiteral("垂直直径 (检测像素)"), fy));
+    auto* maskX = new QCheckBox(QStringLiteral("屏蔽 X 轴（屏蔽真实横向输入）"));
+    auto* maskY = new QCheckBox(QStringLiteral("屏蔽 Y 轴（屏蔽真实纵向输入）"));
+    maskX->setObjectName("maskX");
+    maskY->setObjectName("maskY");
+    cl->addWidget(maskX);
+    cl->addWidget(maskY);
+    auto* aimDelay = new NoWheelSpinBox;
+    aimDelay->setRange(0, 2000);
+    aimDelay->setSuffix(QStringLiteral(" ms"));
+    aimDelay->setObjectName("aimDelayMs");
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("延迟瞄准（识别到目标且按住热键后）"), aimDelay));
+    auto* unlockX = new QCheckBox(QStringLiteral("解锁 X 轴（程序不横向瞄准）"));
+    auto* unlockY = new QCheckBox(QStringLiteral("解锁 Y 轴（程序不纵向瞄准）"));
+    unlockX->setObjectName("unlockX");
+    unlockY->setObjectName("unlockY");
+    cl->addWidget(unlockX);
+    cl->addWidget(unlockY);
+    auto* unlockYDelay = new NoWheelSpinBox;
+    unlockYDelay->setRange(0, 5000);
+    unlockYDelay->setSuffix(QStringLiteral(" ms"));
+    unlockYDelay->setObjectName("unlockYDelayMs");
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("解锁 Y 延迟（目标与热键同时生效后）"), unlockYDelay));
+    const QString axisHelp = QStringLiteral("屏蔽轴：有有效目标并开始瞄准时才拦截真实鼠标输入；丢失目标、松键或等待延迟期间解除。解锁轴：程序不控制该轴。延迟设为 0 即立即瞄准。");
+    unlockX->setToolTip(axisHelp);
+    unlockY->setToolTip(axisHelp);
+    unlockYDelay->setToolTip(axisHelp);
+    auto* axisStatus = makeHint(QString());
+    cl->addWidget(axisStatus);
+    auto* axisTimer = new QTimer(card);
+    connect(axisTimer, &QTimer::timeout, axisStatus, [axisStatus] {
+        axisStatus->setText(QString::fromUtf8(hotkey_blocking::axisStatus().c_str()));
+    });
+    axisTimer->start(300);
 
     auto commit = [this]() {
         if (m_loading) return;
@@ -366,10 +573,22 @@ void AimSettingsPage::buildFovCard()
         if (ri >= static_cast<int>(config.hotkeys.size())) return;
         config.hotkeys[ri].fovX = findChild<QSpinBox*>("fovX")->value();
         config.hotkeys[ri].fovY = findChild<QSpinBox*>("fovY")->value();
+        config.hotkeys[ri].mask_x = findChild<QCheckBox*>("maskX")->isChecked();
+        config.hotkeys[ri].mask_y = findChild<QCheckBox*>("maskY")->isChecked();
+        config.hotkeys[ri].unlock_x = findChild<QCheckBox*>("unlockX")->isChecked();
+        config.hotkeys[ri].unlock_y = findChild<QCheckBox*>("unlockY")->isChecked();
+        config.hotkeys[ri].unlock_y_delay_ms = findChild<QSpinBox*>("unlockYDelayMs")->value();
+        config.hotkeys[ri].aim_delay_ms = findChild<QSpinBox*>("aimDelayMs")->value();
         ConfigBridge::instance().markDirty();
     };
     connect(fx, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
     connect(fy, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
+    connect(maskX, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    connect(maskY, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    connect(unlockX, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    connect(unlockY, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    connect(unlockYDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
+    connect(aimDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
 
     m_rightLayout->addWidget(card);
 }
@@ -467,7 +686,7 @@ void AimSettingsPage::rebuildAimClassRows()
         delete it;
     }
 
-    struct Row { int cid; float yMin; float yMax; float c; QString name; };
+    struct Row { int cid; float yMin; float yMax; float xMin; float xMax; float c; QString name; };
     std::vector<Row> rows;
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
@@ -480,7 +699,8 @@ void AimSettingsPage::rebuildAimClassRows()
                 for (const auto& cf : config.class_filters)
                     if (cf.class_id == ac.class_id && !cf.class_name.empty())
                     { name = QString::fromUtf8(cf.class_name.c_str()); break; }
-                rows.push_back({ ac.class_id, ac.y_offset, ac.y_offset_max, ac.min_conf, name });
+                rows.push_back({ ac.class_id, ac.y_offset, ac.y_offset_max,
+                                 ac.x_offset, ac.x_offset_max, ac.min_conf, name });
             }
         }
     }
@@ -582,7 +802,7 @@ void AimSettingsPage::rebuildAimClassRows()
             u8"范围下限：1=框顶，0.5=中心，0=框底。\n"
             u8"★ 该类的值会覆盖「控制器」卡里的热键级瞄点 Y（只在设了该类时）。"));
         yMaxSpin->setToolTip(QString::fromUtf8(
-            u8"范围上限：每次新锁定在上下限之间随机一次。\n"
+            u8"范围上限：每次新锁定在上下限之间随机一次，同一目标持续锁定时保持该比例。\n"
             u8"★ 等于下限时不随机（固定打同一个点）。"));
         rangeRow->addWidget(yLbl);
         rangeRow->addWidget(yMinSpin);
@@ -590,6 +810,23 @@ void AimSettingsPage::rebuildAimClassRows()
         rangeRow->addWidget(yMaxSpin);
         rangeRow->addStretch();
         rl->addLayout(rangeRow);
+
+        auto* xRangeRow = new QHBoxLayout;
+        xRangeRow->setSpacing(8);
+        auto* xLbl = new QLabel(QString::fromUtf8(u8"随机锁点 X"));
+        xLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        auto* xMinSpin = makeOffsetSpin(r.xMin);
+        auto* xMaxSpin = makeOffsetSpin(r.xMax);
+        xMinSpin->setToolTip(QString::fromUtf8(
+            u8"范围下限：0=框左，0.5=中心，1=框右。"));
+        xMaxSpin->setToolTip(QString::fromUtf8(
+            u8"范围上限：等于下限时固定；不同则在每次新锁定时随机一次，同一目标持续锁定时保持该比例。"));
+        xRangeRow->addWidget(xLbl);
+        xRangeRow->addWidget(xMinSpin);
+        xRangeRow->addWidget(new QLabel(QString::fromUtf8(u8"—")));
+        xRangeRow->addWidget(xMaxSpin);
+        xRangeRow->addStretch();
+        rl->addLayout(xRangeRow);
 
         auto* cSlider = new QSlider(Qt::Horizontal);
         cSlider->setRange(0, 100);
@@ -617,12 +854,15 @@ void AimSettingsPage::rebuildAimClassRows()
 
         m_aimClassLayout->addWidget(rowFrame);
 
-        auto persistRange = [this, classId, yMinSpin, yMaxSpin](bool minChanged) {
+        auto persistRange = [this, classId, yMinSpin, yMaxSpin, xMinSpin, xMaxSpin]
+                            (bool xAxis, bool minChanged) {
             if (m_loading) return;
-            if (minChanged && yMinSpin->value() > yMaxSpin->value())
-                yMaxSpin->setValue(yMinSpin->value());
-            else if (!minChanged && yMaxSpin->value() < yMinSpin->value())
-                yMinSpin->setValue(yMaxSpin->value());
+            auto* lo = xAxis ? xMinSpin : yMinSpin;
+            auto* hi = xAxis ? xMaxSpin : yMaxSpin;
+            if (minChanged && lo->value() > hi->value())
+                hi->setValue(lo->value());
+            else if (!minChanged && hi->value() < lo->value())
+                lo->setValue(hi->value());
 
             const int ri2 = currentRuntimeIndex();
             if (ri2 < 0) return;
@@ -634,15 +874,21 @@ void AimSettingsPage::rebuildAimClassRows()
                     {
                         a.y_offset = static_cast<float>(yMinSpin->value());
                         a.y_offset_max = static_cast<float>(yMaxSpin->value());
+                        a.x_offset = static_cast<float>(xMinSpin->value());
+                        a.x_offset_max = static_cast<float>(xMaxSpin->value());
                         break;
                     }
             }
             ConfigBridge::instance().markDirty();
         };
         connect(yMinSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                this, [persistRange](double) { persistRange(true); });
+                this, [persistRange](double) { persistRange(false, true); });
         connect(yMaxSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                this, [persistRange](double) { persistRange(false); });
+                this, [persistRange](double) { persistRange(false, false); });
+        connect(xMinSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [persistRange](double) { persistRange(true, true); });
+        connect(xMaxSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [persistRange](double) { persistRange(true, false); });
 
         connect(cSlider, &QSlider::valueChanged, this,
                 [this, classId, cVal, confText](int raw) {
@@ -685,24 +931,31 @@ void AimSettingsPage::rebuildAimClassRows()
 
 void AimSettingsPage::buildCrosshairCard()
 {
-    auto* card = new CardWidget(QStringLiteral("准星找色"), QStringLiteral("crosshair"));
+    auto* card = new CardWidget(QStringLiteral("瞄准方式"), QStringLiteral("crosshair"));
     auto* cl = card->contentLayout();
+    auto* mode = new QComboBox;
+    mode->setObjectName("aimMode");
+    mode->addItem(QStringLiteral("画面中心"));
+    mode->addItem(QStringLiteral("瞄点压枪"));
+    mode->addItem(QStringLiteral("镭射找色"));
+    mode->addItem(QStringLiteral("准星找色"));
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("当前热键使用"), mode));
+    mode->setToolTip(QStringLiteral(
+        "为当前已有热键选择瞄准方式。三种功能互斥。瞄点压枪在热键与开火键同时按住时逐渐下移目标瞄点；"
+        "找色模式使用检测到的准星或镭射位置，失效时退回画面中心。"
+        "速度与最大偏移在左侧「瞄点压枪」页设置。"));
 
-    auto* chk = new QCheckBox(QStringLiteral("启用找色（用检测到的准星位置代替画面中心）"));
-    chk->setObjectName("crosshairChk");
-    chk->setToolTip(QString::fromUtf8(
-        u8"★ 关：准星 = 画面中心（静态常量）。\n"
-        u8"★ 开：用找色结果；找色失效时【退回画面中心】并跳过本拍控制。"));
-    cl->addWidget(chk);
-
-    connect(chk, &QCheckBox::toggled, this, [this](bool v) {
+    connect(mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
         if (ri < 0) return;
         {
             std::lock_guard<std::recursive_mutex> lk(configMutex);
             if (ri >= static_cast<int>(config.hotkeys.size())) return;
-            config.hotkeys[ri].crosshair_detect_enabled = v;
+            auto& hk = config.hotkeys[ri];
+            hk.aimpoint_recoil_enabled = index == 1;
+            hk.laser_detect_enabled = index == 2;
+            hk.crosshair_detect_enabled = index == 3;
         }
         ConfigBridge::instance().markDirty();
     });
@@ -719,12 +972,55 @@ void AimSettingsPage::buildDynamicFovCard()
     chk->setObjectName("dynFovChk");
     cl->addWidget(chk);
 
-    auto* spin = new NoWheelDoubleSpinBox;
-    spin->setRange(0.0, 1.0);
-    spin->setSingleStep(0.05);
-    spin->setDecimals(2);
-    spin->setObjectName("dynFovStrength");
-    cl->addWidget(FormKit::fieldRow(QStringLiteral("收敛强度 (0=不收缩, 1=紧贴目标框)"), spin));
+    auto* spin = new NoWheelSpinBox;
+    spin->setRange(1, 4096);
+    spin->setSingleStep(5);
+    spin->setSuffix(QStringLiteral(" px"));
+    spin->setObjectName("dynFovSize");
+    spin->setToolTip(QStringLiteral("追近后的 FOV 直径，单位为检测像素。每轴不超过原 FOV；尚未追近目标时会临时保留额外空间，避免卡圈边。"));
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("缩小后的 FOV 大小（直径）"), spin));
+    auto* shrink = new NoWheelSpinBox;
+    shrink->setObjectName("dynFovShrinkMs");
+    shrink->setRange(0, 2000);
+    shrink->setSingleStep(25);
+    shrink->setSuffix(QStringLiteral(" ms"));
+    shrink->setToolTip(QStringLiteral("数值越小缩小越快，0 为立即缩小。目标距离固定时，约在此时间内完成 95% 的缩小；尚未追近时会保留空间。"));
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("缩小时间"), shrink));
+    auto* expand = new NoWheelSpinBox;
+    expand->setObjectName("dynFovExpandMs");
+    expand->setRange(0, 2000);
+    expand->setSingleStep(25);
+    expand->setSuffix(QStringLiteral(" ms"));
+    expand->setToolTip(QStringLiteral("目标拉远或丢失后放大 FOV 的时间，约完成 95% 的放大；0 为立即放大。松开瞄准键或切换配置时直接恢复原 FOV。"));
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("放大时间"), expand));
+    spin->setEnabled(chk->isChecked());
+    shrink->setEnabled(chk->isChecked());
+    expand->setEnabled(chk->isChecked());
+    connect(chk, &QCheckBox::toggled, spin, &QWidget::setEnabled);
+    connect(chk, &QCheckBox::toggled, shrink, &QWidget::setEnabled);
+    connect(chk, &QCheckBox::toggled, expand, &QWidget::setEnabled);
+    connect(expand, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        if (ri < 0) return;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (ri >= static_cast<int>(config.hotkeys.size())) return;
+            config.hotkeys[ri].dynamic_fov_expand_ms = value;
+        }
+        ConfigBridge::instance().markDirty();
+    });
+    connect(shrink, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        if (ri < 0) return;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (ri >= static_cast<int>(config.hotkeys.size())) return;
+            config.hotkeys[ri].dynamic_fov_shrink_ms = value;
+        }
+        ConfigBridge::instance().markDirty();
+    });
 
     connect(chk, &QCheckBox::toggled, this, [this](bool v) {
         if (m_loading) return;
@@ -737,18 +1033,171 @@ void AimSettingsPage::buildDynamicFovCard()
         }
         ConfigBridge::instance().markDirty();
     });
-    connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
+    connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
         if (ri < 0) return;
         {
             std::lock_guard<std::recursive_mutex> lk(configMutex);
             if (ri >= static_cast<int>(config.hotkeys.size())) return;
-            config.hotkeys[ri].dynamic_fov_strength = static_cast<float>(v);
+            config.hotkeys[ri].dynamic_fov_size = v;
         }
         ConfigBridge::instance().markDirty();
     });
 
+    m_rightLayout->addWidget(card);
+}
+
+void AimSettingsPage::buildRecoveredControllerCard()
+{
+    auto* card = new CardWidget(QString::fromUtf8(u8"瞄准控制器"),
+                                QStringLiteral("adjustments"));
+    auto* layout = card->contentLayout();
+    auto* enabled = new QCheckBox(QString::fromUtf8(u8"启用瞄准移动"));
+    enabled->setObjectName("ctlEnabled");
+    layout->addWidget(enabled);
+    auto* advancedButton = new QPushButton(QString::fromUtf8(u8"开镜独立参数…"));
+    advancedButton->setCursor(Qt::PointingHandCursor);
+    layout->addWidget(advancedButton);
+    auto* dialog = new QDialog(this);
+    dialog->setWindowTitle(QString::fromUtf8(u8"瞄准控制器 · 开镜独立参数"));
+    dialog->resize(760, 650);
+    auto* dialogRoot = new QVBoxLayout(dialog);
+    auto* scroll = new QScrollArea(dialog);
+    scroll->setWidgetResizable(true);
+    auto* dialogContent = new QWidget(scroll);
+    auto* extraLayout = new QVBoxLayout(dialogContent);
+    extraLayout->setSpacing(12);
+    scroll->setWidget(dialogContent);
+    dialogRoot->addWidget(scroll);
+    auto* closeButton = new QPushButton(QString::fromUtf8(u8"完成"), dialog);
+    dialogRoot->addWidget(closeButton, 0, Qt::AlignRight);
+    connect(closeButton, &QPushButton::clicked, dialog, &QDialog::accept);
+    connect(advancedButton, &QPushButton::clicked, dialog, [dialog] { dialog->open(); });
+
+    auto* scopeCtlCombo = new QComboBox(dialogContent);
+    scopeCtlCombo->setObjectName("scopeCtlMode");
+    scopeCtlCombo->addItem(QString::fromUtf8(u8"关闭：跟随当前参数"), 0);
+    scopeCtlCombo->addItem(QString::fromUtf8(u8"自动开镜时使用独立参数"), 1);
+    extraLayout->addWidget(FormKit::fieldRow(QString::fromUtf8(u8"开镜独立参数"), scopeCtlCombo));
+    m_scopeModeCombo = scopeCtlCombo;
+
+    struct Row { const char* suffix; const char* label; double minimum; double maximum; double step; double value; };
+    const Row xRows[] = {
+        { "KpX", "比例 Kp", 0.0, 10.0, 0.01, 0.4 },
+        { "KiX", "积分 Ki", 0.0, 10.0, 0.01, 0.02 },
+        { "KdX", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
+        { "FfX", "速度前馈", 0.0, 10.0, 0.0005, 0.0 },
+        { "DeadzoneX", "死区半径", 0.0, 200.0, 0.5, 5.0 },
+        { "FollowX", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
+    };
+    const Row yRows[] = {
+        { "KpY", "比例 Kp", 0.0, 10.0, 0.01, 0.4 },
+        { "KiY", "积分 Ki", 0.0, 10.0, 0.01, 0.02 },
+        { "KdY", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
+        { "FfY", "速度前馈", 0.0, 10.0, 0.0005, 0.0 },
+        { "DeadzoneY", "死区半径", 0.0, 200.0, 0.5, 5.0 },
+        { "FollowY", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
+    };
+
+    auto addSet = [&](QVBoxLayout* targetLayout, const QString& prefix, const QString& title) {
+        targetLayout->addWidget(makeSectionTitle(title));
+        auto* grid = new QGridLayout;
+        grid->setHorizontalSpacing(16);
+        grid->setVerticalSpacing(8);
+        grid->setColumnStretch(0, 1);
+        grid->setColumnStretch(1, 1);
+        grid->addWidget(makeSectionTitle(QString::fromUtf8(u8"横向 X")), 0, 0);
+        grid->addWidget(makeSectionTitle(QString::fromUtf8(u8"纵向 Y")), 0, 1);
+
+        auto addNumeric = [&](const Row& row, int line, int column) {
+            auto* spin = new NoWheelDoubleSpinBox;
+            spin->setObjectName(prefix + QString::fromLatin1(row.suffix));
+            spin->setRange(row.minimum, row.maximum);
+            spin->setSingleStep(row.step);
+            const QString suffix = QString::fromLatin1(row.suffix);
+            spin->setDecimals(suffix == QStringLiteral("FfX") ||
+                              suffix == QStringLiteral("FfY") ? 4 : 3);
+            spin->setValue(row.value);
+            if (suffix == QStringLiteral("FollowX") || suffix == QStringLiteral("FollowY"))
+                spin->setToolTip(QString::fromUtf8(u8"补偿跟随时持续存在的偏差。确认起步、变向或明显加速后，会短暂加快建立，再恢复正常微调。0 关闭；数值越大补偿建立越快，过大仍可能过冲。这是跟随补偿强度，不是提前帧数。"));
+            grid->addWidget(FormKit::fieldRow(QString::fromUtf8(row.label), spin), line, column);
+        };
+        for (int i = 0; i < static_cast<int>(std::size(xRows)); ++i)
+        {
+            addNumeric(xRows[i], i + 1, 0);
+            addNumeric(yRows[i], i + 1, 1);
+        }
+
+        grid->addWidget(makeSectionTitle(QString::fromUtf8(u8"功能与输出")), 7, 0, 1, 2);
+        addNumeric({ "MaxPixel", "单帧限幅", 0.0, 1000.0, 1.0, 50.0 }, 8, 0);
+        addNumeric({ "Segment", "分段数", 1.0, 10.0, 0.1, 3.0 }, 8, 1);
+        auto* check = new QCheckBox(QString::fromUtf8(u8"启用自定义分段数（关闭时除以 3）"));
+        check->setObjectName(prefix + "SegmentEnabled");
+        grid->addWidget(check, 9, 0, 1, 2);
+        targetLayout->addLayout(grid);
+    };
+    addSet(layout, "recovered", QString::fromUtf8(u8"默认参数"));
+    addSet(extraLayout, "recoveredScope", QString::fromUtf8(u8"开镜独立参数"));
+
+    auto commit = [this, enabled, scopeCtlCombo]() {
+        if (m_loading) return;
+        const int index = currentRuntimeIndex();
+        if (index < 0) return;
+        auto read = [this](const QString& name) -> float {
+            auto* spin = findChild<QDoubleSpinBox*>(name);
+            return spin ? static_cast<float>(spin->value()) : 0.0f;
+        };
+        auto collect = [&](const QString& prefix) {
+            control::RecoveredPidConfig pid;
+            pid.kpX = read(prefix + "KpX"); pid.kiX = read(prefix + "KiX");
+            pid.kdX = read(prefix + "KdX"); pid.feedforwardX = read(prefix + "FfX");
+            pid.deadzoneX = read(prefix + "DeadzoneX");
+            pid.kpY = read(prefix + "KpY"); pid.kiY = read(prefix + "KiY");
+            pid.kdY = read(prefix + "KdY"); pid.feedforwardY = read(prefix + "FfY");
+            pid.deadzoneY = read(prefix + "DeadzoneY");
+            pid.smoothMaxPixel = read(prefix + "MaxPixel");
+            pid.followX = read(prefix + "FollowX");
+            pid.followY = read(prefix + "FollowY");
+            pid.segment = read(prefix + "Segment");
+            if (auto* check = findChild<QCheckBox*>(prefix + "SegmentEnabled"))
+                pid.segmentEnabled = check->isChecked();
+            return pid;
+        };
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (index >= static_cast<int>(config.hotkeys.size())) return;
+            auto& hotkey = config.hotkeys[index];
+            hotkey.ctl_enabled = enabled->isChecked();
+            hotkey.recovered_pid = collect("recovered");
+            hotkey.recovered_scope_pid = collect("recoveredScope");
+            hotkey.scope_ctl_enabled = scopeCtlCombo->currentData().toInt();
+        }
+        ConfigBridge::instance().markDirty();
+    };
+    connect(enabled, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    for (auto* spin : card->findChildren<QDoubleSpinBox*>())
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [commit](double) { commit(); });
+    for (auto* check : card->findChildren<QCheckBox*>())
+        if (check != enabled)
+            connect(check, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    for (auto* spin : dialog->findChildren<QDoubleSpinBox*>())
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [commit](double) { commit(); });
+    for (auto* check : dialog->findChildren<QCheckBox*>())
+    {
+        connect(check, &QCheckBox::toggled, this, [commit](bool) { commit(); });
+    }
+    for (auto* combo : card->findChildren<QComboBox*>())
+        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [commit](int) { commit(); });
+    for (auto* combo : dialog->findChildren<QComboBox*>())
+        if (combo != scopeCtlCombo)
+            connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    this, [commit](int) { commit(); });
+    connect(scopeCtlCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [commit](int) { commit(); });
     m_rightLayout->addWidget(card);
 }
 
@@ -816,9 +1265,9 @@ void AimSettingsPage::buildControllerCard()
         "★ 调小 = 更安全但更慢；调大 = 甩枪更猛，但错的时候也更猛。\n"
         "★ 第一次打开控制器建议先设小一点。")));
     cl->addWidget(makeIntRow("ctlRandomSeed", "瞄点随机种子 (0=固定)", 0, 999999, 1, 0,
-        QString::fromUtf8(u8"瞄点 Y 随机抖动的种子。0 = 用内部固定常数（同一帧可复现）。\n"
+        QString::fromUtf8(u8"瞄点 X/Y 随机位置的种子。0 = 用内部固定常数（相同锁定起始序号可复现）。\n"
         "★ 非 0 时每次启动都会得到不同的抖动序列。\n"
-        "★ 只在「瞄准类别」里某一类的『随机锁点 Y』上下限【不相等】时才有意义。")));
+        "★ 只在「瞄准类别」里某一类的随机锁点上下限【不相等】时才有意义。")));
 
     // ── 灵敏度折算系数 k（修正预测吃到的速度）──────────────────────────────
     {
@@ -878,7 +1327,7 @@ void AimSettingsPage::buildControllerCard()
     cl->addWidget(makeDoubleRowTip("ctlPredictLeadMs",
         "预测提前时间 (毫秒, 0=关闭)", 0.0, 1000.0, 1.0, 0.0,
         QString::fromUtf8(
-        u8"【总开关】预测提前时间（毫秒）= 整条链路的【全部延迟】。\n"
+        u8"【总开关】预测提前帧数（0 关闭）= 整条链路的【全部延迟】。\n"
         u8"由你自己测量后填入，把采集 / 推理 / 瞄准 / 下发 / 游戏渲染\n"
         u8"全部算在这一个值里。\n"
         u8"★ 只用这一个来源，程序不会再自动往里加任何东西 ——\n"
@@ -997,14 +1446,13 @@ void AimSettingsPage::showSensitivityCalibrateDialog(QDoubleSpinBox* spinK)
 
     auto* layout = new QVBoxLayout(dlg);
 
-    auto* guide = new QLabel(QString::fromUtf8(
+    const QString guide = QString::fromUtf8(
         u8"<b>测算指引：</b><br>"
         u8"1. 在游戏训练场中，将准星对准一个<b>静止的假人 / 靶子</b>。<br>"
         u8"2. 点击下方的「开始采集」。<br>"
         u8"3. 按住热键，<b>左右甩动鼠标 2 ~ 3 次</b>（产生画面目标相对位移）。<br>"
-        u8"4. 进度条跑满并出现计算结果后，点击「应用回填」即可！"));
-    guide->setWordWrap(true);
-    layout->addWidget(guide);
+        u8"4. 进度条跑满并出现计算结果后，点击「应用回填」即可！");
+    dlg->setToolTip(guide);
 
     auto* statusLbl = new QLabel(QString::fromUtf8(u8"状态：等待开始..."));
     statusLbl->setStyleSheet("font-weight: bold; color: #4da3ff; margin-top: 8px;");
@@ -1024,6 +1472,7 @@ void AimSettingsPage::showSensitivityCalibrateDialog(QDoubleSpinBox* spinK)
     hl->setContentsMargins(0, 0, 0, 0);
 
     auto* btnToggle = new QPushButton(QString::fromUtf8(u8"开始采集"));
+    btnToggle->setToolTip(guide);
     btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
 
     auto* btnApply = new QPushButton(QString::fromUtf8(u8"应用回填"));
@@ -1098,178 +1547,40 @@ void AimSettingsPage::showSensitivityCalibrateDialog(QDoubleSpinBox* spinK)
 
 void AimSettingsPage::buildTriggerCard()
 {
-    auto* card = new CardWidget(QString::fromUtf8(u8"自动扳机"),
+    auto* card = new CardWidget(QString::fromUtf8(u8"自动扳机流程"),
                                 QStringLiteral("crosshair"));
-    auto* cl = card->contentLayout();
-
-    auto* enable = new QCheckBox(QStringLiteral("启用自动扳机（准星进入命中区就开火）"));
-    enable->setObjectName("triggerEnabled");
-    cl->addWidget(enable);
-    attachTip(enable, QString::fromUtf8(
-        u8"总开关。关着的时候不会碰左键，也不会碰右键。\n"
-        u8"★ 命中区 = 以【检测框】为基准的一个区间，与瞄点无关。\n"
-        u8"★ 打开后本程序会真的开火 —— 请先确认瞄准控制器已经调好。"));
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"开火时机")));
-    cl->addWidget(makeIntRow("triggerYPercent", "命中区占框的百分比 (%)", 10, 300, 5, 100,
-        QString::fromUtf8(u8"命中区的高度 = 框高 × 该百分比，宽度同理（等比）。\n"
-        u8"★ 100 = 整框；>100 = 框上方也算（预开火，会打得更早）；\n"
-        u8"  <100 = 只有框中间一条算（更严格的「打到才开火」）。\n"
-        u8"★ 这个区间同时管横向和纵向，所以它是一个正方形比例。")));
-    cl->addWidget(makeIntRow("triggerFireDelay", "进区后延迟开火 (ms)", 0, 2000, 5, 0,
-        QString::fromUtf8(u8"进入命中区之后等这么多毫秒才按下左键。\n"
-        u8"★ 0 = 进区那一拍立刻开火（机械级瞬发）。\n"
-        u8"★ 想「停稳了再开枪」就调大它 —— 配合自动急停一起用。")));
-    cl->addWidget(makeIntRow("triggerFireDuration", "单次按住时长 (ms, 0=长按)", 0, 2000, 5, 0,
-        QString::fromUtf8(u8"连点模式下，每发按住左键多久。\n"
-        u8"★ 0 = 长按模式：只要还在命中区就一直按着，离开才松手。\n"
-        u8"★ 非 0 = 连点模式：按住这么久就松开，然后走一次冷却间隔。")));
-    cl->addWidget(makeIntRow("triggerFireInterval", "连点冷却间隔 (ms)", 1, 2000, 5, 200,
-        QString::fromUtf8(u8"两发之间的冷却。\n"
-        u8"★ 连点模式：松开左键后等这么久才能再开火。\n"
-        u8"★ 长按模式：离开命中区松手后等这么久。\n"
-        u8"★ 不要设成 0 —— 那会在命中区里退化成每拍 press/release 的抖动。")));
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"抖动（破除机械感）")));
-    cl->addWidget(makeIntRow("triggerDelayJitter", "开火延迟 ±抖动 (ms)", 0, 500, 1, 0,
-        QString::fromUtf8(u8"给「进区后延迟开火」加一个 ±N ms 的随机抖动，\n"
-        u8"让每枪的节奏不完全一致。0 = 不抖动。"))) ;
-    cl->addWidget(makeIntRow("triggerDurationJitter", "按住时长 ±抖动 (ms)", 0, 500, 1, 0,
-        QString::fromUtf8(u8"给「单次按住时长」加 ±N ms 随机抖动。0 = 不抖动。"))) ;
-    cl->addWidget(makeIntRow("triggerIntervalJitter", "冷却间隔 ±抖动 (ms)", 0, 500, 1, 0,
-        QString::fromUtf8(u8"给「连点冷却间隔」加 ±N ms 随机抖动。0 = 不抖动。"))) ;
-    cl->addWidget(makeIntRow("triggerSwitchCooldown", "换目标冷却 (ms)", 0, 2000, 5, 0,
-        QString::fromUtf8(u8"目标身份变化后，等这么久才允许再次开火。\n"
-        u8"★ 0 = 不冷却，换目标立刻可以打。\n"
-        u8"★ 只在「换目标且当前不在命中区」时生效 —— 转火后新目标就在准星上时\n"
-        u8"  会立刻接力开火，不会为了冷却卡一下。")));
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"自动开镜")));
-    auto* scopeCombo = new QComboBox;
-    scopeCombo->setObjectName("triggerAutoScope");
-    scopeCombo->addItem(QStringLiteral("关闭"), 0);
-    scopeCombo->addItem(QStringLiteral("点按右键一下（不收镜）"), 1);
-    scopeCombo->addItem(QStringLiteral("长按右键（按住开镜）"), 2);
-    auto* scopeRow = FormKit::fieldRow(QStringLiteral("开火方式"), scopeCombo);
-    attachTip(scopeRow, QString::fromUtf8(
-        u8"仿 AimMagic 的「开火方式」。\n"
-        u8"★ 点按：每次接敌开始时点一下右键，之后就不再碰它 —— 不自动收镜，\n"
-        u8"  开镜状态由你自己负责（实机反馈：自动收镜会和你的操作打架）。\n"
-        u8"★ 长按：命中区里一直按住，离开时松开。\n"
-        u8"★ 如果你的热键本身绑了右键，这一项一律不生效（否则会把镜切回去）。"));
-    cl->addWidget(scopeRow);
-
-    cl->addWidget(makeIntRow("triggerScopeDelay", "开镜后等多久才开火 (ms)", 0, 2000, 5, 0,
-        QString::fromUtf8(u8"按下右键之后等这么多毫秒才允许开左键 ——\n"
-        u8"保证第一颗子弹是【开着镜】打出去的。\n"
-        u8"★ 0 = 不等（同一拍就开火，可能第一枪还没进镜）。\n"
-        u8"★ 本项目有意与 AimMagic 不同：AM 是同一拍先左键再右键，\n"
-        u8"  那第一枪其实没开镜。")));
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"开镜后的瞄准参数")));
-    auto* scopeCtlCombo = new QComboBox;
-    scopeCtlCombo->setObjectName("scopeCtlMode");
-    scopeCtlCombo->addItem(QStringLiteral("跟随热键（开镜前后同一套参数）"), 0);
-    scopeCtlCombo->addItem(QStringLiteral("用「开镜独立瞄准参数」那一套"), 1);
-    auto* scopeCtlRow = FormKit::fieldRow(QStringLiteral("开镜期间"), scopeCtlCombo);
-    attachTip(scopeCtlRow, QString::fromUtf8(
-        u8"自动开镜真的按下右键之后, 只要你还按着热键, 瞄准控制器就改用"
-        u8"「开镜独立瞄准参数」卡里的【整组参数】; 松开热键后切回热键自己的那套。\n"
-        u8"★ 长按开镜: 离开命中区会自动收镜 ⇒ 那一刻就切回(镜都收了, 参数也该回去)。\n"
-        u8"★ 点按开镜(不收镜): 镜头一直开着 ⇒ 一直粘到松开热键为止。\n"
-        u8"★ 为什么需要它: 开镜后游戏内灵敏度被【倍率】放大 —— 镜前调好的增益\n"
-        u8"  直接用在镜内必然过冲。瞬狙时「镜前一甩、进镜就飞」就是这个原因。\n"
-        u8"★ 跟随热键(默认) = 逐拍与没有这个功能时完全一致。\n"
-        u8"★ 热键本身绑了右键时本项不生效(自动开镜那时根本不会按下右键)。"));
-    cl->addWidget(scopeCtlRow);
-    m_scopeModeCombo = scopeCtlCombo;
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"自动急停")));
-    auto* stopCombo = new QComboBox;
-    stopCombo->setObjectName("triggerAutoStop");
-    stopCombo->addItem(QStringLiteral("关闭"), 0);
-    stopCombo->addItem(QStringLiteral("开启（开火时屏蔽真实键盘）"), 1);
-    auto* stopRow = FormKit::fieldRow(QStringLiteral("开关"), stopCombo);
-    attachTip(stopRow, QString::fromUtf8(
-        u8"开火那一拍，把【真实键盘输入】整段屏蔽掉一段时间。\n"
-        u8"屏蔽期间你按的 W/A/S/D 不会进入被控机，角色凭游戏自身的停止行为停住，\n"
-        u8"不注入任何按键 —— 没有任何残余反向位移，也不干扰你的真实操作。\n"
-        u8"★ 只从【接键盘那台硬件】下发屏蔽命令，绝不落到鼠标硬件上，\n"
-        u8"  否则会连带把真实鼠标输入一起屏蔽。\n"
-        u8"★ 需要接键盘硬件（MAKCU + 键盘板 / MAKCUNEW / KMBOXNET）；\n"
-        u8"  没接的输入方式自动跳过，不影响鼠标的任何行为。"));
-    cl->addWidget(stopRow);
-
-    cl->addWidget(makeIntRow("triggerStopMs", "急停屏蔽键盘时长 (ms)", 20, 300, 5, 60,
-        QString::fromUtf8(u8"屏蔽真实键盘多久。\n"
-        u8"★ 固件侧带硬超时自解除 —— 就算上位机崩了，时间一到输入也会自己回来。\n"
-        u8"★ 太短：停不下来；太长：屏蔽期间你会觉得键盘没反应。范围 20~300。")));
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"开火后切枪")));
-    auto* switch31Enable = new QCheckBox(QString::fromUtf8(u8"开火后按 3 → 1 切枪"));
-    switch31Enable->setObjectName("triggerWeaponSwitch31");
-    cl->addWidget(switch31Enable);
-    attachTip(switch31Enable, QString::fromUtf8(
-        u8"每次自动扳机开火并松开左键后，只执行一次 3 → 1。\n"
-        u8"★ 即使「单次按住时长」为 0（原本长按），开启切枪后也会改成至少 20ms 的单次开火。\n"
-        u8"★ 需要已连接且支持键盘注入的设备；没有键盘设备时保持原来的开火行为。\n"
-        u8"★ 切枪期间暂停瞄准移动和自动扳机，切回 1 后才允许下一发。默认关闭。"));
-    cl->addWidget(makeIntRow("triggerSwitch31DelayMs", "开火后等待 (ms)", 0, 2000, 5, 50,
-        QString::fromUtf8(u8"左键松开后等多久才开始按 3；Lua 的 Q 延迟默认 50ms。")));
-    cl->addWidget(makeIntRow("triggerSwitch31StepMs", "按键时长/间隔 (ms)", 5, 100, 1, 20,
-        QString::fromUtf8(u8"按住 3、松开后的间隔、按住 1 都使用这个时长；Lua 默认 20ms。范围 5～100ms。")));
-
-    card->setToolTip(QString::fromUtf8(
-        u8"★ 扳机用的是【以框为基准】的命中区，和瞄点解耦 —— 换瞄点（胸口/头部）"
-        u8"不会改变触发几何。\n"
-        u8"★ 判定输入是【原始准星】，不是平滑过的值。"));
-
-    auto commit = [this, enable, scopeCombo, stopCombo, scopeCtlCombo, switch31Enable]() {
+    m_triggerWorkflow = new TriggerWorkflowEditor(card);
+    card->contentLayout()->addWidget(m_triggerWorkflow);
+    m_triggerWorkflow->setChanged([this]() {
         if (m_loading) return;
         const int ri = currentRuntimeIndex();
         if (ri < 0) return;
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         if (ri >= static_cast<int>(config.hotkeys.size())) return;
-        HotkeyProfile& hp = config.hotkeys[ri];
-
-        auto i = [this](const char* n) { return findChild<QSpinBox*>(n)->value(); };
-
-        hp.trigger_enabled            = enable->isChecked();
-        hp.trigger_y_percent          = i("triggerYPercent");
-        hp.trigger_fire_delay         = i("triggerFireDelay");
-        hp.trigger_fire_duration      = i("triggerFireDuration");
-        hp.trigger_fire_interval      = i("triggerFireInterval");
-        hp.trigger_delay_jitter_ms    = i("triggerDelayJitter");
-        hp.trigger_duration_jitter_ms = i("triggerDurationJitter");
-        hp.trigger_interval_jitter_ms = i("triggerIntervalJitter");
-        hp.trigger_switch_cooldown_ms = i("triggerSwitchCooldown");
-        hp.trigger_auto_scope         = scopeCombo->currentData().toInt();
-        hp.trigger_scope_delay_ms     = i("triggerScopeDelay");
-        hp.trigger_auto_stop          = stopCombo->currentData().toInt();
-        hp.trigger_stop_ms            = i("triggerStopMs");
-        hp.trigger_weapon_switch31    = switch31Enable->isChecked();
-        hp.trigger_switch31_delay_ms  = i("triggerSwitch31DelayMs");
-        hp.trigger_switch31_step_ms   = i("triggerSwitch31StepMs");
-        // 开镜期间是否用独立那一套 (与「开镜独立瞄准参数」卡联动显隐)。
-        hp.scope_ctl_enabled          = scopeCtlCombo->currentData().toInt();
-
+        m_triggerWorkflow->save(config.hotkeys[ri]);
         ConfigBridge::instance().markDirty();
-        applyScopeCtlVisibility();
-    };
-
-    connect(enable, &QCheckBox::toggled, this, [commit](bool) { commit(); });
-    connect(switch31Enable, &QCheckBox::toggled, this, [commit](bool) { commit(); });
-    connect(scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [commit](int) { commit(); });
-    connect(stopCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [commit](int) { commit(); });
-    connect(scopeCtlCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [commit](int) { commit(); });
-    for (auto* sp : m_triggerInts)
-        connect(sp, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
-
+    });
     m_rightLayout->addWidget(card);
+
+    auto* targetsCard = new CardWidget(QString::fromUtf8(u8"扳机类别、瞄点与范围"),
+                                       QStringLiteral("target"));
+    m_triggerTargetEditor = new TriggerTargetEditor(targetsCard);
+    targetsCard->contentLayout()->addWidget(m_triggerTargetEditor);
+    m_triggerTargetEditor->setChanged([this]() {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        if (ri < 0) return;
+        {
+            std::lock_guard<std::recursive_mutex> lk(configMutex);
+            if (ri >= static_cast<int>(config.hotkeys.size())) return;
+            m_triggerTargetEditor->save(config.hotkeys[ri]);
+            if (m_triggerWorkflow) m_triggerWorkflow->load(config.hotkeys[ri]);
+        }
+        ConfigBridge::instance().markDirty();
+    });
+    m_rightLayout->addWidget(targetsCard);
 }
+
 
 namespace
 {
@@ -1340,7 +1651,7 @@ const ScopeRowDesc kScopeInflightRows[] = {
 // ── 开镜档: 自动开镜生效期间取代「瞄准控制器」的整组参数 ────────────────────
 //
 // ★ 为什么需要它: 开镜后游戏内灵敏度被倍率放大, 镜前调好的一套增益与灵敏度
-//   折算填进镜内必然过冲(瞬狙最典型: 镜前一甩、进镜就飞)。这里给镜内一套独立
+//   折算填进镜内可能过冲。这里给镜内一套独立
 //   参数, 且只在【自动开镜真的按下了右键、并且你还按着热键】的期间生效 ——
 //   判定在 runtime/aim_loop.cpp。
 // ★ 开关是「自动扳机 → 自动开镜 → 开镜期间」那个下拉框。选「跟随热键」时这
@@ -1352,18 +1663,12 @@ void AimSettingsPage::buildScopeCtlCard()
     auto* cl = card->contentLayout();
 
     card->setToolTip(QString::fromUtf8(
-        u8"这里的参数【整组取代】「瞄准控制器」卡里的同名参数, 只在「自动扳机 → "
+        u8"这里的参数【整组取代】「瞄准控制器」卡里的同名参数, 只在「自动扳机流程 → "
         u8"自动开镜」真的按下右键、并且你还按着热键的那几拍生效。\n"
-        u8"★ 开关在「自动扳机 → 自动开镜 → 开镜期间」。\n"
+        u8"★ 开关在本卡片的「开镜期间」下拉框。\n"
         u8"★ 量程与默认值跟「瞄准控制器」卡逐条一致; 说明文字直接取那张卡的, 只有一份。\n"
         u8"★ 选靶 / 稳定器 / 滞回倍数 / 瞄点 Y 这些【不属于控制器增益】的参数仍然"
         u8"只有热键一份, 不随开镜切档 —— 它们管的是「瞄谁」, 不是「用多大力」。"));
-
-    m_scopeOffHint = makeHint(QString::fromUtf8(
-        u8"当前是「跟随热键」：开镜前后用同一套参数, 下面这些【不生效】(已置灰)。\n"
-        u8"把「自动扳机 → 自动开镜 → 开镜期间」切到「用「开镜独立瞄准参数」那一套」"
-        u8"就会启用。"));
-    cl->addWidget(m_scopeOffHint);
 
     // ── 一键复制 ─────────────────────────────────────────────────────────
     auto* copyTitle = makeSectionTitle(QString::fromUtf8(u8"一键复制"));
@@ -1533,7 +1838,6 @@ void AimSettingsPage::applyScopeCtlVisibility()
     const bool on = m_scopeModeCombo && m_scopeModeCombo->currentData().toInt() != 0;
     for (auto* w : m_scopeParamRows)
         if (w) w->setEnabled(on);
-    if (m_scopeOffHint) m_scopeOffHint->setVisible(!on);
 }
 
 // 一键复制的来源下拉框: 列出【所有】热键(带组名与按键), 不限于当前组 ——
@@ -1853,11 +2157,12 @@ int AimSettingsPage::currentRuntimeIndex() const
 void AimSettingsPage::rebuildGroupCombo()
 {
     if (!m_groupCombo) return;
-    const QString cur = m_groupCombo->currentText();
+    QString cur;
     m_groupCombo->blockSignals(true);
     m_groupCombo->clear();
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
+        cur = QString::fromStdString(config.active_hotkey_group);
         for (const auto& hp : config.hotkeys)
         {
             const QString g = QString::fromUtf8(hp.group.c_str());
@@ -1868,11 +2173,13 @@ void AimSettingsPage::rebuildGroupCombo()
     const int idx = m_groupCombo->findText(cur);
     if (idx >= 0) m_groupCombo->setCurrentIndex(idx);
     m_groupCombo->blockSignals(false);
+    if (idx < 0 && m_groupCombo->count() > 0) onGroupChanged(m_groupCombo->currentIndex());
 }
 
 void AimSettingsPage::rebuildProfileList()
 {
     if (!m_profileList) return;
+    const int previouslySelected = currentRuntimeIndex();
     m_profileList->blockSignals(true);
     m_profileList->clear();
 
@@ -1887,13 +2194,14 @@ void AimSettingsPage::rebuildProfileList()
             QString keys;
             for (const auto& k : hp.keys)
             {
-                if (!keys.isEmpty()) keys += QStringLiteral(" / ");
+                if (!keys.isEmpty()) keys += hp.keys_chord ? QStringLiteral(" + ") : QStringLiteral(" / ");
                 keys += QString::fromUtf8(k.c_str());
             }
             if (keys.isEmpty()) keys = QStringLiteral("None");
 
             auto* item = new QListWidgetItem(m_profileList);
             item->setData(Qt::UserRole, i);
+            item->setFlags(item->flags() | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);
 
             auto* w = new QWidget;
             w->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -1916,10 +2224,54 @@ void AimSettingsPage::rebuildProfileList()
     m_profileList->blockSignals(false);
     if (m_profileList->count() > 0)
     {
-        m_profileList->setCurrentRow(0);
-        onProfileSelected(0);
+        int rowToSelect = 0;
+        for (int row = 0; row < m_profileList->count(); ++row)
+            if (m_profileList->item(row)->data(Qt::UserRole).toInt() == previouslySelected) {
+                rowToSelect = row;
+                break;
+            }
+        m_profileList->setCurrentRow(rowToSelect);
+        onProfileSelected(rowToSelect);
     }
     restyleProfileItems();
+}
+
+void AimSettingsPage::moveProfileInGroup(int fromRow, int toRow)
+{
+    if (!m_profileList || !m_groupCombo || fromRow == toRow ||
+        fromRow < 0 || toRow < 0 ||
+        fromRow >= m_profileList->count() || toRow >= m_profileList->count())
+        return;
+
+    std::vector<int> positions;
+    positions.reserve(m_profileList->count());
+    for (int row = 0; row < m_profileList->count(); ++row)
+        positions.push_back(m_profileList->item(row)->data(Qt::UserRole).toInt());
+    auto uniquePositions = positions;
+    std::sort(uniquePositions.begin(), uniquePositions.end());
+    if (std::adjacent_find(uniquePositions.begin(), uniquePositions.end()) !=
+        uniquePositions.end()) return;
+
+    const std::string group = m_groupCombo->currentText().toStdString();
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        for (const int index : positions)
+            if (index < 0 || index >= static_cast<int>(config.hotkeys.size()) ||
+                config.hotkeys[index].group != group)
+                return;
+
+        HotkeyProfile moved = std::move(config.hotkeys[positions[fromRow]]);
+        if (fromRow < toRow)
+            for (int row = fromRow; row < toRow; ++row)
+                config.hotkeys[positions[row]] = std::move(config.hotkeys[positions[row + 1]]);
+        else
+            for (int row = fromRow; row > toRow; --row)
+                config.hotkeys[positions[row]] = std::move(config.hotkeys[positions[row - 1]]);
+        config.hotkeys[positions[toRow]] = std::move(moved);
+    }
+    ConfigBridge::instance().markDirty();
+    rebuildProfileList();
+    m_profileList->setCurrentRow(toRow);
 }
 
 void AimSettingsPage::restyleProfileItems()
@@ -1939,8 +2291,35 @@ void AimSettingsPage::restyleProfileItems()
     }
 }
 
+void AimSettingsPage::refreshActivation()
+{
+    if (m_loading || !m_activationWidget) return;
+    std::lock_guard<std::recursive_mutex> lock(configMutex);
+    m_activationWidget->load(config.hotkeys, currentRuntimeIndex());
+    for (int row = 0; row < m_profileList->count(); ++row) {
+        const int index = m_profileList->item(row)->data(Qt::UserRole).toInt();
+        auto* widget = m_profileList->itemWidget(m_profileList->item(row));
+        if (!widget || index < 0 || index >= static_cast<int>(config.hotkeys.size())) continue;
+        if (auto* label = widget->findChild<QLabel*>("pname")) {
+            QString name = QString::fromStdString(config.hotkeys[index].name);
+            if (hasHotkeyConflict(config.hotkeys, index) && preferredHotkey(config.hotkeys, index) == index)
+                name += QStringLiteral(" · 已激活");
+            label->setText(name);
+        }
+    }
+}
+
 void AimSettingsPage::onGroupChanged(int)
 {
+    if (!m_groupCombo || m_groupCombo->currentIndex() < 0) return;
+    bool changed = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(configMutex);
+        const auto group = m_groupCombo->currentText().toStdString();
+        changed = config.active_hotkey_group != group;
+        config.active_hotkey_group = group;
+    }
+    if (changed) ConfigBridge::instance().markDirty();
     rebuildProfileList();
 }
 
@@ -1973,14 +2352,30 @@ void AimSettingsPage::reloadProfileToUi()
                 const int k = c->findData(want);
                 c->setCurrentIndex(k >= 0 ? k : 0);
             }
+            if (auto* c = findChild<QCheckBox*>("keyChord")) c->setChecked(hp.keys_chord);
+            if (auto* c = findChild<QComboBox*>("keyComboSecond")) {
+                const QString want = hp.keys.size() > 1 ? QString::fromStdString(hp.keys[1]) : QString();
+                const int k = c->findData(want);
+                c->setCurrentIndex(k >= 0 ? k : 0);
+                c->setEnabled(hp.keys_chord);
+            }
             if (auto* s = findChild<QSpinBox*>("fovX")) s->setValue(hp.fovX);
             if (auto* s = findChild<QSpinBox*>("fovY")) s->setValue(hp.fovY);
-            if (auto* c = findChild<QCheckBox*>("crosshairChk"))
-                c->setChecked(hp.crosshair_detect_enabled);
+            if (auto* c = findChild<QCheckBox*>("maskX")) c->setChecked(hp.mask_x);
+            if (auto* c = findChild<QCheckBox*>("blockAimHotkey")) c->setChecked(hp.block_hotkey);
+            if (auto* c = findChild<QCheckBox*>("maskY")) c->setChecked(hp.mask_y);
+            if (auto* c = findChild<QCheckBox*>("unlockX")) c->setChecked(hp.unlock_x);
+            if (auto* c = findChild<QCheckBox*>("unlockY")) c->setChecked(hp.unlock_y);
+            if (auto* s = findChild<QSpinBox*>("unlockYDelayMs")) s->setValue(hp.unlock_y_delay_ms);
+            if (auto* s = findChild<QSpinBox*>("aimDelayMs")) s->setValue(hp.aim_delay_ms);
+            if (auto* s = findChild<QSpinBox*>("dynFovShrinkMs")) s->setValue(hp.dynamic_fov_shrink_ms);
+            if (auto* c = findChild<QComboBox*>("aimMode"))
+                c->setCurrentIndex(hp.crosshair_detect_enabled ? 3
+                    : hp.laser_detect_enabled ? 2 : hp.aimpoint_recoil_enabled ? 1 : 0);
             if (auto* c = findChild<QCheckBox*>("dynFovChk"))
                 c->setChecked(hp.dynamic_fov_enabled);
-            if (auto* s = findChild<QDoubleSpinBox*>("dynFovStrength"))
-                s->setValue(hp.dynamic_fov_strength);
+            if (auto* s = findChild<QSpinBox*>("dynFovSize")) s->setValue(hp.dynamic_fov_size);
+            if (auto* s = findChild<QSpinBox*>("dynFovExpandMs")) s->setValue(hp.dynamic_fov_expand_ms);
 
             if (auto* c = findChild<QCheckBox*>("ctlEnabled")) c->setChecked(hp.ctl_enabled);
 
@@ -2009,32 +2404,26 @@ void AimSettingsPage::reloadProfileToUi()
             si("ctlMaxOutputCounts", hp.ctl_max_output_counts);
             si("ctlRandomSeed", hp.ctl_random_seed);
 
-            if (auto* c = findChild<QCheckBox*>("triggerEnabled"))
-                c->setChecked(hp.trigger_enabled);
-            if (auto* c = findChild<QComboBox*>("triggerAutoScope"))
-            {
-                const int k = c->findData(hp.trigger_auto_scope);
-                c->setCurrentIndex(k >= 0 ? k : 0);
-            }
-            if (auto* c = findChild<QComboBox*>("triggerAutoStop"))
-            {
-                const int k = c->findData(hp.trigger_auto_stop > 0 ? 1 : 0);
-                c->setCurrentIndex(k >= 0 ? k : 0);
-            }
-            if (auto* c = findChild<QCheckBox*>("triggerWeaponSwitch31"))
-                c->setChecked(hp.trigger_weapon_switch31);
-            si("triggerYPercent",         hp.trigger_y_percent);
-            si("triggerFireDelay",        hp.trigger_fire_delay);
-            si("triggerFireDuration",     hp.trigger_fire_duration);
-            si("triggerFireInterval",     hp.trigger_fire_interval);
-            si("triggerDelayJitter",      hp.trigger_delay_jitter_ms);
-            si("triggerDurationJitter",   hp.trigger_duration_jitter_ms);
-            si("triggerIntervalJitter",   hp.trigger_interval_jitter_ms);
-            si("triggerSwitchCooldown",   hp.trigger_switch_cooldown_ms);
-            si("triggerScopeDelay",       hp.trigger_scope_delay_ms);
-            si("triggerStopMs",           hp.trigger_stop_ms);
-            si("triggerSwitch31DelayMs",   hp.trigger_switch31_delay_ms);
-            si("triggerSwitch31StepMs",    hp.trigger_switch31_step_ms);
+            auto loadRecovered = [this, &sd](const QString& prefix,
+                                              const control::RecoveredPidConfig& pid) {
+                auto set = [&](const char* suffix, float value) {
+                    const QByteArray objectName = (prefix + QString::fromLatin1(suffix)).toUtf8();
+                    sd(objectName.constData(), value);
+                };
+                set("KpX", pid.kpX); set("KiX", pid.kiX); set("KdX", pid.kdX);
+                set("FfX", pid.feedforwardX); set("DeadzoneX", pid.deadzoneX);
+                set("KpY", pid.kpY); set("KiY", pid.kiY); set("KdY", pid.kdY);
+                set("FfY", pid.feedforwardY); set("DeadzoneY", pid.deadzoneY);
+                set("MaxPixel", pid.smoothMaxPixel); set("Segment", pid.segment);
+                set("FollowX", pid.followX);
+                set("FollowY", pid.followY);
+                if (auto* check = findChild<QCheckBox*>(prefix + "SegmentEnabled"))
+                    check->setChecked(pid.segmentEnabled);
+            };
+            loadRecovered("recovered", hp.recovered_pid);
+            loadRecovered("recoveredScope", hp.recovered_scope_pid);
+            if (m_triggerWorkflow) m_triggerWorkflow->load(hp);
+            if (m_triggerTargetEditor) m_triggerTargetEditor->load(hp, config.class_filters);
 
             // 开镜期间: 跟随热键 / 用独立那一套。
             if (auto* c = findChild<QComboBox*>("scopeCtlMode"))
@@ -2119,6 +2508,7 @@ void AimSettingsPage::reloadProfileToUi()
     }
 
     m_loading = false;
+    refreshActivation();
 
     // 开镜档: 来源下拉框(所有热键) + 生效与否的置灰/提示。
     // ★ 放在锁外: 两者都会自己取锁 (configMutex 是递归锁, 但没必要套着)。
@@ -2173,12 +2563,32 @@ void AimSettingsPage::onCopyProfile()
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         if (ri >= static_cast<int>(config.hotkeys.size())) return;
-        HotkeyProfile copy = config.hotkeys[ri];
+        m_copiedProfile = std::make_shared<HotkeyProfile>(config.hotkeys[ri]);
+    }
+}
+
+void AimSettingsPage::onPasteProfile()
+{
+    if (!m_copiedProfile || !m_groupCombo || m_groupCombo->currentText().isEmpty()) return;
+    int insertedIndex = -1;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        HotkeyProfile copy = *m_copiedProfile;
+        copy.group = m_groupCombo->currentText().toStdString();
         copy.name += " 副本";
+        copy.activation_key.clear();
+        copy.activation_selected = false;
+        insertedIndex = static_cast<int>(config.hotkeys.size());
         config.hotkeys.push_back(std::move(copy));
     }
     ConfigBridge::instance().markDirty();
     reloadFromRuntime();
+    for (int row = 0; row < m_profileList->count(); ++row) {
+        if (m_profileList->item(row)->data(Qt::UserRole).toInt() == insertedIndex) {
+            m_profileList->setCurrentRow(row);
+            break;
+        }
+    }
 }
 
 void AimSettingsPage::onAddGroup()

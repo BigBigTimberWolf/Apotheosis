@@ -3,6 +3,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <bitset>
 
 #include "kmbox_net/kmboxNet.h"
 
@@ -14,6 +15,7 @@ public:
 
     void monitorThread();
     bool isOpen() const { return is_open_; }
+    const std::string& lastError() const { return last_error_; }
 
     void move(int x, int y);
     void moveAuto(int x, int y, int ms);
@@ -31,8 +33,8 @@ public:
     void wheel(int wheel);
     void mouseAll(int button, int x, int y, int wheel);
 
-    void keyDown(int vkey);
-    void keyUp(int vkey);
+    bool keyDown(int hidUsage);
+    bool keyUp(int hidUsage);
 
     void monitor(short port);
     int monitorMouseLeft();
@@ -47,12 +49,16 @@ public:
     void maskMouseMiddle(bool enable);
     void maskMouseSide1(bool enable);
     void maskMouseSide2(bool enable);
+    bool maskPhysicalAxis(int axis, bool enabled);
     void maskMouseX(bool enable);
     void maskMouseY(bool enable);
     void maskMouseWheel(bool enable);
-    void maskKeyboard(short vkey);
-    void unmaskKeyboard(short vkey);
+    bool maskKeyboard(short vkey);
+    bool unmaskKeyboard(short vkey);
     void unmaskAll();
+    // Hotkey and automatic-stop owners are combined before touching the device.
+    bool setHotkeyMasks(const std::bitset<256>& keys, const std::bitset<6>& buttons,
+                       bool force = false, bool* pendingRelease = nullptr);
 
     void reboot();
     void setConfig(const std::string& ip, unsigned short port);
@@ -67,12 +73,18 @@ public:
     std::atomic<bool> zooming_active;
 
 private:
+    bool syncKeyMaskLocked(int hid);
+    bool syncHotkeyMasksLocked();
+    std::bitset<256> hotkeyKeys_, automaticKeys_, appliedKeys_, uncertainKeys_;
+    std::bitset<6> hotkeyButtons_, appliedButtons_, uncertainButtons_;
+    std::bitset<2> ownedAxisMasks_;
     std::mutex io_mutex_;
     bool is_open_;
     bool monitor_;
     std::thread monitor_thread_;
     std::atomic<bool> monitor_running_{ true };
     std::string ip_, port_, uuid_;
+    std::string last_error_;
 
     int button_mask_ = 0;
 };

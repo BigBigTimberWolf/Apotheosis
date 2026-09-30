@@ -76,7 +76,7 @@ public:
 private:
     void ReceiveThread();
     bool EnsureGpuContext();
-    void TickFps();
+    void TickFps(uint64_t delivered_frames);
 
     void StartProcessWorker();
     void StopProcessWorker();
@@ -122,7 +122,7 @@ private:
     std::string open_error_;
     std::atomic<int> source_fps_{ 0 };
     std::atomic<int> negotiated_fps_{ 0 };
-    int source_frame_count_{ 0 };
+    uint64_t source_frame_count_{ 0 };
     double source_fps_smoothed_{ 0.0 };
     std::chrono::steady_clock::time_point source_fps_start_;
 
@@ -175,8 +175,8 @@ private:
     //   3 worker 在 4 核上到 331fps, 对 240fps 留 38% 余量, 同时给 TensorRT 推理与
     //   MF 读循环留下约 2 个核。
     static constexpr int DECODE_WORKERS = 3;
-    // 深度必须 >= worker 数, 否则 worker 会空转; 但每加一层排队就多一份延迟
-    // (实测: 3 -> 202fps/12.2ms, 6 -> 221fps/18.8ms)。4 层覆盖 3 个 worker, 且不白付延迟。
+    // Leave a short burst buffer for the three JPEG workers. With only one
+    // pending job, brief scheduling stalls discard frames even at 240 fps.
     static constexpr int MAX_JOB_QUEUE = 4;
     std::mutex job_mutex_;
     std::condition_variable job_cv_;

@@ -20,6 +20,14 @@ void launch_nv12_to_bgr_u8(
     int width, int height,
     cudaStream_t stream);
 
+// Matches OpenCV COLOR_YUV2BGR_NV12 (BT.601 studio/limited range).
+void launch_nv12_to_bgr_bt601_limited_u8(
+    const unsigned char* y, size_t yStep,
+    const unsigned char* uv, size_t uvStep,
+    unsigned char* bgr, size_t bgrStep,
+    int width, int height,
+    cudaStream_t stream);
+
 void launch_yuv444_to_bgr_u8(
     const unsigned char* y,
     const unsigned char* u,
@@ -46,5 +54,7 @@ void launch_crosshair_hsv_reduce_bgr_u8(
     int width, int height,
     int roi_x, int roi_y, int roi_w, int roi_h,
     const GpuHsvBand* bands, int band_count,
-    int* result,
+    int* result, unsigned long long* candidate_key,
+    unsigned char* mask, unsigned char* scratch,
+    int close_radius, int min_pixels, int reference_x, int reference_y,
     cudaStream_t stream);

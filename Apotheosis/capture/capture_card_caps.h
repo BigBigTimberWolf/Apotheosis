@@ -26,6 +26,9 @@ struct MFDeviceInfo
     std::string               friendly_name;
     std::vector<MFCapability> caps;
     bool                      caps_probed = false;
+    std::string               probe_error;
+    bool                      directshow_fallback = false;
+    int                       directshow_index = -1;
 };
 
 namespace mfcap
@@ -36,6 +39,7 @@ inline int FormatLatencyRank(const std::string& format, bool supported)
     if (!supported)        return 100;
     if (format == "NV12")  return 1;
     if (format == "YUY2")  return 2;
+    if (format == "RGB24") return 3;
     if (format == "RGB32") return 3;
     if (format == "MJPG")  return 9;
     return 50;
@@ -172,7 +176,8 @@ inline bool PickBest(const MFDeviceInfo& dev, int want_w, int want_h, int want_f
 inline std::string Describe(const MFDeviceInfo& dev)
 {
     if (dev.caps.empty())
-        return dev.caps_probed ? "(device reported no video capabilities)" : "(not probed)";
+        return !dev.probe_error.empty() ? dev.probe_error
+             : dev.caps_probed ? "(device reported no video capabilities)" : "(not probed)";
 
     std::ostringstream os;
     bool first = true;

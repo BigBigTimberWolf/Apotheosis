@@ -180,6 +180,9 @@ namespace makcu {
         bool lockMouseRight(bool lock = true);
         bool lockMouseSide1(bool lock = true);
         bool lockMouseSide2(bool lock = true);
+        // Read the device, not the optimistic local lock-state cache.
+        bool queryMouseButtonLock(int button, bool& locked) const;
+        bool queryMouseAxisLock(int axis, bool& locked) const;
 
         // Fast lock state queries (cached)
         bool isMouseXLocked() const;

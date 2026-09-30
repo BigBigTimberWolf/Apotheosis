@@ -7,6 +7,9 @@
 #include <string>
 #include <vector>
 
+#include "control/recovered_pid.h"
+#include "macro/macro_config.h"
+
 enum class ClassBucket
 {
     Delete = 0,
@@ -27,6 +30,20 @@ struct HotkeyAimClass
     float y_offset = 0.5f;
     float y_offset_max = 0.5f;
     float min_conf = 0.0f;
+    float x_offset = 0.5f;
+    float x_offset_max = 0.5f;
+};
+
+// Ordered trigger target classes. Coordinates use the same box-relative
+// convention as aim classes: X=0 is left, Y=1 is top. The hit zone is a
+// rectangle centered on this point, sized as a percentage of the box.
+struct TriggerAimClass
+{
+    int class_id = -1;
+    float x_offset = 0.5f;
+    float y_offset = 0.5f;
+    int range_x_percent = 100;
+    int range_y_percent = 100;
 };
 
 // ── 瞄准控制器参数组 ────────────────────────────────────────────────────────
@@ -36,7 +53,7 @@ struct HotkeyAimClass
 //   · 开镜档 HotkeyProfile::ctl_scope  —— 自动开镜生效期间整组取代默认档
 //
 // ★ 为什么要有开镜档: 开镜后游戏内灵敏度被【倍率】放大, 镜前调好的一套增益
-//   与灵敏度折算填进镜内必然过冲(瞬狙最典型: 镜前一甩就在镜内飞出去)。
+//   与灵敏度折算填进镜内可能过冲。镜内使用独立增益。
 //   所以镜内单独一套参数; 跟随热键(默认)时逐拍与没有这个功能时完全一致。
 //
 // ★ 这里只装【「瞄准控制器」卡里那 18 个旋钮】。选靶/稳定器/滞回/瞄点 Y 等
@@ -113,21 +130,83 @@ struct AimCtlParams
     }
 };
 
+struct TriggerParams
+{
+    bool trigger_enabled = false;
+    int trigger_mode = 0; // 0 = existing, 1 = snap/fire/return, 2 = spin/search/fire
+    double trigger_snap_px_per_count = 1.0;
+    int trigger_snap_max_counts = 500;
+    double trigger_snap_tolerance_px = 3.0;
+    int trigger_snap_counts_per_second = 4000;
+    int trigger_return_counts_per_second = 16000;
+    int trigger_return_y_percent = 75;
+    int trigger_spin_counts_per_turn = 2400;
+    int trigger_spin_step_degrees = 90;
+    int trigger_spin_step_ms = 40;
+    int trigger_spin_hold_ms = 300;
+    int trigger_spin_counts_per_second = 5000;
+    int trigger_spin_turns = 1;
+    int trigger_snap_fire_hold_ms = 30;
+    int trigger_snap_cooldown_ms = 200;
+    int trigger_flash_disappear_ms = 80;
+    int trigger_fire_delay = 0;
+    int trigger_fire_duration = 0;
+    int trigger_fire_interval = 200;
+    int trigger_y_percent = 100;
+    int trigger_delay_jitter_ms = 0;
+    int trigger_duration_jitter_ms = 0;
+    int trigger_interval_jitter_ms = 0;
+    int trigger_switch_cooldown_ms = 0;
+    int trigger_auto_scope = 0;
+    int trigger_scope_delay_ms = 0;
+    int trigger_auto_stop = 0;
+    int trigger_stop_before_ms = 0;
+    int trigger_stop_after_ms = 60;
+    bool trigger_weapon_switch31 = false;
+    int trigger_switch31_delay_ms = 50;
+    int trigger_switch31_step_ms = 20;
+    int trigger_loss_delay_ms = 100;
+};
+
 struct HotkeyProfile
 {
     std::string name = "Aim";
     std::string group = u8"默认";
     std::vector<std::string> keys;
+    bool keys_chord = false; // Require both configured keys at the same time.
+    std::string activation_key; // Select this whole profile among identical bindings.
+    bool activation_selected = false;
 
     int fovX = 106;
     int fovY = 74;
+    bool block_hotkey = false;
+    bool mask_x = false;
+    bool mask_y = false; // Block physical mouse input only while actively aiming at a target.
+    bool unlock_x = false; // Disable automatic aiming on this axis.
+    bool unlock_y = false;
+    int unlock_y_delay_ms = 0; // Begin automatic Y unlock after target and hotkey overlap.
+    int aim_delay_ms = 0; // Wait after both the hotkey and a valid target are present.
 
     std::vector<HotkeyAimClass> aim_classes;
+    std::vector<TriggerAimClass> trigger_classes;
 
     bool crosshair_detect_enabled = false;
+    bool laser_detect_enabled = false;
+    bool aimpoint_recoil_enabled = false;
+
+    // Separate recovered-controller parameters. Legacy ctl_* gains have a
+    // different dt-dependent meaning and must never be read as these gains.
+    control::RecoveredPidConfig recovered_pid{};
+    // Explicit, persistent selection: each key always selects the same set.
+    std::string primary_select_key = "Key1";
+    std::string secondary_select_key = "Key2";
+    control::RecoveredPidConfig recovered_secondary_pid{};
+    control::RecoveredPidConfig recovered_scope_pid{};
 
     bool  dynamic_fov_enabled  = false;
-    float dynamic_fov_strength = 0.60f;
+    int dynamic_fov_size = 40;
+    int dynamic_fov_shrink_ms = 200;
+    int dynamic_fov_expand_ms = 120;
 
     double ctl_kp_x = 35.0;
     double ctl_kp_y = 35.0;
@@ -179,6 +258,8 @@ struct HotkeyProfile
 
     double ctl_y_offset = 0.5;
     double ctl_y_offset_max = 0.5;
+    double ctl_x_offset = 0.5;
+    double ctl_x_offset_max = 0.5;
 
     double ctl_hysteresis_ratio = 1.3;
 
@@ -203,6 +284,22 @@ struct HotkeyProfile
     AimCtlParams ctl_scope;
 
     bool trigger_enabled = false;
+    int trigger_mode = 0;
+    double trigger_snap_px_per_count = 1.0;
+    int trigger_snap_max_counts = 500;
+    double trigger_snap_tolerance_px = 3.0;
+    int trigger_snap_counts_per_second = 4000;
+    int trigger_return_counts_per_second = 16000;
+    int trigger_return_y_percent = 75;
+    int trigger_spin_counts_per_turn = 2400;
+    int trigger_spin_step_degrees = 90;
+    int trigger_spin_step_ms = 40;
+    int trigger_spin_hold_ms = 300;
+    int trigger_spin_counts_per_second = 5000;
+    int trigger_spin_turns = 1;
+    int trigger_snap_fire_hold_ms = 30;
+    int trigger_snap_cooldown_ms = 200;
+    int trigger_flash_disappear_ms = 80;
     int  trigger_fire_delay = 0;
     int  trigger_fire_duration = 0;
     int  trigger_fire_interval = 200;
@@ -214,10 +311,14 @@ struct HotkeyProfile
     int  trigger_auto_scope = 0;
     int  trigger_scope_delay_ms = 0;
     int  trigger_auto_stop = 0;
-    int  trigger_stop_ms   = 60;
+    int  trigger_stop_before_ms = 0;
+    int  trigger_stop_after_ms = 60;
     bool trigger_weapon_switch31 = false;
     int  trigger_switch31_delay_ms = 50;
-    int  trigger_switch31_step_ms = 20;
+    int  trigger_switch31_step_ms = 20; // 旧配置兼容；切枪按键时长与间隔固定 20ms
+    bool secondary_trigger_custom = false;
+    int trigger_loss_delay_ms = 100;
+    TriggerParams secondary_trigger{};
 
     int   aim_path_mode = 0;
     int   aim_path_influence = 25;
@@ -239,6 +340,84 @@ struct HotkeyProfile
     float aim_path_neural_slope_variation = 0.0f;
 
 };
+
+inline TriggerParams triggerParamsOf(const HotkeyProfile& hk)
+{
+    TriggerParams p;
+    p.trigger_enabled = hk.trigger_enabled;
+    p.trigger_mode = hk.trigger_mode;
+    p.trigger_snap_px_per_count = hk.trigger_snap_px_per_count;
+    p.trigger_snap_max_counts = hk.trigger_snap_max_counts;
+    p.trigger_snap_tolerance_px = hk.trigger_snap_tolerance_px;
+    p.trigger_snap_counts_per_second = hk.trigger_snap_counts_per_second;
+    p.trigger_return_counts_per_second = hk.trigger_return_counts_per_second;
+    p.trigger_return_y_percent = hk.trigger_return_y_percent;
+    p.trigger_spin_counts_per_turn = hk.trigger_spin_counts_per_turn;
+    p.trigger_spin_step_degrees = hk.trigger_spin_step_degrees;
+    p.trigger_spin_step_ms = hk.trigger_spin_step_ms;
+    p.trigger_spin_hold_ms = hk.trigger_spin_hold_ms;
+    p.trigger_spin_counts_per_second = hk.trigger_spin_counts_per_second;
+    p.trigger_spin_turns = hk.trigger_spin_turns;
+    p.trigger_snap_fire_hold_ms = hk.trigger_snap_fire_hold_ms;
+    p.trigger_snap_cooldown_ms = hk.trigger_snap_cooldown_ms;
+    p.trigger_flash_disappear_ms = hk.trigger_flash_disappear_ms;
+    p.trigger_fire_delay = hk.trigger_fire_delay;
+    p.trigger_fire_duration = hk.trigger_fire_duration;
+    p.trigger_fire_interval = hk.trigger_fire_interval;
+    p.trigger_y_percent = hk.trigger_y_percent;
+    p.trigger_delay_jitter_ms = hk.trigger_delay_jitter_ms;
+    p.trigger_duration_jitter_ms = hk.trigger_duration_jitter_ms;
+    p.trigger_interval_jitter_ms = hk.trigger_interval_jitter_ms;
+    p.trigger_switch_cooldown_ms = hk.trigger_switch_cooldown_ms;
+    p.trigger_auto_scope = hk.trigger_auto_scope;
+    p.trigger_scope_delay_ms = hk.trigger_scope_delay_ms;
+    p.trigger_auto_stop = hk.trigger_auto_stop;
+    p.trigger_stop_before_ms = hk.trigger_stop_before_ms;
+    p.trigger_stop_after_ms = hk.trigger_stop_after_ms;
+    p.trigger_weapon_switch31 = hk.trigger_weapon_switch31;
+    p.trigger_switch31_delay_ms = hk.trigger_switch31_delay_ms;
+    p.trigger_switch31_step_ms = hk.trigger_switch31_step_ms;
+    p.trigger_loss_delay_ms = hk.trigger_loss_delay_ms;
+    return p;
+}
+
+inline void applyTriggerParams(HotkeyProfile& hk, const TriggerParams& p)
+{
+    hk.trigger_enabled = p.trigger_enabled;
+    hk.trigger_mode = p.trigger_mode;
+    hk.trigger_snap_px_per_count = p.trigger_snap_px_per_count;
+    hk.trigger_snap_max_counts = p.trigger_snap_max_counts;
+    hk.trigger_snap_tolerance_px = p.trigger_snap_tolerance_px;
+    hk.trigger_snap_counts_per_second = p.trigger_snap_counts_per_second;
+    hk.trigger_return_counts_per_second = p.trigger_return_counts_per_second;
+    hk.trigger_return_y_percent = p.trigger_return_y_percent;
+    hk.trigger_spin_counts_per_turn = p.trigger_spin_counts_per_turn;
+    hk.trigger_spin_step_degrees = p.trigger_spin_step_degrees;
+    hk.trigger_spin_step_ms = p.trigger_spin_step_ms;
+    hk.trigger_spin_hold_ms = p.trigger_spin_hold_ms;
+    hk.trigger_spin_counts_per_second = p.trigger_spin_counts_per_second;
+    hk.trigger_spin_turns = p.trigger_spin_turns;
+    hk.trigger_snap_fire_hold_ms = p.trigger_snap_fire_hold_ms;
+    hk.trigger_snap_cooldown_ms = p.trigger_snap_cooldown_ms;
+    hk.trigger_flash_disappear_ms = p.trigger_flash_disappear_ms;
+    hk.trigger_fire_delay = p.trigger_fire_delay;
+    hk.trigger_fire_duration = p.trigger_fire_duration;
+    hk.trigger_fire_interval = p.trigger_fire_interval;
+    hk.trigger_y_percent = p.trigger_y_percent;
+    hk.trigger_delay_jitter_ms = p.trigger_delay_jitter_ms;
+    hk.trigger_duration_jitter_ms = p.trigger_duration_jitter_ms;
+    hk.trigger_interval_jitter_ms = p.trigger_interval_jitter_ms;
+    hk.trigger_switch_cooldown_ms = p.trigger_switch_cooldown_ms;
+    hk.trigger_auto_scope = p.trigger_auto_scope;
+    hk.trigger_scope_delay_ms = p.trigger_scope_delay_ms;
+    hk.trigger_auto_stop = p.trigger_auto_stop;
+    hk.trigger_stop_before_ms = p.trigger_stop_before_ms;
+    hk.trigger_stop_after_ms = p.trigger_stop_after_ms;
+    hk.trigger_weapon_switch31 = p.trigger_weapon_switch31;
+    hk.trigger_switch31_delay_ms = p.trigger_switch31_delay_ms;
+    hk.trigger_switch31_step_ms = p.trigger_switch31_step_ms;
+    hk.trigger_loss_delay_ms = p.trigger_loss_delay_ms;
+}
 
 // ── 默认档 ↔ AimCtlParams 的搬运 ────────────────────────────────────────────
 //
@@ -314,6 +493,8 @@ class Config
 {
 public:
     std::string capture_device;
+    std::string capture_source = "device"; // device | udp | tcp
+    std::string capture_stream_url;
     std::string capture_format;
     int  capture_width  = 0;
     int  capture_height = 0;
@@ -321,7 +502,7 @@ public:
     bool capture_gpu_decode = true;
 
     int detection_resolution = 320;
-    bool circle_mask = true;
+    bool circle_mask = false;
 
     std::string input_method = "MAKCU";
     int makcu_baudrate = 115200;
@@ -340,6 +521,15 @@ public:
     std::string kmbox_net_ip = "192.168.2.88";
     std::string kmbox_net_port = "6234";
     std::string kmbox_net_uuid = "12345";
+    std::string ferrum_port = "";
+    int ferrum_baudrate = 3000000;
+    std::string dhzbox_ip = "192.168.2.88";
+    int dhzbox_port = 8888;
+    int dhzbox_key = 88;
+    std::string cat_ip = "192.168.7.1";
+    int cat_port = 8888;
+    std::string cat_uuid = "";
+    int cat_monitor_port = 1234;
 
     std::string backend = "TRT";
     std::string ai_model = "sunxds_0.5.6.engine";
@@ -365,17 +555,17 @@ public:
     // 维一致, 所以它恒为 1, 不暴露成可调参数。
 
     bool use_cuda_graph = true;
-    bool use_spin_wait_sync = true;
+    bool use_spin_wait_sync = false;
     int spin_wait_timeout_ms = 50;
 
-    bool use_process_boost = true;
-    bool use_mmcss = true;
+    bool use_process_boost = false;
+    bool use_mmcss = false;
     std::string mmcss_task_name = "Games";
 
     int gpuMemoryReserveMB = 2048;
     bool enableGpuExclusiveMode = true;
-    int cpuCoreReserveCount = 4;
-    int systemMemoryReserveMB = 2048;
+    int cpuCoreReserveCount = 0;
+    int systemMemoryReserveMB = 0;
 
     bool show_window = true;
     bool show_fps = false;
@@ -397,8 +587,15 @@ public:
     std::vector<std::string> auto_capture_force_keys;
     std::string auto_capture_output_dir = "screenshots/auto";
     bool   auto_capture_save_label = true;
+    // Auto flash: locked target box area as a percentage of the detection frame.
+    bool auto_flash_enabled = false;
+    double auto_flash_area_percent = 5.0;
+    std::string auto_flash_key;
 
     std::vector<ClassFilterState> class_filters;
+    bool head_body_fusion_enabled = false;
+    int head_body_head_class_id = -1;
+    int head_body_body_class_id = -1;
 
     // ── 全局选靶与稳定器 (独立于热键的视觉目标感知层) ────────────────────────
     double target_hysteresis_ratio   = 1.3;
@@ -411,15 +608,30 @@ public:
 
     int crosshair_rect_w = 40;
     int crosshair_rect_h = 40;
+    int crosshair_offset_y = 0;
     int crosshair_min_pixel_count = 4;
     int crosshair_close_radius = 1;
+    double aimpoint_recoil_speed_px_s = 30.0;
+    double aimpoint_recoil_max_px = 60.0;
+    std::string aimpoint_recoil_fire_key = "LeftMouseButton";
 
     std::vector<CrosshairColorProfileConfig> crosshair_colors;
+    int laser_rect_w = 160, laser_rect_h = 240;
+    int laser_center_x = 160, laser_center_y = 200;
+    int laser_target_center_x = 160, laser_target_center_y = 160;
+    int laser_target_rect_w = 60, laser_target_rect_h = 60;
+    int laser_min_pixel_count = 10, laser_close_radius = 1;
+    float laser_min_elongation = 3.0f;
+    float laser_smooth = 0.5f;
+    std::vector<CrosshairColorProfileConfig> laser_colors;
 
     std::vector<HotkeyProfile> hotkeys;
     std::string active_hotkey_group;
 
     bool        macro_enabled = false;
+    bool macro_programs_enabled = false;
+    std::string macro_stop_key = "F12";
+    std::vector<macros::Program> macro_programs;
     std::string macro_script_path;
     bool        macro_primary_button_events = false;
 

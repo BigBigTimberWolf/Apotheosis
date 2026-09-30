@@ -7,6 +7,10 @@
 #include "Makcu.h"
 #include "MakcuNew.h"
 #include "kmboxNetConnection.h"
+#include "dhzbox_driver.h"
+#include "ferrum_driver.h"
+#include "cat_driver.h"
+#include "windows_driver.h"
 
 namespace mouse_driver
 {
@@ -14,12 +18,14 @@ namespace mouse_driver
 const char* const kBackendMakcu     = "MAKCU";
 const char* const kBackendMakcuNew  = "MAKCUNEW";
 const char* const kBackendKmboxNet  = "KMBOXNET";
+const char* const kBackendFerrum = "FERRUM";
+const char* const kBackendDhzboxMini = "DHZBOX_MINI";
 
 std::string describeCapabilities(uint32_t caps)
 {
     static const uint32_t order[] = {
         kCapMove, kCapButtonLeft, kCapButtonRight, kCapButtonMiddle,
-        kCapButtonSide, kCapWheel, kCapKeyboard, kCapPhysicalRead
+        kCapButtonSide, kCapWheel, kCapKeyboard, kCapKeyboardMask, kCapPhysicalRead
     };
     std::string out;
     for (uint32_t c : order)
@@ -34,7 +40,8 @@ std::string describeCapabilities(uint32_t caps)
 
 std::vector<std::string> backendNames()
 {
-    return { kBackendMakcu, kBackendMakcuNew, kBackendKmboxNet };
+    return { kBackendMakcu, kBackendMakcuNew, kBackendKmboxNet,
+             kBackendFerrum, kBackendDhzboxMini, "WINDOWS", "CAT" };
 }
 
 std::string describeStatus(const std::string& backend, bool open, const std::string& detail)
@@ -69,20 +76,6 @@ std::string errWith(const char* what, const std::string& detail)
         s += ')';
     }
     return s;
-}
-
-int hidUsageToVk(int hid)
-{
-    switch (hid)
-    {
-    case 0x1E: return 0x31; // 主键盘 1
-    case 0x20: return 0x33; // 主键盘 3
-    case 0x1A: return 0x57;
-    case 0x04: return 0x41;
-    case 0x16: return 0x53;
-    case 0x07: return 0x44;
-    default:   return 0;
-    }
 }
 
 }
@@ -151,14 +144,14 @@ uint32_t WrappedMakcuNewDriver::capabilities() const
 {
     // 鼠标能力恒有; 键盘能力【只在这台真的接了键盘硬件时】才声明。
     //
-    // 这很关键: 上层用 kCapKeyboard 判断"能不能注入键盘/能不能做自动急停"。
+    // 上层用独立的键盘与真实输入屏蔽能力位判断可用功能。
     // 若这里无脑声明键盘能力, 但实际没有键盘硬件, 上层会一路走到 tapKey(),
     // 而 tapKey 必须失败 —— 表现为"自动急停配了却没反应", 且无法从能力位看出原因。
     // 如实上报后, 上层能直接判断出不可用。
     uint32_t caps = kCapMove | kCapButtonLeft | kCapButtonRight | kCapButtonMiddle |
                     kCapButtonSide | kCapWheel | kCapPhysicalRead;
     if (keyboardConnection() != nullptr)
-        caps |= kCapKeyboard;
+        caps |= kCapKeyboard | kCapKeyboardMask;
     return caps;
 }
 
@@ -175,12 +168,12 @@ bool WrappedMakcuNewDriver::move(int dx, int dy)
     return conn_mouse_->move(dx, dy);
 }
 
-bool WrappedMakcuNewDriver::leftDown()   { if (!isOpen()) return false; conn_mouse_->press(1);   return true; }
-bool WrappedMakcuNewDriver::leftUp()     { if (!isOpen()) return false; conn_mouse_->release(1); return true; }
-bool WrappedMakcuNewDriver::rightDown()  { if (!isOpen()) return false; conn_mouse_->press(2);   return true; }
-bool WrappedMakcuNewDriver::rightUp()    { if (!isOpen()) return false; conn_mouse_->release(2); return true; }
-bool WrappedMakcuNewDriver::middleDown() { if (!isOpen()) return false; conn_mouse_->press(3);   return true; }
-bool WrappedMakcuNewDriver::middleUp()   { if (!isOpen()) return false; conn_mouse_->release(3); return true; }
+bool WrappedMakcuNewDriver::leftDown()   { return isOpen() && conn_mouse_->press(1); }
+bool WrappedMakcuNewDriver::leftUp()     { return isOpen() && conn_mouse_->release(1); }
+bool WrappedMakcuNewDriver::rightDown()  { return isOpen() && conn_mouse_->press(2); }
+bool WrappedMakcuNewDriver::rightUp()    { return isOpen() && conn_mouse_->release(2); }
+bool WrappedMakcuNewDriver::middleDown() { return isOpen() && conn_mouse_->press(3); }
+bool WrappedMakcuNewDriver::middleUp()   { return isOpen() && conn_mouse_->release(3); }
 
 bool WrappedMakcuNewDriver::wheel(int delta)
 {
@@ -242,7 +235,7 @@ uint32_t WrappedHybridDriver::capabilities() const
     uint32_t caps = kCapMove | kCapButtonLeft | kCapButtonRight | kCapButtonMiddle |
                     kCapButtonSide | kCapWheel | kCapPhysicalRead;
     // 键盘能力只在键盘那台真实存在时声明 (跟 WrappedMakcuNewDriver 的判断一致)。
-    if (kbdConn_ != nullptr) caps |= kCapKeyboard;
+    if (kbdConn_ != nullptr) caps |= kCapKeyboard | kCapKeyboardMask;
     return caps;
 }
 
@@ -306,13 +299,15 @@ int WrappedHybridDriver::physicalButtonPressed(int button) const
 }
 
 WrappedKmboxNetDriver::WrappedKmboxNetDriver(KmboxNetConnection* conn) : conn_(conn) {}
+WrappedKmboxNetDriver::~WrappedKmboxNetDriver() { maskRealKeyboard(0); }
 
 const char* WrappedKmboxNetDriver::name() const { return kBackendKmboxNet; }
 
 uint32_t WrappedKmboxNetDriver::capabilities() const
 {
     return kCapMove | kCapButtonLeft | kCapButtonRight | kCapButtonMiddle |
-           kCapButtonSide | kCapWheel | kCapKeyboard | kCapPhysicalRead;
+           kCapButtonSide | kCapWheel | kCapKeyboard | kCapKeyboardMask |
+           kCapPhysicalRead;
 }
 
 bool WrappedKmboxNetDriver::isOpen() const { return conn_ != nullptr && conn_->isOpen(); }
@@ -345,14 +340,47 @@ bool WrappedKmboxNetDriver::wheel(int delta)
 
 bool WrappedKmboxNetDriver::tapKey(int hidKey, int holdMs, int)
 {
-    if (!isOpen()) return false;
-    const int vk = hidUsageToVk(hidKey);
-    if (vk == 0) return false;
-
-    conn_->keyDown(vk);
+    if (!isOpen() || hidKey < 4 || hidKey > 231) return false;
+    const bool down = conn_->keyDown(hidKey);
     if (holdMs > 0) Sleep(static_cast<DWORD>(holdMs));
-    conn_->keyUp(vk);
-    return true;
+    const bool up = conn_->keyUp(hidKey);
+    return down && up;
+}
+
+bool WrappedKmboxNetDriver::maskRealKeyboard(int durationMs)
+{
+    // KMBoxNet masks one physical HID key per command. For auto-stop, only
+    // movement keys need to be held back; other keyboard input stays usable.
+    constexpr std::array<short, 4> movementKeys{4, 7, 22, 26}; // A D S W
+    if (!conn_ || !conn_->isOpen()) return false;
+    if (durationMs > 0 && movementMaskUncertain_ && !maskRealKeyboard(0))
+        return false;
+    bool okay = true;
+    for (size_t i = 0; i < movementKeys.size(); ++i)
+    {
+        if (durationMs > 0 && !movementKeysMasked_[i])
+        {
+            if (conn_->maskKeyboard(movementKeys[i])) movementKeysMasked_[i] = true;
+            else
+            {
+                // A timed-out UDP reply does not prove the box missed the
+                // command. Treat this key as possibly masked and undo it.
+                movementKeysMasked_[i] = true;
+                movementMaskUncertain_ = true;
+                okay = false;
+            }
+        }
+        else if (durationMs <= 0 && movementKeysMasked_[i])
+        {
+            if (conn_->unmaskKeyboard(movementKeys[i])) movementKeysMasked_[i] = false;
+            else { movementMaskUncertain_ = true; okay = false; }
+        }
+    }
+    if (!okay && durationMs > 0)
+        maskRealKeyboard(0);
+    if (durationMs <= 0 && okay)
+        movementMaskUncertain_ = false;
+    return okay;
 }
 
 int WrappedKmboxNetDriver::physicalButtonPressed(int button) const
@@ -376,9 +404,18 @@ OpenResult open(const std::string& backend,
                 const std::string& makcuNewPort, unsigned int makcuNewBaud,
                 const std::string& kmboxNetIp, const std::string& kmboxNetPort,
                 const std::string& kmboxNetUuid,
-                const std::string& makcuNewPortKbd, unsigned int makcuNewBaudKbd)
+                const std::string& makcuNewPortKbd, unsigned int makcuNewBaudKbd,
+                const std::string& ferrumPort, unsigned int ferrumBaud,
+                const std::string& dhzboxIp, unsigned short dhzboxPort, int dhzboxKey,
+                const std::string& catIp, unsigned short catPort,
+                const std::string& catUuid, unsigned short catMonitorPort)
 {
     OpenResult result;
+    if (backend == "WINDOWS") {
+        auto driver = std::make_unique<WindowsDriver>();
+        if (!driver->isOpen()) { result.error=driver->lastError(); return result; }
+        result.driver=driver.release(); return result;
+    }
 
     if (backend == kBackendMakcu)
     {
@@ -390,6 +427,30 @@ OpenResult open(const std::string& backend,
             return result;
         }
         result.driver = new OwningDriver<WrappedMakcuDriver>(std::move(conn));
+        return result;
+    }
+
+    if (backend == "CAT") {
+        auto driver=std::make_unique<CatDriver>(catIp,catPort,catUuid,catMonitorPort);
+        if(!driver->isOpen()) { result.error=driver->lastError(); return result; }
+        result.driver=driver.release(); return result;
+    }
+    if (backend == kBackendFerrum)
+    {
+        auto conn = std::make_unique<FerrumDriver>(ferrumPort, ferrumBaud);
+        if (!conn->isOpen()) {
+            result.error = errWith(u8"[FERRUM] 串口打不开或设备无响应", conn->lastError());
+            return result;
+        }
+        result.driver = conn.release();
+        return result;
+    }
+
+    if (backend == kBackendDhzboxMini)
+    {
+        auto conn = std::make_unique<DhzboxMiniDriver>(dhzboxIp, dhzboxPort, dhzboxKey);
+        if (!conn->isOpen()) { result.error = conn->lastError(); return result; }
+        result.driver = conn.release();
         return result;
     }
 

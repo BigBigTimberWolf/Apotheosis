@@ -6,12 +6,17 @@
 #include "widgets/ToggleSwitch.h"
 
 #include "capture/capture_card_probe.h"
+#include "capture/magewell_capture.h"
+#include "capture/stream_capture.h"
 
+#include <algorithm>
+#include <utility>
 #include <QComboBox>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPainter>
 #include <QPixmap>
 #include <QPoint>
@@ -76,6 +81,32 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_error->setStyleSheet(QStringLiteral("color:#ff6b6b;"));
     m_cardCard->contentLayout()->addWidget(m_error);
     m_error->hide();
+
+    m_sourceCombo = new QComboBox;
+    m_sourceCombo->addItem(QStringLiteral("采集卡"), QStringLiteral("device"));
+    m_sourceCombo->addItem(QStringLiteral("OBS / FFmpeg · UDP"), QStringLiteral("udp"));
+    m_sourceCombo->addItem(QStringLiteral("OBS / FFmpeg · TCP"), QStringLiteral("tcp"));
+    m_cardCard->contentLayout()->addWidget(
+        FormKit::fieldRow(QStringLiteral("采集来源"), m_sourceCombo));
+    connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &CapturePage::onSourceChanged);
+
+    m_streamUrl = new QLineEdit;
+    m_streamUrl->setPlaceholderText(QStringLiteral("udp://0.0.0.0:23000"));
+    m_streamUrl->setToolTip(QStringLiteral(
+        "UDP 接收示例：udp://0.0.0.0:23000?fifo_size=500000&overrun_nonfatal=1\n"
+        "TCP 监听示例：tcp://0.0.0.0:23000（自动监听）\n"
+        "先启动 Apotheosis，再在 OBS/FFmpeg 中开始向同一端口发送 MPEG-TS 视频流。"));
+    m_streamRow = FormKit::fieldRow(QStringLiteral("接收地址"), m_streamUrl);
+    m_cardCard->contentLayout()->addWidget(m_streamRow);
+    connect(m_streamUrl, &QLineEdit::editingFinished,
+            this, &CapturePage::onStreamUrlEdited);
+
+    const QString streamNote = QStringLiteral(
+        "OBS：输出模式选“高级” → 自定义输出 (FFmpeg) → 输出到 URL；"
+        "容器选 MPEG-TS。UDP 发送到 udp://本机IP:23000；"
+        "TCP 发送到 tcp://本机IP:23000（OBS 端不要加 listen=1）。");
+    m_streamUrl->setToolTip(m_streamUrl->toolTip() + "\n\n" + streamNote);
 
     m_devCombo = new QComboBox;
     m_devCombo->setToolTip(tr(
@@ -179,7 +210,59 @@ void CapturePage::showError(const QString& text) {
 
 void CapturePage::clearError() { showError(QString()); }
 
+void CapturePage::updateSourceUi() {
+    const bool network = m_sourceCombo->currentData().toString() != QStringLiteral("device");
+    m_streamRow->setVisible(network);
+    m_streamUrl->setEnabled(network);
+    m_devCombo->setEnabled(!network);
+    m_refreshBtn->setEnabled(!network);
+    m_fmtCombo->setEnabled(!network);
+    m_resCombo->setEnabled(!network);
+    m_fpsCombo->setEnabled(!network);
+    m_gpuDecode->setEnabled(!network &&
+        !(currentDevice() && magewell::IsDeviceKey(currentDevice()->friendly_name)));
+    updateCapabilitySummary();
+}
+
+void CapturePage::onSourceChanged(int) {
+    if (m_restoring || m_sourceCombo->currentIndex() < 0) return;
+    const QString source = m_sourceCombo->currentData().toString();
+    auto& cfg = ConfigManager::instance();
+    if (source != QStringLiteral("device")) {
+        const QString prefix = source + QStringLiteral("://");
+        if (!m_streamUrl->text().startsWith(prefix) ||
+            !stream_capture::ValidateUrl(source.toStdString(),
+                                         m_streamUrl->text().trimmed().toStdString()))
+            m_streamUrl->setText(source == QStringLiteral("udp")
+                ? QStringLiteral("udp://0.0.0.0:23000?fifo_size=500000&overrun_nonfatal=1")
+                : QStringLiteral("tcp://0.0.0.0:23000"));
+        cfg.setCaptureStreamUrl(m_streamUrl->text().trimmed());
+    }
+    cfg.setCaptureSource(source);
+    clearError();
+    updateSourceUi();
+    if (source == QStringLiteral("device")) refreshDevices();
+}
+
+void CapturePage::onStreamUrlEdited() {
+    const QString source = m_sourceCombo->currentData().toString();
+    if (source == QStringLiteral("device")) return;
+    const QString url = m_streamUrl->text().trimmed();
+    std::string reason;
+    if (!stream_capture::ValidateUrl(source.toStdString(), url.toStdString(), &reason)) {
+        showError(QStringLiteral("接收地址无效：%1").arg(QString::fromStdString(reason)));
+        return;
+    }
+    ConfigManager::instance().setCaptureStreamUrl(url);
+    clearError();
+    updateSourceUi();
+}
+
 void CapturePage::refreshDevices() {
+    if (m_sourceCombo->currentData().toString() != QStringLiteral("device")) {
+        updateSourceUi();
+        return;
+    }
     const bool prevRestoring = m_restoring;
     m_restoring = true;
 
@@ -196,6 +279,23 @@ void CapturePage::refreshDevices() {
         want = ConfigManager::instance().captureDevice();
 
     m_devices = capture_card::ProbeAll();
+    for (const auto& sdk : magewell::EnumerateDevices()) {
+        MFDeviceInfo d;
+        d.index = -1;
+        d.name = sdk.name;
+        d.friendly_name = sdk.key;
+        d.caps_probed = true;
+        if (sdk.signal_width > 0 && sdk.signal_height > 0) {
+            MFCapability cap;
+            cap.format = "SDK BGR24";
+            cap.width = sdk.signal_width;
+            cap.height = sdk.signal_height;
+            cap.fps = {sdk.signal_fps > 0 ? sdk.signal_fps : 60};
+            cap.supported = true;
+            d.caps.push_back(std::move(cap));
+        }
+        m_devices.push_back(std::move(d));
+    }
 
     {
         QSignalBlocker block(m_devCombo);
@@ -228,9 +328,18 @@ void CapturePage::refreshDevices() {
     }
 
     rebuildFormatCombo();
+    const MFDeviceInfo* selected = currentDevice();
+    m_gpuDecode->setEnabled(!(selected && magewell::IsDeviceKey(selected->friendly_name)));
 }
 
 void CapturePage::onDeviceChanged(int) {
+    if (m_sourceCombo->currentData().toString() != QStringLiteral("device")) return;
+    const MFDeviceInfo* dev = currentDevice();
+    const bool sdk = dev && magewell::IsDeviceKey(dev->friendly_name);
+    m_gpuDecode->setEnabled(!sdk);
+    if (sdk)
+        ConfigManager::instance().setCaptureDevice(
+            QString::fromStdString(dev->friendly_name));
     rebuildFormatCombo();
 }
 
@@ -249,11 +358,18 @@ void CapturePage::rebuildFormatCombo() {
         return;
     }
 
+    if (dev->caps.empty() && !magewell::IsDeviceKey(dev->friendly_name))
+        showError(QStringLiteral("采集卡能力读取失败：%1。请点击右侧刷新重试。")
+                  .arg(QString::fromStdString(mfcap::Describe(*dev))));
+
     for (const auto& f : mfcap::Formats(*dev))
         m_fmtCombo->addItem(QString::fromStdString(f));
 
     const QString want = ConfigManager::instance().captureFormat();
-    const int fi = m_fmtCombo->findText(want);
+    int fi = m_fmtCombo->findText(want);
+    if (fi < 0 && magewell::IsDeviceKey(dev->friendly_name)
+        && m_fmtCombo->count() > 0)
+        fi = 0;
     m_fmtCombo->setCurrentIndex(fi);
 
     if (fi < 0 && !want.isEmpty() && m_fmtCombo->count() > 0) {
@@ -343,6 +459,7 @@ void CapturePage::onFpsChanged(int) {
 
 void CapturePage::applySelectionToConfig() {
     if (m_restoring) return;
+    if (m_sourceCombo->currentData().toString() != QStringLiteral("device")) return;
 
     const MFDeviceInfo* dev = currentDevice();
     if (!dev) return;
@@ -371,6 +488,11 @@ void CapturePage::applySelectionToConfig() {
 }
 
 void CapturePage::updateCapabilitySummary() {
+    if (m_sourceCombo->currentData().toString() != QStringLiteral("device")) {
+        m_capSummary->setText(QStringLiteral("等待网络视频流；使用 FFmpeg 解码后输出中心裁切画面。"));
+        m_recommend->setText(QStringLiteral("发送端使用 MPEG-TS 视频流，接收端地址与端口按上方设置。"));
+        return;
+    }
     const MFDeviceInfo* dev = currentDevice();
 
     if (!dev) {
@@ -379,14 +501,23 @@ void CapturePage::updateCapabilitySummary() {
         return;
     }
 
-    m_capSummary->setText(QString::fromStdString(mfcap::Describe(*dev)));
+    if (magewell::IsDeviceKey(dev->friendly_name) && dev->caps.empty())
+        m_capSummary->setText(QStringLiteral("美乐威 SDK 已识别设备；当前无锁定的视频信号。"));
+    else if (dev->directshow_fallback)
+        m_capSummary->setText(QStringLiteral("DirectShow 回退：%1")
+                              .arg(QString::fromStdString(mfcap::Describe(*dev))));
+    else
+        m_capSummary->setText(QString::fromStdString(mfcap::Describe(*dev)));
 
     const auto& cfg = ConfigManager::instance();
     const int side = cfg.detectionResolution();
 
     std::string rf, why;
     int rw = 0, rh = 0, rffps = 0;
-    if (mfcap::PickBest(*dev, side, side, 240, rf, rw, rh, rffps, &why))
+    if (magewell::IsDeviceKey(dev->friendly_name) && !dev->caps.empty())
+        m_recommend->setText(QStringLiteral("SDK 读取当前输入信号，并直接输出中心 %1×%1 BGR 图像。")
+                             .arg(side));
+    else if (mfcap::PickBest(*dev, side, side, 240, rf, rw, rh, rffps, &why))
         m_recommend->setText(QString::fromStdString(why));
     else
         m_recommend->setText(QStringLiteral("该设备没有可用于采集的组合。"));
@@ -398,7 +529,13 @@ void CapturePage::onLoadConfig() {
     m_gpuDecode->setChecked(cfg.captureGpuDecode());
 
     m_restoring = true;
+    {
+        QSignalBlocker blocker(m_sourceCombo);
+        const int sourceIndex = m_sourceCombo->findData(cfg.captureSource());
+        m_sourceCombo->setCurrentIndex(sourceIndex >= 0 ? sourceIndex : 0);
+    }
+    m_streamUrl->setText(cfg.captureStreamUrl());
     refreshDevices();
     m_restoring = false;
-    updateCapabilitySummary();
+    updateSourceUi();
 }

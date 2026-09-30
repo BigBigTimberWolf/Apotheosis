@@ -15,13 +15,16 @@ int main()
 {
     using namespace mouse_driver;
 
-    std::cout << "[1] 后端名称列表必须包含三家...\n";
+    std::cout << "[1] 后端名称列表必须包含六种方式...\n";
     {
         const auto names = backendNames();
-        CHECK(names.size() == 3);
+        CHECK(names.size() == 6);
         CHECK(names[0] == kBackendMakcu);
         CHECK(names[1] == kBackendMakcuNew);
         CHECK(names[2] == kBackendKmboxNet);
+        CHECK(names[3] == kBackendFerrum);
+        CHECK(names[4] == kBackendDhzboxMini);
+        CHECK(names[5] == "WINDOWS");
     }
 
     std::cout << "[2] 能力位中文描述...\n";
@@ -56,6 +59,17 @@ int main()
         CHECK(res.error.find("MAKCU") != std::string::npos);
         CHECK(res.error.find("MAKCUNEW") != std::string::npos);
         CHECK(res.error.find("KMBOXNET") != std::string::npos);
+        CHECK(res.error.find("FERRUM") != std::string::npos);
+        CHECK(res.error.find("DHZBOX_MINI") != std::string::npos);
+    }
+
+    {
+        const auto ferrum = open("FERRUM", "", 0, "", 0, "", "", "");
+        CHECK(ferrum.driver == nullptr);
+        CHECK(!ferrum.error.empty());
+        const auto dhzbox = open("DHZBOX_MINI", "", 0, "", 0, "", "", "");
+        CHECK(dhzbox.driver == nullptr);
+        CHECK(!dhzbox.error.empty());
     }
 
     std::cout << "[5] KMBOXNET 未填 IP 时拒绝并给出理由...\n";
@@ -76,6 +90,7 @@ int main()
         CHECK(!d_makcu.tapKey(0x1A, 50, 0));
         CHECK(d_makcu.physicalButtonPressed(1) == -1);
         CHECK((d_makcu.capabilities() & kCapKeyboard) == 0);
+        CHECK((d_makcu.capabilities() & kCapKeyboardMask) == 0);
         CHECK((d_makcu.capabilities() & kCapMove) != 0);
 
         // 双硬件构造: (鼠标那台, 键盘那台)。两者都可以为 null。
@@ -91,6 +106,7 @@ int main()
         //   - 键盘动作必须失败, 且【绝不回落】到鼠标那台(否则屏蔽会误伤鼠标输入);
         //   - 鼠标能力必须完好无损。
         CHECK((d_new.capabilities() & kCapKeyboard) == 0);
+        CHECK((d_new.capabilities() & kCapKeyboardMask) == 0);
         CHECK((d_new.capabilities() & kCapMove) != 0);
         CHECK((d_new.capabilities() & kCapWheel) != 0);
         CHECK((d_new.capabilities() & kCapButtonLeft) != 0);
@@ -102,6 +118,8 @@ int main()
         CHECK(!d_km.isOpen());
         CHECK(!d_km.move(10, 20));
         CHECK((d_km.capabilities() & kCapKeyboard) != 0);
+        CHECK((d_km.capabilities() & kCapKeyboardMask) != 0);
+        CHECK(!d_km.maskRealKeyboard(2000));
         CHECK(d_km.directSend());
     }
 

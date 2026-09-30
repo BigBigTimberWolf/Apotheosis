@@ -59,11 +59,6 @@ SessionPage::SessionPage(QWidget* parent)
         "开启后弹出一个独立窗口,实时叠画检测框/锁定目标/瞄准 FOV,\n"
         "用来验证模型识别和瞄准逻辑;不影响游戏画面与瞄准。"));
 
-    auto* previewHint = new QLabel(tr("勾选后会在控制台外浮出一个可拖动 / 缩放的预览窗口。"));
-    previewHint->setProperty("class", "secondary");
-    previewHint->setWordWrap(true);
-    pc->addWidget(previewHint);
-
     layout->addWidget(previewCard);
 
     auto* cudaCard = new CardWidget(tr("CUDA 设置"), QStringLiteral("settings"), container);
@@ -81,8 +76,9 @@ SessionPage::SessionPage(QWidget* parent)
         m_gpuReserve->setSingleStep(256);
 
         QSlider* cpuSlider = nullptr;
-        gc->addWidget(FormKit::sliderRow(tr("CPU 核心"), 1, 32, config.cpuCoreReserveCount,
+        gc->addWidget(FormKit::sliderRow(tr("CPU 核心"), 0, 32, config.cpuCoreReserveCount,
                                          cpuSlider, m_cpuReserve));
+        m_cpuReserve->setToolTip(tr("0 = 使用系统默认调度，不限制应用可用核心。"));
 
         QSlider* memorySlider = nullptr;
         gc->addWidget(FormKit::sliderRow(tr("系统内存"), 0, 32768, config.systemMemoryReserveMB,
@@ -90,10 +86,7 @@ SessionPage::SessionPage(QWidget* parent)
         m_systemMemoryReserve->setSingleStep(256);
     }
 
-    auto* restartHint = new QLabel(tr("GPU/CPU/系统资源预留与 GPU 独占模式在下次启动应用时生效。"));
-    restartHint->setProperty("class", "secondary");
-    restartHint->setWordWrap(true);
-    gc->addWidget(restartHint);
+    cudaCard->setToolTip(tr("GPU/CPU/系统资源预留与 GPU 独占模式在下次启动应用时生效。"));
 
     connect(m_cudaGraph, &ToggleSwitch::toggled, this, [this](bool v) {
         std::lock_guard<std::recursive_mutex> lk(configMutex);

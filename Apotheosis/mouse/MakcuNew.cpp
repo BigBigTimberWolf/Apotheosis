@@ -80,6 +80,8 @@ MakcuNewConnection::MakcuNewConnection(const std::string& port, unsigned int bau
 MakcuNewConnection::~MakcuNewConnection()
 {
     wantOpen_.store(false);
+    for(int b=1;b<=5;++b) if(ownedMasks_[b]) maskPhysicalButton(b,false);
+    for(int a=0;a<2;++a) if(ownedAxisMasks_[a]) maskPhysicalAxis(a,false);
     if (open_.load())
     {
         subscribeAsync(false);
@@ -117,6 +119,7 @@ bool MakcuNewConnection::establishSession()
         }
         baudRate_ = baud;
         open_.store(true);
+        asciiMouseProtocol_=probeAscii("km.hotkeycaps()","hotkeylocks=1",150);
         initializeProtocolSession();
         std::cout << "[MakcuNew] Connected on " << port_ << " @ " << baudRate_
                   << " bps" << (note ? note : "") << std::endl;
@@ -140,6 +143,7 @@ bool MakcuNewConnection::establishSession()
                 closeSession();
                 continue;
             }
+            asciiMouseProtocol_=probeAscii("km.hotkeycaps()","hotkeylocks=1",150);
 
             if (candidate == requestedBaud)
             {
@@ -153,6 +157,20 @@ bool MakcuNewConnection::establishSession()
 
             std::cout << "[MakcuNew] Requesting baud switch to " << requestedBaud
                       << " bps ..." << std::endl;
+
+            if(asciiMouseProtocol_) {
+                // The current mouse firmware is ASCII-only. Binary baud frames
+                // would remain in its line buffer and corrupt the next command.
+                const auto command="SERIAL_"+std::to_string(requestedBaud);
+                writeAsciiLine(command.c_str());
+                std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+                closeSession();
+                if(tryConnectAt(requestedBaud," (ASCII)")) return true;
+                closeSession();
+                if(tryConnectAt(kBootBaud," (fallback)")) return true;
+                closeSession();
+                continue;
+            }
 
             {
                 uint8_t payload[4];
@@ -447,7 +465,9 @@ void MakcuNewConnection::feedAsciiByte(uint8_t b)
     // 判定依据: 只有在【我们自己开启了】km.buttons 模式时才把 <0x20 当掩码,
     // 否则退回原有的文本语义 —— 与未开该模式时的行为逐字节一致, 不影响
     // km.version 探活(应答是 ASCII 文本, 不含 <0x20 字节)。
-    if (makcuButtonsModeOn_.load(std::memory_order_acquire) && b < 0x20)
+    bool textInProgress=false;
+    { std::lock_guard<std::mutex> lock(asciiMutex_); textInProgress=!asciiAccum_.empty(); }
+    if (makcuButtonsModeOn_.load(std::memory_order_acquire) && b < 0x20 && !textInProgress)
     {
         // 0x0A/0x0D 是文本行结束符, 固件的 ASCII 应答不会与掩码流同时出现
         // (固件在 s_tx0_mtx 内二选一发送), 因此这里直接按掩码处理。
@@ -533,6 +553,7 @@ bool MakcuNewConnection::probeAscii(const std::string& command,
 
 bool MakcuNewConnection::initializeProtocolSession()
 {
+    ++sessionGeneration_;
     realButtons_.store(0, std::memory_order_release);
     injectedButtons_.store(0, std::memory_order_release);
     buttonStreamReady_.store(false, std::memory_order_release);
@@ -580,6 +601,10 @@ uint8_t MakcuNewConnection::buttonBit(int button)
 
 bool MakcuNewConnection::move(int x, int y)
 {
+    if(asciiMouseProtocol_) {
+        const auto command="km.move("+std::to_string(x)+","+std::to_string(y)+")";
+        return writeAsciiLine(command.c_str());
+    }
     if (!open_.load(std::memory_order_acquire)) return false;
     const int cx = std::clamp(x, -32768, 32767);
     const int cy = std::clamp(y, -32768, 32767);
@@ -595,31 +620,53 @@ bool MakcuNewConnection::move(int x, int y)
 
 void MakcuNewConnection::cancelMove()
 {
+    if(asciiMouseProtocol_) { writeAsciiLine("km.move(0,0)"); return; }
     if (!open_.load(std::memory_order_acquire)) return;
     sendFrame(makcu::CMD_MOVE_CANCEL, nullptr, 0);
 }
 
-void MakcuNewConnection::press(int button)
+bool MakcuNewConnection::press(int button)
 {
-    if (!open_.load(std::memory_order_acquire)) return;
+    if(asciiMouseProtocol_) {
+        static const char* names[]={"","left","right","middle","side1","side2"};
+        if(button<1 || button>5) return false;
+        const auto command=std::string("km.")+names[button]+"(1)";
+        return writeAsciiLine(command.c_str());
+    }
+    if (!open_.load(std::memory_order_acquire)) return false;
     const uint8_t bit = buttonBit(button);
-    if (!bit) return;
+    if (!bit) return false;
     const uint8_t state = static_cast<uint8_t>(outputButtons_.fetch_or(bit) | bit);
-    sendFrame(makcu::CMD_BUTTON_MASK, &state, 1);
+    if (sendFrame(makcu::CMD_BUTTON_MASK, &state, 1)) return true;
+    outputButtons_.fetch_and(static_cast<uint8_t>(~bit));
+    return false;
 }
 
-void MakcuNewConnection::release(int button)
+bool MakcuNewConnection::release(int button)
 {
-    if (!open_.load(std::memory_order_acquire)) return;
+    if(asciiMouseProtocol_) {
+        static const char* names[]={"","left","right","middle","side1","side2"};
+        if(button<1 || button>5) return false;
+        const auto command=std::string("km.")+names[button]+"(0)";
+        return writeAsciiLine(command.c_str());
+    }
+    if (!open_.load(std::memory_order_acquire)) return false;
     const uint8_t bit = buttonBit(button);
-    if (!bit) return;
+    if (!bit) return false;
     const uint8_t inverse = static_cast<uint8_t>(~bit);
     const uint8_t state = static_cast<uint8_t>(outputButtons_.fetch_and(inverse) & inverse);
-    sendFrame(makcu::CMD_BUTTON_MASK, &state, 1);
+    if (sendFrame(makcu::CMD_BUTTON_MASK, &state, 1)) return true;
+    outputButtons_.fetch_or(bit);
+    return false;
 }
 
 void MakcuNewConnection::click(int button)
 {
+    if(asciiMouseProtocol_) {
+        if(button<1 || button>5) return;
+        const auto command="km.click("+std::to_string(1<<(button-1))+",30)";
+        writeAsciiLine(command.c_str()); return;
+    }
     if (!open_.load(std::memory_order_acquire)) return;
     const uint8_t bit = buttonBit(button);
     if (!bit) return;
@@ -632,6 +679,10 @@ void MakcuNewConnection::click(int button)
 
 void MakcuNewConnection::wheel(int delta)
 {
+    if(asciiMouseProtocol_) {
+        const auto command="km.wheel("+std::to_string(delta)+")";
+        writeAsciiLine(command.c_str()); return;
+    }
     if (!open_.load(std::memory_order_acquire)) return;
     const int8_t value = static_cast<int8_t>(std::clamp(delta, -127, 127));
     sendFrame(makcu::CMD_WHEEL, reinterpret_cast<const uint8_t*>(&value), 1);
@@ -650,10 +701,46 @@ bool MakcuNewConnection::tapKey(int hidKey, int holdMs, int mod)
     return sendFrame(makcu::CMD_KEY_TAP, payload, sizeof(payload));
 }
 
+bool MakcuNewConnection::sendKeyboardReport(uint8_t modifiers, const std::array<uint8_t,6>& keys)
+{
+    if (!open_.load(std::memory_order_acquire)) return false;
+    uint8_t payload[7]{modifiers};
+    std::copy(keys.begin(), keys.end(), payload + 1);
+    return sendFrame(makcu::CMD_KEY_MASK, payload, sizeof(payload));
+}
+
 bool MakcuNewConnection::physicalButtonPressed(int button) const
 {
     const uint8_t bit = buttonBit(button);
     return bit && (realButtons_.load(std::memory_order_acquire) & bit) != 0;
+}
+
+bool MakcuNewConnection::maskPhysicalButton(int button, bool enabled)
+{
+    static const char* names[]={"","ml","mr","mm","ms1","ms2"};
+    if(button<1 || button>5 || !isOpen()) return false;
+    std::lock_guard<std::mutex> lock(maskMutex_);
+    if(!enabled && !ownedMasks_[button]) return true;
+    if(!asciiMouseProtocol_) return false;
+    const auto prefix=std::string("km.lock_")+names[button];
+    if(enabled) ownedMasks_[button]=true;
+    if(!writeAsciiLine((prefix+(enabled ? "(1)" : "(0)")).c_str())) return false;
+    const bool ok=probeAscii(prefix+"()",prefix+(enabled ? "(1)" : "(0)"),150);
+    if(ok && !enabled) ownedMasks_[button]=false;
+    return ok;
+}
+
+bool MakcuNewConnection::maskPhysicalAxis(int axis, bool enabled) {
+    if(axis<0 || axis>1 || !isOpen()) return false;
+    std::lock_guard<std::mutex> lock(maskMutex_);
+    if(!enabled && !ownedAxisMasks_[axis]) return true;
+    if(!asciiMouseProtocol_) return false;
+    const std::string prefix=axis==0 ? "km.lock_mx" : "km.lock_my";
+    if(enabled) ownedAxisMasks_[axis]=true;
+    if(!writeAsciiLine((prefix+(enabled ? "(1)" : "(0)")).c_str())) return false;
+    const bool ok=probeAscii(prefix+"()",prefix+(enabled ? "(1)" : "(0)"),150);
+    if(ok && !enabled) ownedAxisMasks_[axis]=false;
+    return ok;
 }
 
 void MakcuNewConnection::readerLoop()

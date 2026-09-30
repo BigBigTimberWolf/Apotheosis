@@ -345,6 +345,7 @@ ModelMetadata inspect_onnx_model(const std::string& model_path, bool verbose)
         Ort::TypeInfo output_type_info = session.GetOutputTypeInfo(0);
         auto output_tensor_info = output_type_info.GetTensorTypeAndShapeInfo();
         std::vector<int64_t> output_shape = output_tensor_info.GetShape();
+        out.output_shape = output_shape;
         if (output_shape.size() == 3)
         {
             const int64_t dim1 = output_shape[1];

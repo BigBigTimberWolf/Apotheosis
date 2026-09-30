@@ -27,6 +27,7 @@ struct CrosshairDetectorSettings
 
     int rect_w = 64;
     int rect_h = 64;
+    int offset_y = 0;
 
     std::vector<CrosshairColorBand> colors;
 

@@ -141,6 +141,30 @@ static void test_delay()
     }
 }
 
+static void test_first_shot_delay_only()
+{
+    std::printf("\n[3a] 首发延迟只作用于新目标，连发只走间隔\n");
+    boss::TriggerFsm f;
+    auto act = [&](int id, int64_t at) {
+        boss::TriggerFsm::Input in;
+        in.in_zone = true; in.track_id = id; in.now_ms = at;
+        return f.tick(in, false, 40, 20, 100, 0, 0, 0, 0);
+    };
+    check(!act(1, 1000).fired && act(1, 1040).fired,
+          "新目标首枪等待 40 ms");
+    check(act(1, 1060).release_left, "首枪 20 ms 后松左键");
+    check(act(1, 1160).fired, "第二枪在冷却到点直接开火，不重复首发延迟");
+    check(act(1, 1180).release_left, "第二枪正确松左键");
+    check(!act(2, 1280).fired && act(2, 1320).fired,
+          "切到新目标后重新应用首发延迟");
+
+    f.reset();
+    check(!act(1, 2000).fired, "目标 1 开始首发等待");
+    check(!act(2, 2020).fired, "等待中切目标不沿用旧计时");
+    check(!act(2, 2040).fired && act(2, 2060).fired,
+          "新目标从切换时重新等待 40 ms");
+}
+
 static void test_burst_mode()
 {
     std::printf("\n[4] 连点模式 (duration>0)\n");
@@ -151,6 +175,22 @@ static void test_burst_mode()
     check(r.press == r.release || r.press == r.release + 1,
           "★ 每一发都配对的按下/抬起(不会卡在按下)");
     check(r.fired == r.press, "每发 fire 标记与 press 一一对应");
+}
+
+static void test_lua_interval_from_shot_start()
+{
+    boss::TriggerFsm f;
+    boss::TriggerFsm::Input in;
+    auto tick = [&](int64_t at) {
+        in.in_zone = true;
+        in.track_id = 1;
+        in.now_ms = at;
+        return f.tick(in, false, 0, 20, 50, 0, 0, 0, 0);
+    };
+    check(tick(1000).fired, "Lua cadence: first shot at 1000");
+    check(tick(1020).release_left, "Lua cadence: release after 20 ms");
+    check(!tick(1049).fired, "Lua cadence: interval not reached");
+    check(tick(1050).fired, "Lua cadence: 50 ms from shot start, not release");
 }
 
 static void test_hold_mode()
@@ -182,6 +222,19 @@ static void test_switch_cooldown()
     {
         boss::TriggerFsm f;
         boss::TriggerFsm::Input in;
+        auto act = [&](int id, int64_t t) {
+            in.in_zone = true; in.track_id = id; in.now_ms = t;
+            return f.tick(in, false, 50, 20, 200, 100, 0, 0, 0);
+        };
+        check(!act(1, 0).press_left, "开枪前等待 50ms");
+        check(!act(2, 20).press_left && !act(3, 40).press_left,
+              "命中区内追踪 ID 改变不会提前开枪");
+        check(!act(4, 50).press_left && act(5, 70).press_left,
+              "命中区内追踪 ID 抖动不会把开枪无限推迟");
+    }
+    {
+        boss::TriggerFsm f;
+        boss::TriggerFsm::Input in;
         auto act = [&](bool zone, int id, int64_t t) {
             in.in_zone = zone; in.track_id = id; in.now_ms = t;
             return f.tick(in,   true, 0, 0, 200,   100, 0, 0, 0);
@@ -209,6 +262,11 @@ static void test_switch_cooldown()
         act(false, 2, 120);
         check(f.phase() != boss::TriggerPhase::SwitchCooldown,
               "转火冷却到点后退出");
+        act(false, 3, 121);
+        check(f.phase() != boss::TriggerPhase::SwitchCooldown,
+              "没有再开枪时，追踪 ID 抖动不能反复重启转火冷却");
+        check(act(true, 3, 122).press_left,
+              "转火冷却结束后新目标可以开枪");
     }
     {
         boss::TriggerFsm f;
@@ -258,18 +316,93 @@ static void test_target_loss_releases()
     boss::ScopeController scope;
     run(trigger, 1, 0, 10, true, 1, true, 0, 0, 200);
     scope.tick(true, true, 2, 0, 0);
-    const auto held = boss::releaseOnTargetLoss(trigger, scope, 2);
+    const auto held = boss::releaseOnTargetLoss(trigger, scope, 2, 10);
     check(held.left && held.right, "目标消失时释放长按的左键和右键");
-    const auto again = boss::releaseOnTargetLoss(trigger, scope, 2);
+    const auto again = boss::releaseOnTargetLoss(trigger, scope, 2, 11);
     check(!again.left && !again.right, "连续丢框不会重复发送松键");
 
     boss::ScopeController tapScope;
     tapScope.tick(true, true, 1, 0, 0);
-    const auto tap = boss::releaseOnTargetLoss(trigger, tapScope, 1);
-    check(tap.right, "点按开镜时先完成待释放的短按");
+    const auto earlyTap = boss::releaseOnTargetLoss(trigger, tapScope, 1, 10);
+    check(!earlyTap.right, "目标暂离时仍保证右键点按时长");
+    const auto tap = boss::releaseOnTargetLoss(trigger, tapScope, 1, 20);
+    check(tap.right, "点按开镜满 20ms 后松开右键");
     check(tapScope.engaged(), "丢框后保留点按开镜状态，重获目标不再点一次");
-    check(!tapScope.tick(true, true, 1, 0, 20).press_right,
+    check(!tapScope.tick(true, true, 1, 0, 21).press_right,
           "重获目标不会把游戏里的镜关掉");
+}
+
+static void test_target_loss_grace()
+{
+    boss::TriggerFsm trigger;
+    boss::ScopeController scope;
+    scope.tick(true, true, 2, 0, 0);
+    run(trigger, 1, 0, 10, true, 1, true);
+    auto loss = boss::releaseOnTargetLoss(trigger, scope, 2, 10, 100);
+    check(!loss.left && !loss.right && trigger.pressed() && scope.engaged(),
+          "missing target keeps the existing sustained press and held scope");
+    loss = boss::releaseOnTargetLoss(trigger, scope, 2, 109, 100);
+    check(!loss.left && trigger.pressed(), "grace lasts through the last millisecond");
+    loss = boss::releaseOnTargetLoss(trigger, scope, 2, 110, 100);
+    check(loss.left && loss.right && !trigger.pressed(),
+          "deadline releases once; repeated missing frames cannot extend it");
+    check(!boss::releaseOnTargetLoss(trigger, scope, 2, 111, 100).left,
+          "missing target cannot start another shot");
+
+    run(trigger, 1, 200, 10, true, 1, true);
+    boss::releaseOnTargetLoss(trigger, scope, 2, 210, 100);
+    auto recovered = run(trigger, 1, 260, 10, true, 1, true);
+    check(recovered.press == 0 && recovered.release == 0 && trigger.pressed(),
+          "reacquiring before deadline continues without another click");
+    check(!boss::releaseOnTargetLoss(trigger, scope, 2, 280, 100).left &&
+          !boss::releaseOnTargetLoss(trigger, scope, 2, 379, 100).left &&
+          boss::releaseOnTargetLoss(trigger, scope, 2, 380, 100).left,
+          "a later disappearance gets its own deadline");
+
+    run(trigger, 1, 400, 10, true, 1, true);
+    boss::releaseOnTargetLoss(trigger, scope, 2, 410, 100);
+    check(trigger.reset() && !trigger.pressed(), "hotkey release/reset cancels grace immediately");
+    run(trigger, 1, 420, 10, true, 1, true);
+    check(boss::releaseOnTargetLoss(trigger, scope, 2, 421, 0).left,
+          "zero grace preserves immediate release");
+    run(trigger, 1, 430, 10, true, 1, false, 0, 20);
+    check(boss::releaseOnTargetLoss(trigger, scope, 2, 431, 100).left,
+          "finite clicks and switch pulses are never prolonged");
+    run(trigger, 1, 440, 10, true, 1, true);
+    boss::releaseOnTargetLoss(trigger, scope, 2, 441, 100);
+    check(run(trigger, 1, 442, 10, false, 1, true).release == 1,
+          "visible target outside the hit zone ends grace immediately");
+    trigger.reset();
+    run(trigger, 1, 450, 10, true, 1, true);
+    boss::releaseOnTargetLoss(trigger, scope, 2, 451, 100);
+    check(boss::releaseTriggerIfUnavailable(trigger, false, true),
+          "disabling trigger immediately releases during grace");
+    run(trigger, 1, 460, 10, true, 1, true, 50);
+    boss::releaseOnTargetLoss(trigger, scope, 2, 461, 100);
+    check(!trigger.pressed() && trigger.phase() == boss::TriggerPhase::Idle,
+          "target loss cancels pending first shots instead of firing blind");
+}
+
+static void test_timed_press_survives_target_loss()
+{
+    boss::TriggerFsm trigger;
+    boss::ScopeController scope;
+    scope.tick(true, true, 2, 0, 0);
+    const auto started = run(trigger, 1, 0, 10, true, 1, false, 0, 80, 200);
+    check(started.press == 1 && trigger.pressed(),
+          "定时按住已开始");
+    const auto early = boss::releaseOnTargetLoss(trigger, scope, 2, 10, 0, true);
+    check(!early.left && !early.right && trigger.pressed() && scope.engaged(),
+          "短暂丢目标不截断已开始的定时按住和开镜");
+    const auto late = boss::releaseOnTargetLoss(trigger, scope, 2, 79, 0, true);
+    check(!late.left && trigger.pressed(), "定时按住持续到设置的时长");
+    const auto due = boss::releaseOnTargetLoss(trigger, scope, 2, 80, 0, true);
+    check(due.left && due.right && !trigger.pressed(),
+          "时长到点才释放左键和长按开镜");
+
+    run(trigger, 1, 100, 10, true, 1, false, 0, 80, 200);
+    check(boss::releaseOnTargetLoss(trigger, scope, 2, 110, 0, false).left,
+          "禁用扳机或主动松热键仍立即释放");
 }
 
 static void test_scope_unready_releases_trigger()
@@ -288,6 +421,33 @@ static void test_scope_unready_releases_trigger()
           "目标离开命中区后长按开镜松右键并变为未就绪");
     check(boss::releaseTriggerIfUnavailable(trigger, true, ready) && !trigger.pressed(),
           "开镜未就绪时即使目标仍被检测到，也归还长按左键");
+}
+
+static void test_scope_reopens_after_weapon_switch()
+{
+    boss::ScopeController scope;
+    check(scope.tick(true, true, 1, 0, 0).press_right,
+          "第一枪前点按开镜");
+    check(!scope.tick(true, true, 1, 0, 1).release_right &&
+          !scope.ready(true, 1, 0, 1),
+          "点按开镜前 20ms 不松右键，也不能开枪");
+    check(scope.tick(true, true, 1, 0, 20).release_right &&
+          scope.ready(true, 1, 0, 20),
+          "点按开镜满 20ms 后松右键，才允许开枪");
+    boss::ScopeController failedRelease;
+    failedRelease.tick(true, true, 1, 0, 100);
+    check(failedRelease.tick(true, true, 1, 0, 120).release_right,
+          "右键松开指令在 20ms 后发出");
+    failedRelease.retryTapRelease(120);
+    check(!failedRelease.ready(true, 1, 0, 120) &&
+          failedRelease.tick(true, true, 1, 0, 121).release_right &&
+          failedRelease.ready(true, 1, 0, 121),
+          "右键松开写入失败时不能开枪，下一拍重试");
+    scope.forceRelease(); // 完成 3-1 切枪后，游戏已退出镜内
+    check(!scope.tick(false, true, 1, 0, 30).press_right,
+          "切枪执行期间不重新开镜");
+    check(scope.tick(true, true, 1, 0, 200).press_right,
+          "持续按住热键时，下一枪重新点按开镜");
 }
 
 static void test_linear_passthrough()
@@ -552,12 +712,17 @@ int main()
     test_hit_zone();
     test_zero_delay();
     test_delay();
+    test_first_shot_delay_only();
     test_burst_mode();
+    test_lua_interval_from_shot_start();
     test_hold_mode();
     test_switch_cooldown();
     test_reset_releases();
     test_target_loss_releases();
+    test_target_loss_grace();
+    test_timed_press_survives_target_loss();
     test_scope_unready_releases_trigger();
+    test_scope_reopens_after_weapon_switch();
 
     test_linear_passthrough();
     test_no_scaling();

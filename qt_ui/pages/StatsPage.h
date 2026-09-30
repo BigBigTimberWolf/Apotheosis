@@ -36,6 +36,9 @@ public:
     void setCpuCores(const QString& text);
     void setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs, double inferMs,
                                     double publishToAimMs, double endToEndMs);
+    void setPipelineDiagnostics(double totalGpuMs, double preprocessMs, double engineMs, double copyMs,
+                                double postprocessMs, double aimTickMs, double aimTickPeakMs,
+                                bool graphMode);
 
 private:
     QLabel* m_fpsValue{};
@@ -50,6 +53,16 @@ private:
     QLabel* m_diagInfer{};
     QLabel* m_diagPublishToAim{};
     QLabel* m_diagEndToEnd{};
+    QLabel* m_controlDt{};
+    QLabel* m_controlCaptureAge{};
+    QLabel* m_derivativeRaw{};
+    QLabel* m_gpuPipeline{};
+    QLabel* m_gpuPreprocess{};
+    QLabel* m_gpuEngine{};
+    QLabel* m_gpuCopy{};
+    QLabel* m_cpuPostprocess{};
+    QLabel* m_aimTick{};
+    QLabel* m_aimTickPeak{};
     QLabel* m_mouseQueueLatency{};
     QLabel* m_mouseQueueBacklog{};
     QLabel* m_mouseSendFailures{};

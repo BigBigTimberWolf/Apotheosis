@@ -2,12 +2,14 @@
 #include "widgets/ToggleSwitch.h"
 
 #include <QDoubleSpinBox>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QSlider>
 #include <QSpinBox>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -118,7 +120,13 @@ QWidget* sliderRowD(const QString& label, double min, double max, double value,
 QWidget* fieldRow(const QString& label, QWidget* control) {
     QHBoxLayout* h = nullptr;
     QWidget* row = makeRow(h);
-    h->addWidget(makeLabel(label));
+    auto* text = new QLabel(label);
+    text->setProperty("class", "secondary");
+    text->setWordWrap(true);
+    text->setToolTip(control->toolTip());
+    text->setFixedWidth(std::clamp(text->fontMetrics().horizontalAdvance(label) + 12,
+                                    120, 240));
+    h->addWidget(text);
     if (control->sizePolicy().horizontalPolicy() == QSizePolicy::Fixed) {
         h->addWidget(control);
         h->addStretch();

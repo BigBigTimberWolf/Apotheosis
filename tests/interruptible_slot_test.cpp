@@ -17,6 +17,14 @@ int main()
     CHECK(!lifetime.expired());
     output.reset();
     CHECK(lifetime.expired());
+    auto stale = std::make_shared<int>(1);
+    std::weak_ptr<int> staleLifetime = stale;
+    slot.publish(stale);
+    stale.reset();
+    slot.publish(std::make_shared<int>(2));
+    CHECK(staleLifetime.expired());
+    CHECK(slot.wait(output, stop) && *output == 2);
+    output.reset();
     auto pending = std::async(std::launch::async, [&] { return slot.wait(output, stop); });
     stop.store(true);
     CHECK(pending.wait_for(1s) == std::future_status::ready);

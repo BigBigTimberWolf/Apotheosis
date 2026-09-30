@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <Windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -17,7 +18,8 @@
 #include "Apotheosis.h"
 #include "capture.h"
 #include "config/config.h"
-#include "control/aim_controller.h"   // 预览叠加用: StabilizerVerdict / IdleReason
+#include "control/controller_contract.h"   // 预览叠加用: 状态码
+#include "control/follow_compensator.h"
 #include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
 #include "crosshair/crosshair_runtime.h"
@@ -41,21 +43,155 @@ cv::Mat    g_clean_frame;
 int        g_pick_cursor_x = -1;
 int        g_pick_cursor_y = -1;
 bool       g_pick_cursor_inside = false;
+cv::Rect   g_display_content;
+std::string g_preview_title;
+cv::Size g_view_source_size;
+
+// Coordinates stay in capture pixels. Rasterize overlays only after scaling
+// the background, so enlarging the window does not enlarge rasterized text.
+struct PreviewCanvas
+{
+    cv::Mat image;
+    int cols, rows;
+    double scale;
+
+    cv::Rect content;
+
+    PreviewCanvas(cv::Size source, cv::Size display, cv::Scalar background)
+        : image(display, CV_8UC3, cv::Scalar(0, 0, 0)), cols(source.width), rows(source.height),
+          scale(std::min(double(display.width) / cols, double(display.height) / rows))
+    {
+        const cv::Size fitted(std::max(1, cvRound(cols * scale)), std::max(1, cvRound(rows * scale)));
+        content = cv::Rect((display.width - fitted.width) / 2,
+                           (display.height - fitted.height) / 2, fitted.width, fitted.height);
+        image(content).setTo(background);
+    }
+    PreviewCanvas(const cv::Mat& source, cv::Size display)
+        : PreviewCanvas(source.size(), display, cv::Scalar(0, 0, 0))
+    {
+        cv::Mat target = image(content);
+        if (content.size() == source.size()) source.copyTo(target);
+        else cv::resize(source, target, content.size(), 0, 0,
+                        content.width < cols ? cv::INTER_AREA : cv::INTER_CUBIC);
+    }
+
+    bool empty() const { return image.empty(); }
+    int type() const { return image.type(); }
+    int length(int v) const { return std::max(1, cvRound(v * scale)); }
+    int stroke(int v) const { return v < 0 ? v : length(v); }
+    cv::Point point(cv::Point p) const { return {content.x + cvRound(p.x * scale), content.y + cvRound(p.y * scale)}; }
+    cv::Rect rect(cv::Rect r) const {
+        const auto a = point(r.tl()), b = point(r.br());
+        return cv::Rect(a, b);
+    }
+};
+
+namespace preview_draw {
+void rectangle(PreviewCanvas& c, cv::Rect r, cv::Scalar color, int thickness, int type) {
+    cv::rectangle(c.image, c.rect(r), color, c.stroke(thickness), type);
+}
+void line(PreviewCanvas& c, cv::Point a, cv::Point b, cv::Scalar color, int thickness, int type) {
+    cv::line(c.image, c.point(a), c.point(b), color, c.stroke(thickness), type);
+}
+void circle(PreviewCanvas& c, cv::Point p, int radius, cv::Scalar color, int thickness, int type) {
+    cv::circle(c.image, c.point(p), c.length(radius), color, c.stroke(thickness), type);
+}
+void ellipse(PreviewCanvas& c, cv::Point p, cv::Size axes, double angle,
+             double start, double end, cv::Scalar color, int thickness, int type) {
+    cv::ellipse(c.image, c.point(p), {c.length(axes.width), c.length(axes.height)},
+                angle, start, end, color, c.stroke(thickness), type);
+}
+void drawMarker(PreviewCanvas& c, cv::Point p, cv::Scalar color, int marker,
+                int size, int thickness, int type) {
+    cv::drawMarker(c.image, c.point(p), color, marker, c.length(size), c.stroke(thickness), type);
+}
+}
+
+cv::Size preview_display_size(cv::Size source, bool& initializeSize)
+{
+    if (initializeSize) {
+        cv::resizeWindow(kWindowName, source.width, source.height);
+        initializeSize = false;
+        return source;
+    }
+    cv::Rect viewport;
+    try { viewport = cv::getWindowImageRect(kWindowName); }
+    catch (const cv::Exception&) { return source; }
+    if (viewport.width <= 0 || viewport.height <= 0) return source;
+    // Win32 HighGUI stretches the entire Mat to the client rectangle. Match
+    // that rectangle exactly and letterbox inside the Mat to preserve aspect.
+    const double limit = std::min(1.0, 4096.0 / std::max(viewport.width, viewport.height));
+    return {std::max(1, cvRound(viewport.width * limit)),
+            std::max(1, cvRound(viewport.height * limit))};
+}
+
+void show_preview(const PreviewCanvas& canvas)
+{
+
+    const auto title = std::string(kWindowName) + " | " + std::to_string(canvas.cols) + "x" +
+        std::to_string(canvas.rows) + " | " + std::to_string(cvRound(canvas.scale * 100)) +
+        "% | double-click: 1:1";
+    if (title != g_preview_title) {
+        cv::setWindowTitle(kWindowName, title);
+        g_preview_title = title;
+    }
+    g_view_source_size = cv::Size(canvas.cols, canvas.rows);
+    cv::imshow(kWindowName, canvas.image);
+    cv::pollKey();
+}
 
 cv::Scalar bgr(int b, int g, int r) { return cv::Scalar(b, g, r); }
 
-void draw_text_with_bg(cv::Mat& img, const std::string& text, cv::Point org,
+const char* followStateText(int state)
+{
+    using F = control::FollowCompensator;
+    switch (state) {
+    case F::Checking: return "CHECK";
+    case F::Reversed: return "TURN";
+    case F::Stopped: return "STOP";
+    case F::Preset: return "SEED";
+    case F::Remembered: return "READY";
+    case F::Uncertain: return "UNKNOWN";
+    case F::Burst: return "BURST";
+    default: return "LEARN";
+    }
+}
+
+const char* triggerReasonText(runtime::TriggerOverlayReason reason)
+{
+    using R = runtime::TriggerOverlayReason;
+    switch (reason) {
+    case R::Disabled: return "disabled";
+    case R::NoTarget: return "no trigger target";
+    case R::OutsideZone: return "outside range";
+    case R::Ready: return "ready";
+    case R::ScopeWait: return "waiting for scope";
+    case R::FirstShotDelay: return "first shot delay";
+    case R::Cooldown: return "shot interval";
+    case R::AutoStopWait: return "auto stop unavailable";
+    case R::SwitchBusy: return "weapon switch busy";
+    case R::DriverRejected: return "left button send failed";
+    case R::Pressed: return "left press sent";
+    case R::NoDriver: return "mouse driver unavailable";
+    }
+    return "unknown";
+}
+
+void draw_text_with_bg(PreviewCanvas& canvas, const std::string& text, cv::Point org,
                        const cv::Scalar& fg, const cv::Scalar& bg)
 {
+    cv::Mat& img = canvas.image;
+    org = canvas.point(org);
     int baseline = 0;
     const int font = cv::FONT_HERSHEY_SIMPLEX;
-    const double scale = 0.45;
-    const int thickness = 1;
+    const double scale = 0.45 * canvas.scale;
+    const int thickness = canvas.stroke(1);
     cv::Size sz = cv::getTextSize(text, font, scale, thickness, &baseline);
-    cv::Point tl(org.x, org.y - sz.height - 3);
-    cv::Point br(org.x + sz.width + 4, org.y + 2);
+    cv::Point tl(org.x, org.y - sz.height - canvas.length(3));
+    cv::Point br(org.x + sz.width + canvas.length(4), org.y + canvas.length(2));
     cv::rectangle(img, tl, br, bg, cv::FILLED);
-    cv::putText(img, text, cv::Point(org.x + 2, org.y - 2), font, scale, fg, thickness, cv::LINE_AA);
+    cv::putText(img, text, cv::Point(org.x + canvas.length(2), org.y - canvas.length(2)),
+                font, scale, fg, thickness, cv::LINE_AA);
 }
 
 bool window_visible()
@@ -78,11 +214,18 @@ struct PreviewConfigSnapshot
     int    detection_resolution = 0;
     int    crosshair_rect_w = 0;
     int    crosshair_rect_h = 0;
+    int    crosshair_offset_y = 0;
     int    crosshair_min_pixel_count = 0;
     int    crosshair_close_radius = 0;
     std::vector<crosshair::CrosshairColorBand> crosshair_colors;
     bool   any_color_enabled = false;
     bool   crosshair_hotkey_enabled = false;
+    bool   laser_hotkey_enabled = false;
+    bool   laser_color_enabled = false;
+    int    laser_rect_w = 0, laser_rect_h = 0;
+    int    laser_center_x = 0, laser_center_y = 0;
+    int    laser_target_center_x = 0, laser_target_center_y = 0;
+    int    laser_target_rect_w = 0, laser_target_rect_h = 0;
 
     int    fov_base_x = 0;
     int    fov_base_y = 0;
@@ -100,8 +243,19 @@ PreviewConfigSnapshot snapshot_config()
     s.detection_resolution     = config.detection_resolution;
     s.crosshair_rect_w         = config.crosshair_rect_w;
     s.crosshair_rect_h         = config.crosshair_rect_h;
+    s.crosshair_offset_y       = config.crosshair_offset_y;
     s.crosshair_min_pixel_count = config.crosshair_min_pixel_count;
     s.crosshair_close_radius   = config.crosshair_close_radius;
+    s.laser_rect_w = config.laser_rect_w;
+    s.laser_rect_h = config.laser_rect_h;
+    s.laser_center_x = config.laser_center_x;
+    s.laser_center_y = config.laser_center_y;
+    s.laser_target_center_x = config.laser_target_center_x;
+    s.laser_target_center_y = config.laser_target_center_y;
+    s.laser_target_rect_w = config.laser_target_rect_w;
+    s.laser_target_rect_h = config.laser_target_rect_h;
+    for (const auto& c : config.laser_colors)
+        s.laser_color_enabled = s.laser_color_enabled || c.enabled;
     s.crosshair_colors.reserve(config.crosshair_colors.size());
     for (const auto& c : config.crosshair_colors)
     {
@@ -130,11 +284,12 @@ PreviewConfigSnapshot snapshot_config()
         s.fov_base_y = hk.fovY;
         s.dynamic_fov_enabled = hk.dynamic_fov_enabled;
         s.crosshair_hotkey_enabled = hk.crosshair_detect_enabled;
+        s.laser_hotkey_enabled = hk.laser_detect_enabled && !hk.crosshair_detect_enabled;
     }
     return s;
 }
 
-void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
+void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
 {
     if (canvas.empty()) return;
 
@@ -157,7 +312,7 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         const cv::Rect& r = boxes[i];
         const cv::Rect clipped = r & cv::Rect(0, 0, canvas.cols, canvas.rows);
         if (clipped.area() <= 0) continue;
-        cv::rectangle(canvas, clipped, boxColor, 1, cv::LINE_AA);
+        preview_draw::rectangle(canvas, clipped, boxColor, 1, cv::LINE_AA);
 
         const int cls = (i < classes.size()) ? classes[i] : -1;
         char label[64];
@@ -167,40 +322,47 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                           textFg, textBg);
     }
 
+    const runtime::AimOverlayState ov = runtime::readAimOverlay();
+    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - ov.ts).count();
+    const bool fresh = ov.ts.time_since_epoch().count() != 0 &&
+                       age_ms >= 0 && age_ms <= runtime::kAimOverlayStaleMs;
     if (cfg.fov_base_x > 0 && cfg.fov_base_y > 0)
     {
-        const cv::Point center(canvas.cols / 2, canvas.rows / 2);
+        const cv::Point center = cfg.hotkey_active && fresh
+            ? cv::Point(static_cast<int>(std::lround(ov.cross_x)), static_cast<int>(std::lround(ov.cross_y)))
+            : cv::Point(canvas.cols / 2, canvas.rows / 2);
         const cv::Size baseAxes(std::max(1, cfg.fov_base_x / 2),
                                 std::max(1, cfg.fov_base_y / 2));
 
         const cv::Scalar baseCol = bgr(60, 200, 255);
-        cv::ellipse(canvas, center, baseAxes, 0, 0, 360, baseCol, 1, cv::LINE_AA);
+        preview_draw::ellipse(canvas, center, baseAxes, 0, 0, 360, baseCol, 1, cv::LINE_AA);
     }
 
-    // ── 稳定【之后】的叠加 ────────────────────────────────────────────────
-    //
-    // 上面那些绿框是检测的【原始】框(稳定之前)。这一段画的是控制器实际锁定的
-    // 结果: 稳定器放行的框 + α-β 滤波后的中心 + 最终瞄点。两者画在一起,
-    // 才能看出稳定器到底把哪一帧的抖动压掉了。
+    // 跟踪器锁定的目标框和最终瞄点；上方绿框是检测器的原始输出。
     {
-        const runtime::AimOverlayState ov = runtime::readAimOverlay();
-        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - ov.ts).count();
-        const bool fresh = ov.ts.time_since_epoch().count() != 0 &&
-                           age_ms >= 0 && age_ms <= runtime::kAimOverlayStaleMs;
-
         if (fresh)
         {
-            // 判定颜色: 同一个目标=绿, 新目标/瞬移=橙, 被稳定器丢掉=红。
-            const auto verdict = static_cast<control::StabilizerVerdict>(ov.verdict);
+            if (cfg.hotkey_active && ov.fov_radius_x > 0.0 && ov.fov_radius_y > 0.0) {
+                preview_draw::ellipse(canvas,
+                    cv::Point(static_cast<int>(std::lround(ov.cross_x)), static_cast<int>(std::lround(ov.cross_y))),
+                    cv::Size(std::max(1, static_cast<int>(std::lround(ov.fov_radius_x))),
+                             std::max(1, static_cast<int>(std::lround(ov.fov_radius_y)))),
+                    0, 0, 360, bgr(255, 180, 80), 1, cv::LINE_AA);
+                if (ov.mask_x || ov.mask_y || ov.unlock_x || ov.unlock_y) {
+                    draw_text_with_bg(canvas, std::string("Input mask requested: ") +
+                        (ov.mask_x ? "X " : "") + (ov.mask_y ? "Y " : "") + " | Aim unlock: " +
+                        (ov.unlock_x ? "X " : "") + (ov.unlock_y ? "Y" : ""),
+                        cv::Point(6, 108), bgr(80, 180, 255), bgr(0, 0, 0));
+                }
+            }
+            const auto verdict = static_cast<control::TrackLockState>(ov.verdict);
             cv::Scalar lockCol = bgr(90, 220, 90);
             const char* verdictText = "OK";
             switch (verdict)
             {
-            case control::StabilizerVerdict::Ok:       lockCol = bgr(90, 220, 90);  verdictText = "OK";       break;
-            case control::StabilizerVerdict::NoHistory:lockCol = bgr(80, 190, 255); verdictText = "NEW";      break;
-            case control::StabilizerVerdict::Snap:     lockCol = bgr(60, 160, 255); verdictText = "SNAP";     break;
-            case control::StabilizerVerdict::Rejected: lockCol = bgr(90, 90, 235);  verdictText = "REJECTED"; break;
+            case control::TrackLockState::Existing: lockCol = bgr(90, 220, 90);  verdictText = "TRACKED"; break;
+            case control::TrackLockState::New:      lockCol = bgr(80, 190, 255); verdictText = "NEW";     break;
             }
 
             if (ov.engaged && ov.box.width > 0 && ov.box.height > 0)
@@ -209,33 +371,8 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                 const cv::Rect clipped = r & cv::Rect(0, 0, canvas.cols, canvas.rows);
                 if (clipped.area() > 0)
                 {
-                    // ① 原始锁定框(稳定前): 粗框, 颜色 = 稳定器判定。
-                    cv::rectangle(canvas, clipped, lockCol, 2, cv::LINE_AA);
-
-                    const cv::Point rawC(clipped.x + clipped.width / 2,
-                                         clipped.y + clipped.height / 2);
-                    const cv::Point stabC(static_cast<int>(std::lround(ov.filtered_cx)),
-                                          static_cast<int>(std::lround(ov.filtered_cy)));
-
-                    // ② 稳定后的框: 尺寸还是检测的尺寸, 但【中心换成滤波后的中心】——
-                    //    这就是"稳定之后"的框。抖的时候它会明显比原始框稳。
-                    const cv::Rect stabRect(stabC.x - clipped.width / 2,
-                                            stabC.y - clipped.height / 2,
-                                            clipped.width, clipped.height);
-                    const cv::Rect stabClip = stabRect & cv::Rect(0, 0, canvas.cols, canvas.rows);
-                    if (stabClip.area() > 0)
-                    {
-                        cv::rectangle(canvas, stabClip, bgr(255, 120, 240), 1, cv::LINE_AA);
-                        draw_text_with_bg(canvas, "STAB",
-                                          cv::Point(stabClip.x,
-                                                    std::min(canvas.rows - 2,
-                                                             stabClip.y + stabClip.height + 12)),
-                                          bgr(255, 200, 250), bgr(40, 0, 40));
-                    }
-
-                    // ③ 原始中心 → 滤波中心: 这条线的长度 = 这一拍压掉的抖动量。
-                    if (rawC != stabC)
-                        cv::line(canvas, rawC, stabC, bgr(255, 120, 240), 1, cv::LINE_AA);
+                    // 跟踪框和瞄点。
+                    preview_draw::rectangle(canvas, clipped, lockCol, 2, cv::LINE_AA);
 
                     char label[96];
                     std::snprintf(label, sizeof(label), "LOCK #%d id=%d %s",
@@ -244,24 +381,96 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                                       cv::Point(clipped.x, std::max(12, clipped.y)),
                                       bgr(250, 245, 240), bgr(0, 0, 0));
 
-                    // ④ 最终瞄点(锚点): 橙点。
+                    // 青色十字是原瞄点，橙色圆是实际交给 PID 的补偿瞄点。
                     const cv::Point aim(static_cast<int>(std::lround(ov.anchor_x)),
                                         static_cast<int>(std::lround(ov.anchor_y)));
-                    cv::circle(canvas, aim, 4, bgr(0, 140, 255), 2, cv::LINE_AA);
+                    const cv::Point base(static_cast<int>(std::lround(ov.base_anchor_x)),
+                                         static_cast<int>(std::lround(ov.base_anchor_y)));
+                    if (ov.follow_strength_x > 0.0 || ov.follow_strength_y > 0.0)
+                    {
+                        preview_draw::line(canvas, base, aim, bgr(255, 220, 0), 1, cv::LINE_AA);
+                        preview_draw::drawMarker(canvas, base, bgr(255, 220, 0),
+                                       cv::MARKER_CROSS, 10, 1, cv::LINE_AA);
+                    }
+                    preview_draw::circle(canvas, aim, 4, bgr(0, 140, 255), 2, cv::LINE_AA);
                 }
             }
 
-            // 状态行: 一屏说清"锁没锁、锁的是谁、稳定器怎么判、哪一步丢的"。
+            if (ov.trigger_valid && ov.trigger_half_width > 0.0 && ov.trigger_half_height > 0.0)
+            {
+                const cv::Rect zone(
+                    static_cast<int>(std::lround(ov.trigger_point_x - ov.trigger_half_width)),
+                    static_cast<int>(std::lround(ov.trigger_point_y - ov.trigger_half_height)),
+                    std::max(1, static_cast<int>(std::lround(2.0 * ov.trigger_half_width))),
+                    std::max(1, static_cast<int>(std::lround(2.0 * ov.trigger_half_height))));
+                const cv::Rect clipped = zone & cv::Rect(0, 0, canvas.cols, canvas.rows);
+                if (clipped.area() > 0) {
+                    preview_draw::rectangle(canvas, clipped, bgr(255, 80, 220), 2, cv::LINE_AA);
+                    preview_draw::drawMarker(canvas,
+                        cv::Point(static_cast<int>(std::lround(ov.trigger_point_x)),
+                                  static_cast<int>(std::lround(ov.trigger_point_y))),
+                        bgr(255, 80, 220), cv::MARKER_CROSS, 12, 2, cv::LINE_AA);
+                    char triggerLabel[96];
+                    std::snprintf(triggerLabel, sizeof(triggerLabel), "TRIGGER #%d  %.0f x %.0f px",
+                        ov.trigger_class_id, 2.0 * ov.trigger_half_width,
+                        2.0 * ov.trigger_half_height);
+                    draw_text_with_bg(canvas, triggerLabel,
+                        cv::Point(clipped.x, std::max(12, clipped.y)),
+                        bgr(255, 80, 220), bgr(0, 0, 0));
+                }
+                // This marker is the point used by TriggerTarget::contains().
+                // The pink box alone only shows the selected target range.
+                preview_draw::drawMarker(canvas,
+                    cv::Point(static_cast<int>(std::lround(ov.cross_x)),
+                              static_cast<int>(std::lround(ov.cross_y))),
+                    ov.trigger_in_zone ? bgr(70, 230, 70) : bgr(60, 80, 255),
+                    cv::MARKER_TILTED_CROSS, 14, 2, cv::LINE_AA);
+            }
+
+            if (ov.trigger_reason != runtime::TriggerOverlayReason::Disabled)
+            {
+                char triggerStatus[160];
+                std::snprintf(triggerStatus, sizeof(triggerStatus), "TRIGGER: %s | %s",
+                    ov.trigger_in_zone ? "IN" : "OUT", triggerReasonText(ov.trigger_reason));
+                draw_text_with_bg(canvas, triggerStatus, cv::Point(6, canvas.rows - 12),
+                    ov.trigger_in_zone ? bgr(70, 230, 70) : bgr(60, 80, 255), bgr(0, 0, 0));
+            }
+
+            // 状态行说明锁定身份和未输出原因。
             {
                 char line[240];
                 if (ov.engaged)
                 {
-                    const double dx = ov.filtered_cx - (ov.box.x + ov.box.width * 0.5);
-                    const double dy = ov.filtered_cy - (ov.box.y + ov.box.height * 0.5);
+                    std::snprintf(line, sizeof(line), "Motion(est) X/Y: %+.1f / %+.1f",
+                                  ov.follow_motion_x, ov.follow_motion_y);
+                    draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 138),
+                                      bgr(245, 245, 245), bgr(0, 0, 0));
+                    std::snprintf(line, sizeof(line), "Follow X/Y: %s / %s",
+                                  followStateText(ov.follow_state_x), followStateText(ov.follow_state_y));
+                    draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 120),
+                                      bgr(100, 255, 180), bgr(0, 0, 0));
+                    std::snprintf(line, sizeof(line), "Seed(px) X/Y: %+.1f / %+.1f",
+                                  ov.follow_preset_x, ov.follow_preset_y);
+                    draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 102),
+                                      bgr(100, 255, 180), bgr(0, 0, 0));
+                    std::snprintf(line, sizeof(line), "Follow gain X/Y: %.1f / %.1f",
+                                  ov.follow_strength_x, ov.follow_strength_y);
+                    draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 84),
+                                      bgr(245, 245, 245), bgr(0, 0, 0));
+                    std::snprintf(line, sizeof(line), "Shift(px) X/Y: %+.1f / %+.1f",
+                                  ov.anchor_x - ov.base_anchor_x,
+                                  ov.anchor_y - ov.base_anchor_y);
+                    draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 66),
+                                      bgr(0, 180, 255), bgr(0, 0, 0));
+                    std::snprintf(line, sizeof(line), "Base err(px) X/Y: %+.1f / %+.1f",
+                                  ov.base_error_x, ov.base_error_y);
+                    draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 48),
+                                      bgr(255, 220, 0), bgr(0, 0, 0));
                     std::snprintf(line, sizeof(line),
-                                  "Stab: %s | id=%d #%d | raw->filtered %+.1f,%+.1f px%s",
-                                  verdictText, ov.target_id, ov.target_class_id, dx, dy,
-                                  ov.scope_params ? " | SCOPE-PARAMS" : "");
+                                  "Track: %s | id=%d #%d%s",
+                                  verdictText, ov.target_id, ov.target_class_id,
+                                  ov.scope_params ? " | SCOPE-PARAMS" :
+                                  ov.secondary_params ? " | SECONDARY" : " | DEFAULT");
                 }
                 else
                 {
@@ -272,11 +481,10 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                     case Idle::NoCandidates:          why = "no-candidate";   break;
                     case Idle::StaleDetection:        why = "stale-detection";break;
                     case Idle::StaleCrosshair:        why = "stale-crosshair";break;
-                    case Idle::RejectedByStabilizer:  why = "STAB-REJECTED (wide/tall)"; break;
                     case Idle::BadDt:                 why = "bad-dt";         break;
                     case Idle::None:                  why = "idle";           break;
                     }
-                    std::snprintf(line, sizeof(line), "Stab: not locked | %s%s",
+                    std::snprintf(line, sizeof(line), "Track: not locked | %s%s",
                                   why, ov.scope_params ? " | SCOPE-PARAMS" : "");
                 }
                 draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 30),
@@ -285,15 +493,30 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         }
     }
 
-    if (cfg.crosshair_rect_w > 0 && cfg.crosshair_rect_h > 0)
+    if (cfg.crosshair_hotkey_enabled && cfg.crosshair_rect_w > 0 && cfg.crosshair_rect_h > 0)
     {
         const int rw = std::max(4, cfg.crosshair_rect_w);
         const int rh = std::max(4, cfg.crosshair_rect_h);
-        constexpr int kVerticalOffset = 10;
-        const cv::Rect roi(canvas.cols / 2 - rw / 2, canvas.rows / 2 - rh + kVerticalOffset, rw, rh);
+        const int x = std::clamp(canvas.cols / 2 - rw / 2, 0, std::max(0, canvas.cols - rw));
+        const int y = std::clamp(canvas.rows / 2 - rh + 10 + cfg.crosshair_offset_y,
+                                 0, std::max(0, canvas.rows - rh));
+        const cv::Rect roi(x, y, rw, rh);
         const cv::Rect clipped = roi & cv::Rect(0, 0, canvas.cols, canvas.rows);
         if (clipped.area() > 0)
-            cv::rectangle(canvas, clipped, bgr(255, 190, 0), 1, cv::LINE_AA);
+            preview_draw::rectangle(canvas, clipped, bgr(255, 190, 0), 1, cv::LINE_AA);
+    }
+    if (cfg.laser_hotkey_enabled) {
+        const cv::Rect roi(cfg.laser_center_x - cfg.laser_rect_w / 2,
+                           cfg.laser_center_y - cfg.laser_rect_h / 2,
+                           cfg.laser_rect_w, cfg.laser_rect_h);
+        const cv::Rect target(cfg.laser_target_center_x - cfg.laser_target_rect_w / 2,
+                              cfg.laser_target_center_y - cfg.laser_target_rect_h / 2,
+                              cfg.laser_target_rect_w, cfg.laser_target_rect_h);
+        const cv::Rect bounds(0, 0, canvas.cols, canvas.rows);
+        if ((roi & bounds).area() > 0)
+            preview_draw::rectangle(canvas, roi & bounds, bgr(0, 150, 255), 1, cv::LINE_AA);
+        if ((target & bounds).area() > 0)
+            preview_draw::rectangle(canvas, target & bounds, bgr(255, 100, 230), 1, cv::LINE_AA);
     }
 
     {
@@ -318,14 +541,17 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
             std::snprintf(ref_text, sizeof(ref_text), "ref -");
 
         char line[200];
-        if (!cfg.any_color_enabled || !cfg.crosshair_hotkey_enabled)
+        const bool using_laser = cfg.laser_hotkey_enabled;
+        const char* mode = using_laser ? "Laser" : "Xhair";
+        const bool palette_enabled = using_laser ? cfg.laser_color_enabled : cfg.any_color_enabled;
+        if (!palette_enabled || (!cfg.crosshair_hotkey_enabled && !using_laser))
         {
-            std::snprintf(line, sizeof(line), "Xhair: OFF (hotkey/palette off)");
+            std::snprintf(line, sizeof(line), "%s: OFF (hotkey/palette off)", mode);
         }
         else if (snap.valid)
         {
             std::snprintf(line, sizeof(line),
-                          "Xhair: HIT (%d,%d) age=%lldms%s | %s",
+                          "%s: HIT (%d,%d) age=%lldms%s | %s", mode,
                           static_cast<int>(std::lround(snap.x)),
                           static_cast<int>(std::lround(snap.y)),
                           age_ms,
@@ -334,7 +560,7 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         }
         else
         {
-            std::snprintf(line, sizeof(line), "Xhair: MISS | %s", ref_text);
+            std::snprintf(line, sizeof(line), "%s: MISS | %s", mode, ref_text);
         }
 
         const cv::Scalar col = snap.valid ? bgr(80, 255, 80) : bgr(150, 150, 150);
@@ -345,19 +571,19 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         {
             const cv::Point p(static_cast<int>(std::lround(snap.x)),
                               static_cast<int>(std::lround(snap.y)));
-            cv::drawMarker(canvas, p, col, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
-            cv::circle(canvas, p, 6, col, 1, cv::LINE_AA);
+            preview_draw::drawMarker(canvas, p, col, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
+            preview_draw::circle(canvas, p, 6, col, 1, cv::LINE_AA);
         }
 
         if (ref_fresh)
         {
             const cv::Point r(static_cast<int>(std::lround(ref.x)),
                               static_cast<int>(std::lround(ref.y)));
-            cv::rectangle(canvas, cv::Rect(r.x - 7, r.y - 7, 15, 15),
+            preview_draw::rectangle(canvas, cv::Rect(r.x - 7, r.y - 7, 15, 15),
                           bgr(255, 120, 240), 1, cv::LINE_AA);
         }
 
-        cv::drawMarker(canvas, cv::Point(canvas.cols / 2, canvas.rows / 2),
+        preview_draw::drawMarker(canvas, cv::Point(canvas.cols / 2, canvas.rows / 2),
                        bgr(0, 200, 255), cv::MARKER_TILTED_CROSS, 10, 1, cv::LINE_AA);
     }
 
@@ -406,6 +632,28 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 
 void on_mouse(int event, int x, int y, int  , void*  )
 {
+    if (event == cv::EVENT_LBUTTONDBLCLK && !crosshair::IsColorPickArmed() &&
+        g_view_source_size.width > 0 && g_view_source_size.height > 0) {
+        cv::resizeWindow(kWindowName, g_view_source_size.width, g_view_source_size.height);
+        return;
+    }
+    if (event == cv::EVENT_RBUTTONDOWN && crosshair::IsColorPickArmed()) {
+        crosshair::CancelColorPick();
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_clean_mutex);
+        if (g_clean_frame.empty() || g_display_content.width <= 0 || g_display_content.height <= 0) {
+            g_pick_cursor_inside = false;
+            return;
+        }
+        x = cvFloor(double(x - g_display_content.x) * g_clean_frame.cols / g_display_content.width);
+        y = cvFloor(double(y - g_display_content.y) * g_clean_frame.rows / g_display_content.height);
+        if (x < 0 || y < 0 || x >= g_clean_frame.cols || y >= g_clean_frame.rows) {
+            g_pick_cursor_inside = false;
+            return;
+        }
+    }
     if (event == cv::EVENT_MOUSEMOVE)
     {
         g_pick_cursor_x = x;
@@ -436,7 +684,7 @@ void on_mouse(int event, int x, int y, int  , void*  )
     }
 }
 
-void draw_pick_overlay(cv::Mat& canvas)
+void draw_pick_overlay(PreviewCanvas& canvas)
 {
     if (canvas.empty() || canvas.type() != CV_8UC3) return;
     if (!crosshair::IsColorPickArmed()) return;
@@ -455,22 +703,25 @@ void draw_pick_overlay(cv::Mat& canvas)
     rr &= cv::Rect(0, 0, canvas.cols, canvas.rows);
     if (rr.area() > 0)
     {
-        cv::Mat patch = canvas(rr).clone();
-        cv::circle(patch, cv::Point(cx - rr.x, cy - rr.y), ringR,
-                   bgr(0, 220, 255), cv::FILLED, cv::LINE_AA);
-        cv::addWeighted(patch, 0.25, canvas(rr), 0.75, 0.0, canvas(rr));
+        const auto displayRoi = canvas.rect(rr) & cv::Rect(0, 0, canvas.image.cols, canvas.image.rows);
+        if (displayRoi.area() > 0) {
+            cv::Mat patch = canvas.image(displayRoi).clone();
+            cv::circle(patch, canvas.point(cv::Point(cx, cy)) - displayRoi.tl(), canvas.length(ringR),
+                       bgr(0, 220, 255), cv::FILLED, cv::LINE_AA);
+            cv::addWeighted(patch, 0.25, canvas.image(displayRoi), 0.75, 0.0, canvas.image(displayRoi));
+        }
     }
 
-    cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 0, 0), 2, cv::LINE_AA);
-    cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 220, 255), 1, cv::LINE_AA);
+    preview_draw::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 0, 0), 2, cv::LINE_AA);
+    preview_draw::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 220, 255), 1, cv::LINE_AA);
 
     cv::Rect foot(cx - half, cy - half, 2 * half + 1, 2 * half + 1);
     foot &= cv::Rect(0, 0, canvas.cols, canvas.rows);
     if (foot.area() > 0)
-        cv::rectangle(canvas, foot, bgr(255, 255, 255), 1, cv::LINE_AA);
+        preview_draw::rectangle(canvas, foot, bgr(255, 255, 255), 1, cv::LINE_AA);
 }
 
-void render_replay_frame(cv::Mat& canvas,
+void render_replay_frame(PreviewCanvas& canvas,
                          const std::vector<runtime::ReplayFrame>& frames,
                          size_t frame_index,
                          float playback_speed)
@@ -478,15 +729,31 @@ void render_replay_frame(cv::Mat& canvas,
     if (canvas.empty() || frames.empty()) return;
     frame_index = std::min(frame_index, frames.size() - 1);
     const auto& frame = frames[frame_index];
+    if (frame.fov_radius_x > 0.0 && frame.fov_radius_y > 0.0) {
+        preview_draw::ellipse(canvas,
+            cv::Point(static_cast<int>(std::lround(frame.cross_x)), static_cast<int>(std::lround(frame.cross_y))),
+            cv::Size(std::max(1, static_cast<int>(std::lround(frame.fov_radius_x))),
+                     std::max(1, static_cast<int>(std::lround(frame.fov_radius_y)))),
+            0, 0, 360, bgr(255, 180, 80), 1, cv::LINE_AA);
+    }
+    if (frame.mask_x || frame.mask_y || frame.unlock_x || frame.unlock_y) {
+        draw_text_with_bg(canvas, std::string("Input mask requested: ") +
+            (frame.mask_x ? "X " : "") + (frame.mask_y ? "Y " : "") + " | Aim unlock: " +
+            (frame.unlock_x ? "X " : "") + (frame.unlock_y ? "Y" : ""),
+            cv::Point(6, 108), bgr(80, 180, 255), bgr(0, 0, 0));
+    }
 
+    // Draw raw detections first so the selected track remains visible on top.
+    for (int pass = 0; pass < 2; ++pass)
     for (size_t i = 0; i < frame.boxes.size(); ++i)
     {
-        const cv::Rect clipped = frame.boxes[i] & cv::Rect(0, 0, canvas.cols, canvas.rows);
-        if (clipped.area() <= 0) continue;
         const int track_id = i < frame.track_ids.size() ? frame.track_ids[i] : -1;
         const bool locked = track_id >= 0 && track_id == frame.locked_track_id;
+        if (locked != (pass == 1)) continue;
+        const cv::Rect clipped = frame.boxes[i] & cv::Rect(0, 0, canvas.cols, canvas.rows);
+        if (clipped.area() <= 0) continue;
         const cv::Scalar color = locked ? bgr(70, 90, 255) : bgr(110, 220, 80);
-        cv::rectangle(canvas, clipped, color, locked ? 3 : 1, cv::LINE_AA);
+        preview_draw::rectangle(canvas, clipped, color, locked ? 3 : 1, cv::LINE_AA);
         const int cls = i < frame.class_ids.size() ? frame.class_ids[i] : -1;
         char label[64];
         std::snprintf(label, sizeof(label), locked ? "LOCK #%d" : "#%d", cls);
@@ -494,22 +761,38 @@ void render_replay_frame(cv::Mat& canvas,
                           bgr(250, 245, 240), bgr(0, 0, 0));
     }
 
-    std::vector<cv::Point> trail;
     const size_t first = frame_index > 90 ? frame_index - 90 : 0;
-    trail.reserve(frame_index - first + 1);
-    for (size_t i = first; i <= frame_index; ++i)
+    for (size_t i = first + 1; i <= frame_index; ++i)
     {
-        if (frames[i].locked_track_id >= 0)
-            trail.emplace_back(static_cast<int>(std::lround(frames[i].pivot_x)),
-                               static_cast<int>(std::lround(frames[i].pivot_y)));
+        if (frames[i].locked_track_id < 0 ||
+            frames[i].locked_track_id != frames[i - 1].locked_track_id)
+            continue;
+        preview_draw::line(canvas,
+                 cv::Point(static_cast<int>(std::lround(frames[i - 1].pivot_x)),
+                           static_cast<int>(std::lround(frames[i - 1].pivot_y))),
+                 cv::Point(static_cast<int>(std::lround(frames[i].pivot_x)),
+                           static_cast<int>(std::lround(frames[i].pivot_y))),
+                 bgr(0, 140, 255), 2, cv::LINE_AA);
     }
-    if (trail.size() >= 2)
-        cv::polylines(canvas, trail, false, bgr(255, 190, 70), 2, cv::LINE_AA);
-    if (!trail.empty())
+    const cv::Point cross(static_cast<int>(std::lround(frame.cross_x)),
+                          static_cast<int>(std::lround(frame.cross_y)));
+    preview_draw::drawMarker(canvas, cross, bgr(255, 255, 255), cv::MARKER_CROSS,
+                   12, 1, cv::LINE_AA);
+    if (frame.locked_track_id >= 0)
     {
-        const cv::Point p = trail.back();
-        cv::circle(canvas, p, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
-        cv::circle(canvas, p, 5, bgr(255, 220, 80), 1, cv::LINE_AA);
+        const cv::Point p(static_cast<int>(std::lround(frame.pivot_x)),
+                          static_cast<int>(std::lround(frame.pivot_y)));
+        preview_draw::line(canvas, cross, p, bgr(100, 130, 180), 1, cv::LINE_AA);
+        const cv::Point base(static_cast<int>(std::lround(frame.base_anchor_x)),
+                             static_cast<int>(std::lround(frame.base_anchor_y)));
+        if (frame.follow_strength_x > 0.0 || frame.follow_strength_y > 0.0)
+        {
+            preview_draw::line(canvas, base, p, bgr(255, 220, 0), 1, cv::LINE_AA);
+            preview_draw::drawMarker(canvas, base, bgr(255, 220, 0),
+                           cv::MARKER_CROSS, 10, 1, cv::LINE_AA);
+        }
+        preview_draw::circle(canvas, p, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
+        preview_draw::circle(canvas, p, 5, bgr(0, 140, 255), 2, cv::LINE_AA);
     }
 
     char banner[128];
@@ -517,12 +800,63 @@ void render_replay_frame(cv::Mat& canvas,
                   playback_speed, frame_index + 1, frames.size());
     draw_text_with_bg(canvas, banner, cv::Point(6, 18),
                       bgr(245, 245, 245), bgr(0, 0, 0));
+    char diagnostics[160];
+    std::snprintf(diagnostics, sizeof(diagnostics), "PID err %+.1f/%+.1f  OUT %d/%d",
+                  frame.error_x, frame.error_y, frame.requested_dx, frame.requested_dy);
+    draw_text_with_bg(canvas, diagnostics, cv::Point(6, 36),
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+    std::snprintf(diagnostics, sizeof(diagnostics), "SENT(prev) %d/%d  ID %d",
+                  frame.mouse_dx, frame.mouse_dy, frame.locked_track_id);
+    draw_text_with_bg(canvas, diagnostics, cv::Point(6, 54),
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+    std::snprintf(diagnostics, sizeof(diagnostics), "D raw %+.2f/%+.2f",
+                  frame.derivative_raw_x, frame.derivative_raw_y);
+    draw_text_with_bg(canvas, diagnostics, cv::Point(6, 72),
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+    std::snprintf(diagnostics, sizeof(diagnostics), "Params: %s%s",
+                  frame.scope_params ? "SCOPE" : frame.secondary_params ? "SECONDARY" : "DEFAULT",
+                  frame.locked_track_id < 0 ? " | NO TARGET" : "");
+    draw_text_with_bg(canvas, diagnostics, cv::Point(6, 90),
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+    if (frame.locked_track_id >= 0)
+    {
+        // All values come from this recorded frame, never the live overlay or
+        // current settings (which may have changed since recording).
+        std::snprintf(diagnostics, sizeof(diagnostics), "Motion(est) X/Y: %+.1f / %+.1f",
+                      frame.follow_motion_x, frame.follow_motion_y);
+        draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 138),
+                          bgr(245, 245, 245), bgr(0, 0, 0));
+        std::snprintf(diagnostics, sizeof(diagnostics), "Follow X/Y: %s / %s",
+                      followStateText(frame.follow_state_x), followStateText(frame.follow_state_y));
+        draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 120),
+                          bgr(100, 255, 180), bgr(0, 0, 0));
+        std::snprintf(diagnostics, sizeof(diagnostics), "Seed(px) X/Y: %+.1f / %+.1f",
+                      frame.follow_preset_x, frame.follow_preset_y);
+        draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 102),
+                          bgr(100, 255, 180), bgr(0, 0, 0));
+        std::snprintf(diagnostics, sizeof(diagnostics), "Follow gain X/Y: %.1f / %.1f",
+                      frame.follow_strength_x, frame.follow_strength_y);
+        draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 84),
+                          bgr(245, 245, 245), bgr(0, 0, 0));
+        std::snprintf(diagnostics, sizeof(diagnostics), "Shift(px) X/Y: %+.1f / %+.1f",
+                      frame.pivot_x - frame.base_anchor_x,
+                      frame.pivot_y - frame.base_anchor_y);
+        draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 66),
+                          bgr(0, 180, 255), bgr(0, 0, 0));
+        std::snprintf(diagnostics, sizeof(diagnostics), "Base err(px) X/Y: %+.1f / %+.1f",
+                      frame.base_anchor_x - frame.cross_x,
+                      frame.base_anchor_y - frame.cross_y);
+        draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 48),
+                          bgr(255, 220, 0), bgr(0, 0, 0));
+    }
 }
 
 void preview_loop()
 {
     bool window_open = false;
+    bool initializeSize = true;
     bool replay_was_active = false;
+    unsigned int replay_request_seen = 0;
     std::vector<runtime::ReplayFrame> replay_frames;
     size_t replay_index = 0;
     auto replay_next_tick = std::chrono::steady_clock::now();
@@ -551,6 +885,8 @@ void preview_loop()
                 cv::setWindowProperty(kWindowName, cv::WND_PROP_TOPMOST, 0);
                 cv::setMouseCallback(kWindowName, on_mouse, nullptr);
                 g_pick_cursor_inside = false;
+                initializeSize = true;
+                g_preview_title.clear();
                 window_open = true;
             } catch (...) {
                 window_open = false;
@@ -560,18 +896,40 @@ void preview_loop()
         }
 
         bool replay_active = g_replay_playback_active.load();
-        if (replay_active && !replay_was_active)
+        const unsigned int replay_request = g_replay_playback_request.load();
+        if (replay_active && (!replay_was_active || replay_request != replay_request_seen))
         {
+            replay_request_seen = replay_request;
             replay_frames = runtime::ReplayBuffer::instance().snapshot();
             replay_index = 0;
-            replay_next_tick = std::chrono::steady_clock::now();
+            g_replay_playback_frame.store(0);
+            g_replay_playback_total.store(static_cast<int>(replay_frames.size()));
             if (replay_frames.empty())
             {
                 replay_active = false;
                 g_replay_playback_active.store(false);
             }
+            else
+            {
+                const auto now = std::chrono::steady_clock::now();
+                replay_next_tick = now + std::chrono::milliseconds(250);
+                if (replay_frames.size() > 1)
+                {
+                    const float speed = std::clamp(cfg.replay_playback_speed, 0.05f, 2.0f);
+                    const auto delta = std::chrono::duration_cast<std::chrono::microseconds>(
+                        replay_frames[1].ts - replay_frames[0].ts);
+                    replay_next_tick = now + std::chrono::microseconds(
+                        std::clamp<long long>(static_cast<long long>(delta.count() / speed),
+                                              1000, 500000));
+                }
+            }
         }
         replay_was_active = replay_active;
+        if (!replay_active && !replay_frames.empty())
+        {
+            replay_frames.clear();
+            g_replay_playback_total.store(0);
+        }
 
         if (replay_active && !replay_frames.empty())
         {
@@ -579,26 +937,39 @@ void preview_loop()
             const auto now = std::chrono::steady_clock::now();
             while (replay_index + 1 < replay_frames.size() && now >= replay_next_tick)
             {
-                const auto source_delta = std::chrono::duration_cast<std::chrono::microseconds>(
-                    replay_frames[replay_index + 1].ts - replay_frames[replay_index].ts);
-                const auto scaled_us = std::clamp<long long>(
-                    static_cast<long long>(source_delta.count() / speed), 1000, 500000);
-                replay_next_tick = now + std::chrono::microseconds(scaled_us);
                 ++replay_index;
+                if (replay_index + 1 < replay_frames.size())
+                {
+                    const auto delta = std::chrono::duration_cast<std::chrono::microseconds>(
+                        replay_frames[replay_index + 1].ts - replay_frames[replay_index].ts);
+                    replay_next_tick += std::chrono::microseconds(
+                        std::clamp<long long>(static_cast<long long>(delta.count() / speed),
+                                              1000, 500000));
+                }
+                else
+                    replay_next_tick = now + std::chrono::milliseconds(250);
             }
             g_replay_playback_frame.store(static_cast<int>(replay_index));
 
-            const int dr = std::max(64, cfg.detection_resolution);
-            cv::Mat replayCanvas(dr, dr, CV_8UC3, cv::Scalar(18, 20, 24));
+            const int dr = std::max(64, replay_frames[replay_index].resolution);
+            const cv::Size source(dr, dr);
+            PreviewCanvas replayCanvas(source, preview_display_size(source, initializeSize), cv::Scalar(18, 20, 24));
+            {
+                std::lock_guard<std::mutex> lk(g_clean_mutex);
+                g_clean_frame.release();
+                g_display_content = {};
+                g_pick_cursor_inside = false;
+            }
             render_replay_frame(replayCanvas, replay_frames, replay_index, speed);
-            cv::imshow(kWindowName, replayCanvas);
+            show_preview(replayCanvas);
 
             if (replay_index + 1 >= replay_frames.size() && now >= replay_next_tick)
             {
                 g_replay_playback_active.store(false);
                 replay_was_active = false;
+                replay_frames.clear();
+                g_replay_playback_total.store(0);
             }
-            cv::pollKey();
             std::this_thread::sleep_for(std::chrono::milliseconds(8));
             continue;
         }
@@ -612,24 +983,31 @@ void preview_loop()
         if (frameCopy.empty())
         {
             const int dr = std::max(64, cfg.detection_resolution);
-            cv::Mat placeholder(dr, dr, CV_8UC3, cv::Scalar(20, 20, 20));
+            const cv::Size source(dr, dr);
+            PreviewCanvas placeholder(source, preview_display_size(source, initializeSize), cv::Scalar(20, 20, 20));
+            {
+                std::lock_guard<std::mutex> lk(g_clean_mutex);
+                g_clean_frame.release();
+                g_display_content = {};
+            }
             draw_text_with_bg(placeholder, "Waiting for capture...",
                               cv::Point(10, dr / 2),
                               bgr(220, 220, 220), bgr(0, 0, 0));
-            cv::imshow(kWindowName, placeholder);
+            show_preview(placeholder);
         }
         else
         {
+            PreviewCanvas canvas(frameCopy, preview_display_size(frameCopy.size(), initializeSize));
             {
                 std::lock_guard<std::mutex> lk(g_clean_mutex);
                 frameCopy.copyTo(g_clean_frame);
+                g_display_content = canvas.content;
             }
-            render_overlays(frameCopy, cfg);
-            draw_pick_overlay(frameCopy);
-            cv::imshow(kWindowName, frameCopy);
+            render_overlays(canvas, cfg);
+            draw_pick_overlay(canvas);
+            show_preview(canvas);
         }
 
-        cv::pollKey();
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 

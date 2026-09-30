@@ -10,6 +10,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <condition_variable>
+#include <array>
 
 namespace makcu {
 
@@ -93,6 +94,8 @@ namespace makcu {
         // State caching with bitwise operations (like Python v2.0)
         std::atomic<uint16_t> lockStateCache{ 0 };  // 16 bits for different lock states
         std::atomic<bool> lockStateCacheValid{ false };
+        std::array<std::atomic<int>,6> buttonLockQuerySupport{}; // 0 unknown, 1 yes, -1 unavailable
+        std::array<std::atomic<int>,2> axisLockQuerySupport{};
 
         // Button state tracking
         std::atomic<uint8_t> currentButtonMask{ 0 };
@@ -276,9 +279,6 @@ namespace makcu {
             serialPort->sendCommand("km.buttons(1)");
 
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-            auto response = serialPort->sendTrackedCommand("km.buttons()", true,
-                std::chrono::milliseconds(100));
 
             return true;
         }
@@ -592,27 +592,39 @@ namespace makcu {
             return false;
         }
 
-        // ★★ 先冲掉设备行缓冲里可能残留的脏行, 再发任何命令。
-        //
-        // 这一步是必须的, 而且踩过: 上一次会话切波特率时留下的脏字节会一直卡在
-        // 固件的 serial0RingBuffer 里(没有 '\n' 就永远不结算)。如果直接发
-        // "SERIAL_4000000", 那条命令【自己】就被脏前缀污染 -> 固件认不出 ->
-        // 波特率根本没切; 而主机紧接着按 4000000 重开 -> 主机 4M / 设备 115200
-        // -> 全程乱码 -> connect() 末尾的活性校验超时 -> "点连接完全连不上",
-        // 且只有给板子断电重上电才能恢复。
+        // Clear a partial line left by the custom firmware's UART switch.
         Impl::flushDeviceLineBuffer(m_impl->serialPort.get());
 
-        // Switch to high-speed mode
-        if (!Impl::performBaudRateChange(m_impl->serialPort.get(), HIGH_SPEED_BAUD_RATE)) {
+        auto probeVersion = [this]() {
+            try {
+                auto future = m_impl->serialPort->sendPlainQuery(
+                    "km.version()", std::chrono::milliseconds(600));
+                return future.wait_for(std::chrono::milliseconds(700)) == std::future_status::ready
+                    && future.get().find("MAKCU") != std::string::npos;
+            } catch (...) { return false; }
+        };
+        // Some older mouse firmware implements km.buttons() but only echoes
+        // km.version(). A real 0/1 reply is sufficient proof of a live MAKCU
+        // command parser; an unknown-command echo must not pass this probe.
+        auto probeButtons = [this]() {
+            try {
+                auto future = m_impl->serialPort->sendPlainQuery(
+                    "km.buttons()", std::chrono::milliseconds(600));
+                if (future.wait_for(std::chrono::milliseconds(700)) != std::future_status::ready)
+                    return false;
+                const std::string reply = future.get();
+                return reply == "km.buttons(0)" || reply == "km.buttons(1)";
+            } catch (...) { return false; }
+        };
+        bool responsive = probeVersion() || probeButtons();
+        if (!responsive) {
+            // Official firmware can persist a previously selected 4 Mbaud.
+            // Try that speed without sending a firmware-specific baud command.
             m_impl->serialPort->close();
-            m_impl->status = ConnectionStatus::CONNECTION_ERROR;
-            m_impl->atomicStatus.store(ConnectionStatus::CONNECTION_ERROR, std::memory_order_release);
-            m_impl->deviceInfo.isConnected = false;
-            return false;
+            if (m_impl->serialPort->open(targetPort, HIGH_SPEED_BAUD_RATE))
+                responsive = probeVersion() || probeButtons();
         }
-
-        // Validate connection after baud rate switch
-        if (!m_impl->serialPort->isOpen() || !m_impl->serialPort->isActuallyConnected()) {
+        if (!responsive || !m_impl->serialPort->isActuallyConnected()) {
             m_impl->serialPort->close();
             m_impl->status = ConnectionStatus::CONNECTION_ERROR;
             m_impl->atomicStatus.store(ConnectionStatus::CONNECTION_ERROR, std::memory_order_release);
@@ -629,33 +641,6 @@ namespace makcu {
             return false;
         }
 
-        // Final validation that device is responsive
-        try {
-            // Test device responsiveness with a simple command
-            auto future = m_impl->serialPort->sendTrackedCommand("km.version()", true, 
-                std::chrono::milliseconds(100));
-            
-            // Wait for response with timeout
-            if (future.wait_for(std::chrono::milliseconds(150)) == std::future_status::timeout) {
-                m_impl->serialPort->close();
-                m_impl->status = ConnectionStatus::CONNECTION_ERROR;
-                m_impl->atomicStatus.store(ConnectionStatus::CONNECTION_ERROR, std::memory_order_release);
-                m_impl->deviceInfo.isConnected = false;
-                return false;
-            }
-            
-            // Get the result to ensure no exception
-            future.get();
-        }
-        catch (...) {
-            // Device not responding properly
-            m_impl->serialPort->close();
-            m_impl->status = ConnectionStatus::CONNECTION_ERROR;
-            m_impl->atomicStatus.store(ConnectionStatus::CONNECTION_ERROR, std::memory_order_release);
-            m_impl->deviceInfo.isConnected = false;
-            return false;
-        }
-
         // Update device info first
         m_impl->deviceInfo.port = targetPort;
         m_impl->deviceInfo.description = TARGET_DESC;
@@ -665,6 +650,8 @@ namespace makcu {
 
         // Atomically update all connection state before starting monitoring thread
         m_impl->stopMonitoring.store(false, std::memory_order_release);
+        for(auto& support:m_impl->buttonLockQuerySupport) support=0;
+        for(auto& support:m_impl->axisLockQuerySupport) support=0;
         m_impl->atomicStatus.store(ConnectionStatus::CONNECTED, std::memory_order_release);
         m_impl->status = ConnectionStatus::CONNECTED;
         
@@ -762,8 +749,8 @@ namespace makcu {
         // Small delay to ensure any pending responses are cleared
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         
-        auto future = m_impl->serialPort->sendTrackedCommand("km.version()", true,
-            std::chrono::milliseconds(50));
+        auto future = m_impl->serialPort->sendPlainQuery("km.version()",
+            std::chrono::milliseconds(500));
         try {
             return future.get();
         }
@@ -1040,6 +1027,58 @@ namespace makcu {
         return result;
     }
 
+    bool Device::queryMouseButtonLock(int button, bool& locked) const {
+        static const char* names[]={"","ml","mr","mm","ms1","ms2"};
+        if(button<1 || button>5 || !m_impl->connected.load()) return false;
+        auto& support=m_impl->buttonLockQuerySupport[button];
+        if(support.load()<0) return false;
+        const std::string prefix=std::string("km.lock_")+names[button];
+        try {
+            auto future=m_impl->serialPort->sendTrackedCommand(prefix+"()",true,std::chrono::milliseconds(150));
+            if(future.wait_for(std::chrono::milliseconds(200))!=std::future_status::ready) {
+                if(support.load()==0) support=-1;
+                return false;
+            }
+            const auto response=future.get();
+            auto first=response.find_first_not_of(" \r\n\t");
+            auto last=response.find_last_not_of(" \r\n\t");
+            if(first==std::string::npos) { if(support.load()==0) support=-1; return false; }
+            const auto value=response.substr(first,last-first+1);
+            if(value=="0" || value=="1") { support=1; locked=value=="1"; return true; }
+            if(value==prefix+"(0)" || value==prefix+"(1)") {
+                support=1; locked=value==prefix+"(1)"; return true;
+            }
+        } catch(...) {}
+        if(support.load()==0) support=-1;
+        return false;
+    }
+
+    bool Device::queryMouseAxisLock(int axis, bool& locked) const {
+        static const char* names[]={"mx","my"};
+        if(axis<0 || axis>1 || !m_impl->connected.load()) return false;
+        auto& support=m_impl->axisLockQuerySupport[axis];
+        if(support.load()<0) return false;
+        const std::string prefix=std::string("km.lock_")+names[axis];
+        try {
+            auto future=m_impl->serialPort->sendTrackedCommand(prefix+"()",true,std::chrono::milliseconds(150));
+            if(future.wait_for(std::chrono::milliseconds(200))!=std::future_status::ready) {
+                if(support.load()==0) support=-1;
+                return false;
+            }
+            const auto response=future.get();
+            auto first=response.find_first_not_of(" \r\n\t");
+            auto last=response.find_last_not_of(" \r\n\t");
+            if(first==std::string::npos) { if(support.load()==0) support=-1; return false; }
+            const auto value=response.substr(first,last-first+1);
+            if(value=="0" || value=="1") { support=1; locked=value=="1"; return true; }
+            if(value==prefix+"(0)" || value==prefix+"(1)") {
+                support=1; locked=value==prefix+"(1)"; return true;
+            }
+        } catch(...) {}
+        if(support.load()==0) support=-1;
+        return false;
+    }
+
     // Fast cached lock state queries
     bool Device::isMouseXLocked() const {
         return m_impl->getLockStateFromCache("X");
@@ -1159,6 +1198,7 @@ namespace makcu {
         }
 
         std::string command = enable ? "km.buttons(1)" : "km.buttons(0)";
+        m_impl->serialPort->setButtonStreamEnabled(enable);
         bool result = m_impl->executeCommand(command);
         if (result) {
             m_impl->buttonMonitoringEnabled.store(enable, std::memory_order_release);
@@ -1216,6 +1256,7 @@ namespace makcu {
         } else if (baudRate > 4000000) {
             baudRate = 4000000;
         }
+        if (baudRate == m_impl->serialPort->getBaudRate()) return true;
 
         // Use the static helper method for the core baud rate change
         if (!Impl::performBaudRateChange(m_impl->serialPort.get(), baudRate)) {
@@ -1225,20 +1266,18 @@ namespace makcu {
         // If validation is requested (for manual setBaudRate calls), test communication
         if (validateCommunication) {
             try {
-                auto future = m_impl->serialPort->sendTrackedCommand("km.version()", true, std::chrono::milliseconds(1000));
+                auto future = m_impl->serialPort->sendPlainQuery("km.version()", std::chrono::milliseconds(1000));
                 auto response = future.get();
                 
-                // Check if we got a valid response containing "km.MAKCU"
-                if (response.find("km.MAKCU") != std::string::npos) {
+                // Official and custom firmware use different version prefixes.
+                if (response.find("MAKCU") != std::string::npos) {
                     return true;
                 } else {
                     // Communication test failed, reconnect at 115200 baud rate
-                    setBaudRate(115200, false);  // Recursive call without validation to avoid infinite loop
                     return false;
                 }
             } catch (...) {
                 // Exception occurred, reconnect at 115200 baud rate
-                setBaudRate(115200, false);  // Recursive call without validation to avoid infinite loop
                 return false;
             }
         }

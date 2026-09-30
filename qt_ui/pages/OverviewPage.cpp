@@ -96,6 +96,18 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     connect(previewBtn, &QPushButton::clicked, this, &OverviewPage::previewRequested);
     heroRow->addWidget(previewBtn);
 
+    m_performanceBtn = new QPushButton(QString::fromUtf8(u8"开启性能模式"));
+    m_performanceBtn->setObjectName("performanceModeButton");
+    m_performanceBtn->setCursor(Qt::PointingHandCursor);
+    m_performanceBtn->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#D92D20;color:white;border:0;border-radius:7px;padding:8px 14px;font-weight:600;}"
+        "QPushButton:hover{background:#B42318;}"));
+    m_performanceBtn->setToolTip(QString::fromUtf8(
+        u8"提高进程优先级至 High，并对推理线程启用高优先级 MMCSS；可再次点击关闭。"));
+    connect(m_performanceBtn, &QPushButton::clicked, this,
+            [this] { emit performanceModeRequested(!m_performanceMode); });
+    heroRow->addWidget(m_performanceBtn);
+
     m_startBtn = new QPushButton(QString::fromUtf8(u8"停止推理"));
     m_startBtn->setProperty("class", "danger");
     m_startBtn->setCursor(Qt::PointingHandCursor);
@@ -109,7 +121,7 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     kpiRow->setSpacing(12);
 
     m_mFps = new MetricCard(QString::fromUtf8(u8"采集 FPS"), QStringLiteral("gauge"));
-    m_mInfer = new MetricCard(QString::fromUtf8(u8"推理延迟"), QStringLiteral("cpu"));
+    m_mInfer = new MetricCard(QString::fromUtf8(u8"GPU 链路延迟"), QStringLiteral("cpu"));
     m_mInfer->setUnit(QStringLiteral("ms"));
     m_mTotal = new MetricCard(QString::fromUtf8(u8"端到端延迟"), QStringLiteral("history"));
     m_mTotal->setUnit(QStringLiteral("ms"));
@@ -173,6 +185,12 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     col->addStretch();
 }
 
+void OverviewPage::setPerformanceMode(bool enabled) {
+    m_performanceMode = enabled;
+    m_performanceBtn->setText(enabled ? QString::fromUtf8(u8"关闭性能模式")
+                                      : QString::fromUtf8(u8"开启性能模式"));
+}
+
 void OverviewPage::setFps(double fps) {
     m_mFps->setValue(QString::number(fps, 'f', 0));
     m_chartValue->setText(QString::number(fps, 'f', 0));
@@ -195,7 +213,8 @@ void OverviewPage::setInferenceLatency(double ms) {
 
 void OverviewPage::setTotalLatency(double ms) {
     m_mTotal->setValue(ms < 0.0 ? QStringLiteral("--") : QString::number(ms, 'f', 1));
-    m_mTotal->setSub(QString::fromUtf8(u8"采集 → 落点"), QStringLiteral("#16A34A"));
+    m_mTotal->setSub(ms < 0.0 ? QString::fromUtf8(u8"等待鼠标发送")
+                              : QString::fromUtf8(u8"采集 → 落点"), QStringLiteral("#16A34A"));
 }
 
 void OverviewPage::setDetectionCount(int boxes, int locked) {
@@ -207,7 +226,7 @@ void OverviewPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetec
                                               double publishToAimMs, double endToEndMs) {
     if (m_diagDeviceAge) {
         m_diagDeviceAge->setText(deviceAgeUs < 0
-            ? QStringLiteral("--")
+            ? QString::fromUtf8(u8"不可测")
             : QStringLiteral("%1 ms").arg(deviceAgeUs / 1000.0, 0, 'f', 2));
     }
     auto setMs = [](QLabel* lbl, double ms) {
@@ -215,8 +234,10 @@ void OverviewPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetec
     };
     setMs(m_diagCapToDetect, capToDetectMs);
     setMs(m_diagInfer, inferMs);
-    setMs(m_diagPublishToAim, publishToAimMs);
-    setMs(m_diagEndToEnd, endToEndMs);
+    if (m_diagPublishToAim) m_diagPublishToAim->setText(publishToAimMs < 0.0
+        ? QString::fromUtf8(u8"等待控制") : ovFmtMs(publishToAimMs));
+    if (m_diagEndToEnd) m_diagEndToEnd->setText(endToEndMs < 0.0
+        ? QString::fromUtf8(u8"等待发送") : ovFmtMs(endToEndMs));
 }
 
 void OverviewPage::setSessionState(bool running, const QString& model,

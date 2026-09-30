@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -23,6 +24,7 @@ enum Capability : uint32_t
     kCapWheel        = 1u << 5,
     kCapKeyboard     = 1u << 6,
     kCapPhysicalRead = 1u << 7,
+    kCapKeyboardMask = 1u << 8,
 };
 
 inline const char* capabilityName(uint32_t cap)
@@ -37,6 +39,7 @@ inline const char* capabilityName(uint32_t cap)
     case kCapWheel:        return u8"滚轮";
     case kCapKeyboard:     return u8"键盘";
     case kCapPhysicalRead: return u8"物理按键回读";
+    case kCapKeyboardMask: return u8"真实键盘屏蔽";
     default:               return u8"未知";
     }
 }
@@ -65,14 +68,29 @@ public:
     virtual bool middleDown() = 0;
     virtual bool middleUp() = 0;
 
+    virtual bool button(int b, bool down) {
+        switch(b) {
+        case 1: return down ? leftDown() : leftUp();
+        case 2: return down ? rightDown() : rightUp();
+        case 3: return down ? middleDown() : middleUp();
+        default: return false;
+        }
+    }
     virtual bool wheel(int  ) { return false; }
 
     virtual bool tapKey(int  , int  , int   = 0) { return false; }
+    virtual bool keyDown(int) { return false; }
+    virtual bool keyUp(int) { return false; }
 
-    // 瞬时屏蔽真实键盘输入(毫秒, <=0 表示解除)。默认不支持, 由 MAKCUNEW 实现。
+    // 屏蔽真实键盘输入(毫秒, <=0 表示解除)。后端可选择屏蔽的按键范围。
     virtual bool maskRealKeyboard(int  ) { return false; }
+    virtual bool keyboardMaskExpires() const { return true; }
 
     virtual int physicalButtonPressed(int  ) const { return -1; }
+    virtual int physicalKeyPressed(int) const { return -1; }
+    virtual bool maskPhysicalButton(int, bool) { return false; }
+    virtual bool maskPhysicalKey(int, bool) { return false; }
+    virtual bool maskPhysicalAxis(int, bool) { return false; } // 0=X, 1=Y; physical input only.
 
     virtual void cancelMove() {}
 
@@ -260,6 +278,7 @@ class WrappedKmboxNetDriver final : public IDriver
 {
 public:
     explicit WrappedKmboxNetDriver(KmboxNetConnection* conn);
+    ~WrappedKmboxNetDriver() override;
     const char* name() const override;
     uint32_t capabilities() const override;
     bool isOpen() const override;
@@ -273,10 +292,14 @@ public:
     bool middleUp() override;
     bool wheel(int delta) override;
     bool tapKey(int hidKey, int holdMs, int mod) override;
+    bool maskRealKeyboard(int durationMs) override;
+    bool keyboardMaskExpires() const override { return false; }
     int physicalButtonPressed(int button) const override;
     bool directSend() const override;
 private:
     KmboxNetConnection* conn_;
+    std::array<bool, 4> movementKeysMasked_{};
+    bool movementMaskUncertain_ = false;
 };
 
 struct OpenResult
@@ -288,6 +311,8 @@ struct OpenResult
 extern const char* const kBackendMakcu;
 extern const char* const kBackendMakcuNew;
 extern const char* const kBackendKmboxNet;
+extern const char* const kBackendFerrum;
+extern const char* const kBackendDhzboxMini;
 
 std::vector<std::string> backendNames();
 
@@ -298,7 +323,11 @@ OpenResult open(const std::string& backend,
                 const std::string& kmboxNetUuid,
                 // 第二台 MAKCUNEW(键盘)。空 = 未配置, 键盘动作回落到 makcuNewPort。
                 const std::string& makcuNewPortKbd = "",
-                unsigned int makcuNewBaudKbd = 6000000);
+                unsigned int makcuNewBaudKbd = 6000000,
+                const std::string& ferrumPort = "", unsigned int ferrumBaud = 3000000,
+                const std::string& dhzboxIp = "", unsigned short dhzboxPort = 8888, int dhzboxKey = 88,
+                const std::string& catIp = "", unsigned short catPort = 8888,
+                const std::string& catUuid = "", unsigned short catMonitorPort = 1234);
 
 std::string describeStatus(const std::string& backend, bool open, const std::string& detail);
 

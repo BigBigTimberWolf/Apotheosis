@@ -79,11 +79,15 @@ enum
     err_net_rx_timeout,
     err_net_cmd,
     err_net_pts,
+    err_net_invalid_config,
+    err_net_monitor_bind,
     success = 0,
     usb_dev_tx_timeout,
 };
 
 int kmNet_init(char* ip, char* port, char* mac);
+void kmNet_close();
+int kmNet_last_socket_error();
 int kmNet_mouse_move(short x, short y);
 int kmNet_mouse_left(int isdown);
 int kmNet_mouse_right(int isdown);

@@ -40,6 +40,22 @@ int main()
 {
     printf(u8"=== latency_probe 自测 ===\n\n");
 
+    printf(u8"[0] 未激活瞄准时，采集和推理仍有独立延迟样本\n");
+    {
+        lat::reset();
+        lat::noteCaptureForStats(lat::markCapture());
+        spin_us(200);
+        lat::markSubmit();
+        spin_us(200);
+        lat::markInferenceDone();
+        const auto s = lat::snapshot();
+        CHECK(s.frames_consumed == 0, u8"没有控制消费帧");
+        CHECK(s.stages[lat::kCaptureWait].n == 1 && s.stages[lat::kInference].n == 1,
+              u8"采集与推理延迟可独立显示");
+        CHECK(s.stages[lat::kEndToEnd].n == 0,
+              u8"没有鼠标发送时全链路仍不可测");
+    }
+
     printf(u8"[1] 阶段拆分与总延迟\n");
     {
         lat::reset();
@@ -197,6 +213,17 @@ int main()
         CHECK(lat::snapshot().device_frame_age_us == -1 &&
               lat::snapshot().engine_inference_ms == -1.0,
               "session reset invalidates device and engine telemetry");
+        lat::notePipelineTimes(true, 0.02, 4.2, 0.01, 0.03, 0.4);
+        auto graphTiming = lat::snapshot();
+        CHECK(graphTiming.last_timing_was_graph && graphTiming.gpu_pipeline.last_ms > 4.22 &&
+              graphTiming.gpu_engine.n == 0 && graphTiming.aim_tick.last_ms == 0.4,
+              "graph timing reports the full GPU pipeline without fake engine segments");
+        lat::notePipelineTimes(false, 0.02, 4.2, 0.01, 0.03, 0.6);
+        auto directTiming = lat::snapshot();
+        CHECK(!directTiming.last_timing_was_graph && directTiming.gpu_engine.n == 1 &&
+              directTiming.gpu_engine.last_ms == 4.2 && directTiming.aim_tick.max_ms == 0.6,
+              "direct timing exposes segments and tracks control tick spikes");
+        lat::reset();
     }
 
     {

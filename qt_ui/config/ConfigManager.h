@@ -19,6 +19,10 @@ public:
 
     QString captureDevice() const;
     void setCaptureDevice(const QString& v);
+    QString captureSource() const;
+    void setCaptureSource(const QString& v);
+    QString captureStreamUrl() const;
+    void setCaptureStreamUrl(const QString& v);
     QString captureFormat() const;
     void setCaptureFormat(const QString& v);
     int captureWidth() const;
@@ -56,6 +60,24 @@ public:
     QString kmboxNetIp() const;
     void setKmboxNetIp(const QString& v);
     QString kmboxNetPort() const;
+    QString ferrumPort() const;
+    void setFerrumPort(const QString& v);
+    int ferrumBaudrate() const;
+    void setFerrumBaudrate(int v);
+    QString catIp() const;
+    void setCatIp(const QString& value);
+    int catPort() const;
+    void setCatPort(int value);
+    QString catUuid() const;
+    void setCatUuid(const QString& value);
+    int catMonitorPort() const;
+    void setCatMonitorPort(int value);
+    QString dhzboxIp() const;
+    void setDhzboxIp(const QString& v);
+    int dhzboxPort() const;
+    void setDhzboxPort(int v);
+    int dhzboxKey() const;
+    void setDhzboxKey(int v);
     void setKmboxNetPort(const QString& v);
     QString kmboxNetUuid() const;
     void setKmboxNetUuid(const QString& v);
@@ -86,6 +108,8 @@ public:
     void setCrosshairRectW(int v);
     int crosshairRectH() const;
     void setCrosshairRectH(int v);
+    int crosshairOffsetY() const;
+    void setCrosshairOffsetY(int v);
     int crosshairMinPixelCount() const;
     void setCrosshairMinPixelCount(int v);
     int crosshairCloseRadius() const;
@@ -100,6 +124,20 @@ public:
     };
     QList<ColorProfile> crosshairColors() const;
     void setCrosshairColors(const QList<ColorProfile>& colors);
+    int laserRectW() const; void setLaserRectW(int);
+    int laserRectH() const; void setLaserRectH(int);
+    int laserCenterX() const; void setLaserCenterX(int);
+    int laserCenterY() const; void setLaserCenterY(int);
+    int laserTargetCenterX() const; void setLaserTargetCenterX(int);
+    int laserTargetCenterY() const; void setLaserTargetCenterY(int);
+    int laserTargetRectW() const; void setLaserTargetRectW(int);
+    int laserTargetRectH() const; void setLaserTargetRectH(int);
+    int laserMinPixelCount() const; void setLaserMinPixelCount(int);
+    int laserCloseRadius() const; void setLaserCloseRadius(int);
+    float laserMinElongation() const; void setLaserMinElongation(float);
+    float laserSmooth() const; void setLaserSmooth(float);
+    QList<ColorProfile> laserColors() const;
+    void setLaserColors(const QList<ColorProfile>& colors);
 
     bool showFps() const;
     void setShowFps(bool v);
@@ -146,8 +184,16 @@ public:
         int fovX = 106, fovY = 74;
         QString aimClasses;
         bool crosshairDetectEnabled = false;
+        bool laserDetectEnabled = false;
         bool dynamicFovEnabled = false;
-        float dynamicFovStrength = 0.60f;
+        int dynamicFovSize = 40;
+        int dynamicFovShrinkMs = 200;
+        int dynamicFovExpandMs = 120;
+        bool blockHotkey = false;
+        bool maskX = false, maskY = false;
+        bool unlockX = false, unlockY = false;
+        int unlockYDelayMs = 0;
+        int aimDelayMs = 0;
 
         bool   ctlEnabled = false;
         double ctlKpX = 35.0, ctlKpY = 35.0;
@@ -174,6 +220,8 @@ public:
 
         double ctlYOffset = 0.5;
         double ctlYOffsetMax = 0.5;
+        double ctlXOffset = 0.5;
+        double ctlXOffsetMax = 0.5;
         double ctlHysteresisRatio = 1.3;
         double ctlMaxDistancePx = 0.0;
         int    ctlRandomSeed = 0;

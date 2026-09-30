@@ -27,6 +27,7 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Qt6 requires AUTOMOC for Q_OBJECT macro processing
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 set(CMAKE_PREFIX_PATH "C:/Qt/6.8.3/msvc2022_64" CACHE PATH "Qt6 prefix")
 
 if(NOT CMAKE_CUDA_FLAGS MATCHES "(^| )--allow-unsupported-compiler($| )")
@@ -102,7 +103,7 @@ require_file("${CPPWINRT_INCLUDE_DIR}/winrt/base.h" "C++/WinRT headers")
 require_file("${MSVC_REDIST_DIR}/vcruntime140.dll" "MSVC runtime redistributables")
 
 find_package(CUDAToolkit REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
 set(QT_UI_DIR "${CMAKE_SOURCE_DIR}/qt_ui")
 
@@ -118,14 +119,19 @@ set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
     "${SRC_DIR}/capture/auto_capture.cpp"
     "${SRC_DIR}/capture/capture.cpp"
+    "${SRC_DIR}/capture/stream_capture.cpp"
     "${SRC_DIR}/capture/capture_card_caps.h"
     "${SRC_DIR}/capture/capture_card_probe.h"
     "${SRC_DIR}/capture/capture_utils.cpp"
+    "${SRC_DIR}/capture/dshow_capture.cpp"
+    "${SRC_DIR}/capture/dshow_capture.h"
     "${SRC_DIR}/capture/gpu_color_ops.cu"
     "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
+    "${SRC_DIR}/capture/magewell_capture.cpp"
     "${SRC_DIR}/capture/mf_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/crosshair/crosshair_detector.cpp"
+      "${SRC_DIR}/crosshair/laser_detector.cpp"
     "${SRC_DIR}/crosshair/color_picker.cpp"
     "${SRC_DIR}/crosshair/crosshair_runtime.cpp"
     "${SRC_DIR}/detector/cuda_preprocess.cu"
@@ -133,8 +139,13 @@ set(APP_SOURCES
     "${SRC_DIR}/detector/model_inspector.cpp"
     "${SRC_DIR}/detector/postProcess.cpp"
     "${SRC_DIR}/detector/trt_detector.cpp"
+    "${SRC_DIR}/tensorrt/engine_cache_key.cpp"
     "${SRC_DIR}/keyboard/keycodes.cpp"
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
+    "${SRC_DIR}/keyboard/hotkey_blocking.cpp"
+    "${SRC_DIR}/macro/macro_engine.cpp"
+    "${SRC_DIR}/macro/macro_engine.h"
+    "${SRC_DIR}/macro/macro_config.h"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
     "${SRC_DIR}/mem/gpu_image.cpp"
     "${SRC_DIR}/mem/gpu_resource_manager.cpp"
@@ -155,22 +166,21 @@ set(APP_SOURCES
     "${SRC_DIR}/mouse/kmboxNetConnection.cpp"
     "${SRC_DIR}/mouse/kmbox_net/kmboxNet.cpp"
     "${SRC_DIR}/mouse/mouse_driver.cpp"
+    "${SRC_DIR}/mouse/dhzbox_driver.cpp"
+    "${SRC_DIR}/mouse/ferrum_driver.cpp"
+    "${SRC_DIR}/mouse/cat_driver.cpp"
+    "${SRC_DIR}/mouse/windows_driver.cpp"
+    "${SRC_DIR}/mouse/windows_driver.h"
     "${SRC_DIR}/mouse/mouse.cpp"
     "${SRC_DIR}/overlay/app_log.cpp"
     "${SRC_DIR}/overlay/preview_window.cpp"
     "${SRC_DIR}/runtime/active_hotkey.cpp"
-    # ── ★★ 通用控制器层 (2026-09-17 第三轮重建) ──────────────────────────
-    # control/ 是【零依赖】的纯计算层(不引 OpenCV/Windows/Qt), 所以它同时被
-    # 主程序与 tests/control_layer_test 编译 —— 一份代码两处用, 不复制。
-    # runtime/aim_loop.cpp 是它的运行期外壳(取检测/取准星/算 dt/下发)。
+    # 移植后的纯计算控制层。
     "${SRC_DIR}/control/types.cpp"
-    "${SRC_DIR}/control/selector.cpp"
-    "${SRC_DIR}/control/stabilizer.cpp"
-    "${SRC_DIR}/control/alpha_beta_filter.cpp"
     "${SRC_DIR}/control/anchor.cpp"
-    "${SRC_DIR}/control/pid_controller.cpp"
-    "${SRC_DIR}/control/predictor.cpp"
-    "${SRC_DIR}/control/aim_controller.cpp"
+    "${SRC_DIR}/control/recovered_pid.cpp"
+    "${SRC_DIR}/control/recovered_tracker.cpp"
+    "${SRC_DIR}/control/recovered_aim_controller.cpp"
     "${SRC_DIR}/runtime/aim_loop.cpp"
     "${SRC_DIR}/runtime/aim_path_config.h"
     # aim_loop_config.cpp 是【纯映射】, 不依赖 OpenCV/Windows ⇒ 逻辑测试也编它。
@@ -191,6 +201,11 @@ set(APP_SOURCES
     # Qt UI sources
     "${QT_UI_DIR}/MainWindow.cpp"
     "${QT_UI_DIR}/MainWindow.h"
+    "${QT_UI_DIR}/remote/LanTuningServer.cpp"
+    "${QT_UI_DIR}/remote/LanTuningServer.h"
+    "${QT_UI_DIR}/remote/tuning.qrc"
+    "${QT_UI_DIR}/pages/LanTuningPage.cpp"
+    "${QT_UI_DIR}/pages/LanTuningPage.h"
     "${QT_UI_DIR}/config/ConfigManager.cpp"
     "${QT_UI_DIR}/config/ConfigManager.h"
     "${QT_UI_DIR}/config/config_profiles.cpp"
@@ -202,6 +217,12 @@ set(APP_SOURCES
     # ★★ 瞄准设置页 (2026-09-17 第三轮续重建): 热键管理 + 通用控制器层参数。
     #   它同时是 config.hotkeys[] 的唯一界面写入者。
     "${QT_UI_DIR}/pages/AimSettingsPage.cpp"
+    "${QT_UI_DIR}/widgets/HotkeyActivationWidget.cpp"
+    "${QT_UI_DIR}/widgets/HotkeyActivationWidget.h"
+    "${QT_UI_DIR}/widgets/TriggerWorkflowEditor.cpp"
+    "${QT_UI_DIR}/widgets/TriggerWorkflowEditor.h"
+    "${QT_UI_DIR}/widgets/TriggerTargetEditor.cpp"
+    "${QT_UI_DIR}/widgets/TriggerTargetEditor.h"
     "${QT_UI_DIR}/pages/AimSettingsPage.h"
     "${QT_UI_DIR}/pages/AutoCapturePage.cpp"
     "${QT_UI_DIR}/pages/AutoCapturePage.h"
@@ -209,6 +230,14 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/CapturePage.h"
     "${QT_UI_DIR}/pages/CrosshairPage.cpp"
     "${QT_UI_DIR}/pages/CrosshairPage.h"
+    "${QT_UI_DIR}/pages/AimpointRecoilPage.cpp"
+    "${QT_UI_DIR}/pages/AimpointRecoilPage.h"
+    "${QT_UI_DIR}/pages/AutoFlashPage.cpp"
+    "${QT_UI_DIR}/pages/AutoFlashPage.h"
+    "${QT_UI_DIR}/pages/MacroPage.cpp"
+    "${QT_UI_DIR}/pages/MacroPage.h"
+    "${QT_UI_DIR}/pages/HeadBodyFusionPage.cpp"
+    "${QT_UI_DIR}/pages/HeadBodyFusionPage.h"
     "${QT_UI_DIR}/pages/DebugPage.cpp"
     "${QT_UI_DIR}/pages/DebugPage.h"
     "${QT_UI_DIR}/pages/HardwarePage.cpp"
@@ -221,10 +250,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/OverviewPage.h"
     "${QT_UI_DIR}/pages/SessionPage.cpp"
     "${QT_UI_DIR}/pages/SessionPage.h"
-    # ★★ 稳定器页 (2026-09-20): 全局选靶 + 目标稳定器那 7 项, 从「目标」页搬来,
-    #   与「准星找色」并列在「控制」组 —— 它们都作用于控制器【之前】的输入。
-    "${QT_UI_DIR}/pages/StabilizerPage.cpp"
-    "${QT_UI_DIR}/pages/StabilizerPage.h"
     "${QT_UI_DIR}/pages/StatsPage.cpp"
     "${QT_UI_DIR}/pages/StatsPage.h"
     "${QT_UI_DIR}/pages/TargetPage.cpp"
@@ -266,11 +291,34 @@ target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/inc
 target_link_libraries(serial_embedded PUBLIC setupapi)
 
 add_executable(ai WIN32 ${APP_SOURCES})
+set(APOTHEOSIS_EXECUTABLE_NAME "Apotheosis" CACHE STRING
+    "Executable name (allows a side-by-side diagnostic build while the app is running)")
+
+# Optional official Magewell SDK. The SDK is installed separately; its files are
+# deliberately not copied into the source tree or packaged with the application.
+set(MAGEWELL_SDK_ROOT "" CACHE PATH "Root of the Magewell Windows Capture SDK")
+if(MAGEWELL_SDK_ROOT)
+    find_path(MAGEWELL_SDK_INCLUDE_DIR LibMWCapture/MWCapture.h
+        PATHS "${MAGEWELL_SDK_ROOT}/SDKv3/Include" "${MAGEWELL_SDK_ROOT}/Include"
+        NO_DEFAULT_PATH)
+    find_library(MAGEWELL_SDK_LIBRARY NAMES LibMWCapture
+        PATHS "${MAGEWELL_SDK_ROOT}/SDKv3/Lib/x64" "${MAGEWELL_SDK_ROOT}/Lib/x64"
+        NO_DEFAULT_PATH)
+    if(NOT MAGEWELL_SDK_INCLUDE_DIR OR NOT MAGEWELL_SDK_LIBRARY)
+        message(FATAL_ERROR "Magewell SDK headers or x64 import library not found under MAGEWELL_SDK_ROOT")
+    endif()
+    target_include_directories(ai PRIVATE "${MAGEWELL_SDK_INCLUDE_DIR}")
+    target_link_libraries(ai PRIVATE "${MAGEWELL_SDK_LIBRARY}")
+    target_compile_definitions(ai PRIVATE APOTHEOSIS_HAS_MAGEWELL_SDK)
+    if(MSVC)
+        target_link_options(ai PRIVATE "/DELAYLOAD:LibMWCapture.dll")
+    endif()
+endif()
 
 # Native code for the deployed Turing/Ampere GPUs; compute_86 PTX provides
 # forward JIT compatibility. TensorRT/driver compatibility is still required.
 set_target_properties(ai PROPERTIES
-    OUTPUT_NAME "Apotheosis"
+    OUTPUT_NAME "${APOTHEOSIS_EXECUTABLE_NAME}"
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     # 运行机使用的 CMP 40HX/TU106 是 sm_75，开发机 RTX 3060 是 sm_86。
@@ -335,6 +383,7 @@ target_link_directories(ai PRIVATE "${TENSORRT_ROOT}/lib")
 target_link_libraries(ai PRIVATE
     serial_embedded
     Qt6::Widgets
+    Qt6::Network
     "${OPENCV_LIB}"
     "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib"
     CUDA::cuda_driver
@@ -373,6 +422,7 @@ target_link_libraries(ai PRIVATE
 copy_runtime(ai "${SRC_DIR}/assets/apotheosis_logo.png")
 
 copy_runtime(ai "${OPENCV_DLL}")
+copy_runtime(ai "${OPENCV_VC_DIR}/bin/opencv_videoio_ffmpeg4130_64.dll")
 copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.dll")
 copy_runtime(ai "${MSVC_REDIST_DIR}/concrt140.dll")
 copy_runtime(ai "${MSVC_REDIST_DIR}/msvcp140.dll")
@@ -432,6 +482,7 @@ add_custom_command(TARGET ai POST_BUILD
 add_executable(mfcap_bench
     "${SRC_DIR}/capture/tests/mfcap_bench.cpp"
     "${SRC_DIR}/capture/mf_capture.cpp"
+    "${SRC_DIR}/capture/dshow_capture.cpp"
     "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
     "${SRC_DIR}/capture/gpu_color_ops.cu"
     "${SRC_DIR}/mem/gpu_image.cpp")
@@ -486,6 +537,37 @@ copy_runtime(mfcap_bench "${CUDAToolkit_BIN_DIR}/nppig64_12.dll")
 copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
 copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
 copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+# Direct KS probe uses the installed UVC driver and bypasses MF/DirectShow.
+# Kept separate from the application until same-mode measurements show a gain.
+add_executable(ks_capture_probe "${CMAKE_SOURCE_DIR}/tools/ks_capture_probe.cpp")
+target_link_libraries(ks_capture_probe PRIVATE setupapi ksuser)
+if(MSVC)
+    target_compile_options(ks_capture_probe PRIVATE /utf-8 /W4)
+endif()
+
+# Standalone Media Foundation mode and first-frame diagnostic for field testing.
+add_executable(capture_card_dump "${SRC_DIR}/capture/tests/capture_card_dump.cpp")
+target_link_libraries(capture_card_dump PRIVATE mf mfplat mfreadwrite mfuuid ole32)
+if(MSVC)
+    target_compile_options(capture_card_dump PRIVATE /utf-8 /W3)
+endif()
+
+add_executable(dshow_card_dump
+    "${SRC_DIR}/capture/tests/dshow_card_dump.cpp"
+    "${SRC_DIR}/capture/dshow_capture.cpp"
+    "${SRC_DIR}/capture/gpu_color_ops.cu"
+    "${SRC_DIR}/mem/gpu_image.cpp")
+target_include_directories(dshow_card_dump PRIVATE "${SRC_DIR}" "${OPENCV_INCLUDE_DIR}")
+target_link_libraries(dshow_card_dump PRIVATE "${OPENCV_LIB}" CUDA::cudart strmiids ole32 oleaut32)
+if(MSVC)
+    target_compile_options(dshow_card_dump PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+        $<$<COMPILE_LANGUAGE:CXX>:/Zc:char8_t->
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>)
+endif()
+copy_runtime(dshow_card_dump "${OPENCV_DLL}")
+copy_runtime(dshow_card_dump "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
 
 # ── nvJPEG 解码路径微基准 (独立 exe) ─────────────────────────────────────────
 # 用一张真实采集帧比较 split+ROI / nvjpegDecode / batched(DEFAULT|GPU_HYBRID|
@@ -615,6 +697,7 @@ copy_runtime(decode_workers_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
 # ── 自旋 vs 阻塞等待 CPU 代价 (独立 exe) ─────────────────────────────────────
 # 量化 use_spin_wait_sync 在 4 核机器上占用多少核, 以及改阻塞同步能省回多少。
 add_executable(spin_vs_block_bench "${SRC_DIR}/detector/tests/spin_wait_bench.cpp")
+
 if(MSVC)
     target_compile_options(spin_vs_block_bench PRIVATE
         $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
@@ -625,6 +708,16 @@ copy_runtime(spin_vs_block_bench "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
 copy_runtime(spin_vs_block_bench "${MSVC_REDIST_DIR}/msvcp140.dll")
 copy_runtime(spin_vs_block_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
 copy_runtime(spin_vs_block_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+
+add_executable(crosshair_gpu_test
+    "${CMAKE_SOURCE_DIR}/tests/crosshair_gpu_test.cpp"
+    "${SRC_DIR}/capture/gpu_color_ops.cu")
+set_target_properties(crosshair_gpu_test PROPERTIES
+    CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "75-real;86-real;86-virtual")
+target_include_directories(crosshair_gpu_test PRIVATE "${SRC_DIR}")
+target_link_libraries(crosshair_gpu_test PRIVATE CUDA::cudart)
+copy_runtime(crosshair_gpu_test "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")

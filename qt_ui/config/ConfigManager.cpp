@@ -3,6 +3,7 @@
 #include "config.h"   // kFixedMaxDetections
 
 #include <QFileInfo>
+#include <algorithm>
 
 ConfigManager::ConfigManager()
     : QObject(nullptr) {}
@@ -20,7 +21,7 @@ bool ConfigManager::load(const QString& path) {
     if (!QFileInfo::exists(m_path)) {
         setDetectionResolution(320);
         setCaptureFps(60);
-        setCircleMask(true);
+        setCircleMask(false);
 
         setAiModel("sunxds_0.5.6.engine");
         setConfidenceThreshold(0.10f);
@@ -59,6 +60,24 @@ QString ConfigManager::captureDevice() const {
 
 void ConfigManager::setCaptureDevice(const QString& v) {
     m_settings->setValue("Capture/capture_device", v);
+    emit configChanged();
+}
+
+QString ConfigManager::captureSource() const {
+    return m_settings->value("Capture/capture_source", "device").toString();
+}
+
+void ConfigManager::setCaptureSource(const QString& v) {
+    m_settings->setValue("Capture/capture_source", v);
+    emit configChanged();
+}
+
+QString ConfigManager::captureStreamUrl() const {
+    return m_settings->value("Capture/capture_stream_url", "").toString();
+}
+
+void ConfigManager::setCaptureStreamUrl(const QString& v) {
+    m_settings->setValue("Capture/capture_stream_url", v);
     emit configChanged();
 }
 
@@ -117,7 +136,7 @@ void ConfigManager::setDetectionResolution(int v) {
 }
 
 bool ConfigManager::circleMask() const {
-    return m_settings->value("Capture/circle_mask", true).toBool();
+    return m_settings->value("Capture/circle_mask", false).toBool();
 }
 
 void ConfigManager::setCircleMask(bool v) {
@@ -127,13 +146,35 @@ void ConfigManager::setCircleMask(bool v) {
 
 QString ConfigManager::inputMethod() const {
     const QString value = m_settings->value("Hardware/input_method", "MAKCU").toString();
-    return value == QStringLiteral("MAKCUNEW") ? value : QStringLiteral("MAKCU");
+    if (value == QStringLiteral("MAKCUNEW") || value == QStringLiteral("KMBOXNET") ||
+        value == QStringLiteral("FERRUM") || value == QStringLiteral("DHZBOX_MINI") || value == QStringLiteral("WINDOWS") || value == QStringLiteral("CAT"))
+        return value;
+    return QStringLiteral("MAKCU");
 }
 
 void ConfigManager::setInputMethod(const QString& v) {
     m_settings->setValue("Hardware/input_method", v);
     emit configChanged();
 }
+
+QString ConfigManager::ferrumPort() const { return m_settings->value("Hardware/ferrum_port", "").toString(); }
+void ConfigManager::setFerrumPort(const QString& v) { m_settings->setValue("Hardware/ferrum_port", v); emit configChanged(); }
+int ConfigManager::ferrumBaudrate() const { return m_settings->value("Hardware/ferrum_baudrate", 3000000).toInt(); }
+void ConfigManager::setFerrumBaudrate(int v) { m_settings->setValue("Hardware/ferrum_baudrate", v); emit configChanged(); }
+QString ConfigManager::catIp() const { return m_settings->value("Hardware/cat_ip", "192.168.7.1").toString(); }
+void ConfigManager::setCatIp(const QString& v) { m_settings->setValue("Hardware/cat_ip", v); emit configChanged(); }
+int ConfigManager::catPort() const { return m_settings->value("Hardware/cat_port", 8888).toInt(); }
+void ConfigManager::setCatPort(int v) { m_settings->setValue("Hardware/cat_port", v); emit configChanged(); }
+QString ConfigManager::catUuid() const { return m_settings->value("Hardware/cat_uuid", "").toString(); }
+void ConfigManager::setCatUuid(const QString& v) { m_settings->setValue("Hardware/cat_uuid", v); emit configChanged(); }
+int ConfigManager::catMonitorPort() const { return m_settings->value("Hardware/cat_monitor_port", 1234).toInt(); }
+void ConfigManager::setCatMonitorPort(int v) { m_settings->setValue("Hardware/cat_monitor_port", v); emit configChanged(); }
+QString ConfigManager::dhzboxIp() const { return m_settings->value("Hardware/dhzbox_ip", "192.168.2.88").toString(); }
+void ConfigManager::setDhzboxIp(const QString& v) { m_settings->setValue("Hardware/dhzbox_ip", v); emit configChanged(); }
+int ConfigManager::dhzboxPort() const { return m_settings->value("Hardware/dhzbox_port", 8888).toInt(); }
+void ConfigManager::setDhzboxPort(int v) { m_settings->setValue("Hardware/dhzbox_port", v); emit configChanged(); }
+int ConfigManager::dhzboxKey() const { return m_settings->value("Hardware/dhzbox_key", 88).toInt(); }
+void ConfigManager::setDhzboxKey(int v) { m_settings->setValue("Hardware/dhzbox_key", v); emit configChanged(); }
 
 int ConfigManager::makcuBaudrate() const {
     return m_settings->value("Hardware/makcu_baudrate", 115200).toInt();
@@ -209,7 +250,7 @@ void ConfigManager::setKmboxNetPort(const QString& v) {
 }
 
 QString ConfigManager::kmboxNetUuid() const {
-    return m_settings->value("Hardware/kmbox_net_uuid", "12345").toString();
+    return m_settings->value("Hardware/kmbox_net_uuid", "").toString();
 }
 
 void ConfigManager::setKmboxNetUuid(const QString& v) {
@@ -422,6 +463,15 @@ void ConfigManager::setCrosshairRectH(int v) {
     emit configChanged();
 }
 
+int ConfigManager::crosshairOffsetY() const {
+    return m_settings->value("Crosshair/crosshair_offset_y", 0).toInt();
+}
+
+void ConfigManager::setCrosshairOffsetY(int v) {
+    m_settings->setValue("Crosshair/crosshair_offset_y", v);
+    emit configChanged();
+}
+
 int ConfigManager::crosshairMinPixelCount() const {
     return m_settings->value("Crosshair/crosshair_min_pixel_count", 4).toInt();
 }
@@ -487,6 +537,66 @@ void ConfigManager::setCrosshairColors(const QList<ColorProfile>& colors) {
         m_settings->setValue(prefix + "s_max",   c.sMax);
         m_settings->setValue(prefix + "v_min",   c.vMin);
         m_settings->setValue(prefix + "v_max",   c.vMax);
+    }
+    emit configChanged();
+}
+
+#define LASER_INT_ACCESSOR(Name, Key, Default) \
+int ConfigManager::laser##Name() const { return m_settings->value("Laser/" Key, Default).toInt(); } \
+void ConfigManager::setLaser##Name(int v) { m_settings->setValue("Laser/" Key, v); emit configChanged(); }
+LASER_INT_ACCESSOR(RectW, "laser_rect_w", 160)
+LASER_INT_ACCESSOR(RectH, "laser_rect_h", 240)
+LASER_INT_ACCESSOR(CenterX, "laser_center_x", 160)
+LASER_INT_ACCESSOR(CenterY, "laser_center_y", 200)
+LASER_INT_ACCESSOR(TargetCenterX, "laser_target_center_x", 160)
+LASER_INT_ACCESSOR(TargetCenterY, "laser_target_center_y", 160)
+LASER_INT_ACCESSOR(TargetRectW, "laser_target_rect_w", 60)
+LASER_INT_ACCESSOR(TargetRectH, "laser_target_rect_h", 60)
+LASER_INT_ACCESSOR(MinPixelCount, "laser_min_pixel_count", 10)
+LASER_INT_ACCESSOR(CloseRadius, "laser_close_radius", 1)
+#undef LASER_INT_ACCESSOR
+float ConfigManager::laserMinElongation() const { return m_settings->value("Laser/laser_min_elongation", 3.0).toFloat(); }
+void ConfigManager::setLaserMinElongation(float v) { m_settings->setValue("Laser/laser_min_elongation", v); emit configChanged(); }
+float ConfigManager::laserSmooth() const { return m_settings->value("Laser/laser_smooth", 0.5).toFloat(); }
+void ConfigManager::setLaserSmooth(float v) { m_settings->setValue("Laser/laser_smooth", v); emit configChanged(); }
+
+QList<ConfigManager::ColorProfile> ConfigManager::laserColors() const {
+    QList<ColorProfile> result;
+    for (int i = 0; m_settings->contains(QStringLiteral("laser_color.%1/name").arg(i)); ++i) {
+        const auto prefix = QStringLiteral("laser_color.%1/").arg(i);
+        ColorProfile c;
+        c.name = m_settings->value(prefix + "name", "Laser").toString();
+        c.enabled = m_settings->value(prefix + "enabled", true).toBool();
+        c.hLow = m_settings->value(prefix + "h_low", 0).toInt();
+        c.hHigh = m_settings->value(prefix + "h_high", 10).toInt();
+        c.sMin = m_settings->value(prefix + "s_min", 120).toInt();
+        c.sMax = m_settings->value(prefix + "s_max", 255).toInt();
+        c.vMin = m_settings->value(prefix + "v_min", 120).toInt();
+        c.vMax = m_settings->value(prefix + "v_max", 255).toInt();
+        result.append(c);
+    }
+    if (result.isEmpty()) {
+        ColorProfile low, high;
+        low.name = QStringLiteral("Laser-Red-Low"); low.hLow = 0; low.hHigh = 10;
+        high.name = QStringLiteral("Laser-Red-High"); high.hLow = 160; high.hHigh = 179;
+        result.append(low); result.append(high);
+    }
+    return result;
+}
+void ConfigManager::setLaserColors(const QList<ColorProfile>& colors) {
+    for (int i = 0; m_settings->contains(QStringLiteral("laser_color.%1/name").arg(i)); ++i)
+        m_settings->remove(QStringLiteral("laser_color.%1").arg(i));
+    for (int i = 0; i < colors.size(); ++i) {
+        const auto prefix = QStringLiteral("laser_color.%1/").arg(i);
+        const auto& c = colors[i];
+        m_settings->setValue(prefix + "name", c.name);
+        m_settings->setValue(prefix + "enabled", c.enabled);
+        m_settings->setValue(prefix + "h_low", c.hLow);
+        m_settings->setValue(prefix + "h_high", c.hHigh);
+        m_settings->setValue(prefix + "s_min", c.sMin);
+        m_settings->setValue(prefix + "s_max", c.sMax);
+        m_settings->setValue(prefix + "v_min", c.vMin);
+        m_settings->setValue(prefix + "v_max", c.vMax);
     }
     emit configChanged();
 }
@@ -571,8 +681,19 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "fovY", data.fovY);
     m_settings->setValue(prefix + "aim_classes",         data.aimClasses);
     m_settings->setValue(prefix + "crosshair_detect_enabled", data.crosshairDetectEnabled);
+    m_settings->setValue(prefix + "laser_detect_enabled", data.laserDetectEnabled && !data.crosshairDetectEnabled);
     m_settings->setValue(prefix + "dynamic_fov_enabled", data.dynamicFovEnabled);
-    m_settings->setValue(prefix + "dynamic_fov_strength", static_cast<double>(data.dynamicFovStrength));
+    m_settings->remove(prefix + "dynamic_fov_strength");
+    m_settings->setValue(prefix + "dynamic_fov_size", data.dynamicFovSize);
+    m_settings->setValue(prefix + "dynamic_fov_expand_ms", data.dynamicFovExpandMs);
+    m_settings->setValue(prefix + "dynamic_fov_shrink_ms", data.dynamicFovShrinkMs);
+    m_settings->setValue(prefix + "mask_x", data.maskX);
+    m_settings->setValue(prefix + "block_hotkey", data.blockHotkey);
+    m_settings->setValue(prefix + "mask_y", data.maskY);
+    m_settings->setValue(prefix + "unlock_x", data.unlockX);
+    m_settings->setValue(prefix + "unlock_y", data.unlockY);
+    m_settings->setValue(prefix + "unlock_y_delay_ms", data.unlockYDelayMs);
+    m_settings->setValue(prefix + "aim_delay_ms", data.aimDelayMs);
     m_settings->setValue(prefix + "ctl_enabled", data.ctlEnabled);
     m_settings->setValue(prefix + "ctl_kp_x", static_cast<double>(data.ctlKpX));
     m_settings->setValue(prefix + "ctl_kp_y", static_cast<double>(data.ctlKpY));
@@ -593,6 +714,8 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "ctl_inflight_dead_time_ms", static_cast<double>(data.ctlInflightDeadTimeMs));
     m_settings->setValue(prefix + "ctl_y_offset", static_cast<double>(data.ctlYOffset));
     m_settings->setValue(prefix + "ctl_y_offset_max", static_cast<double>(data.ctlYOffsetMax));
+    m_settings->setValue(prefix + "ctl_x_offset", static_cast<double>(data.ctlXOffset));
+    m_settings->setValue(prefix + "ctl_x_offset_max", static_cast<double>(data.ctlXOffsetMax));
     m_settings->setValue(prefix + "ctl_hysteresis_ratio", static_cast<double>(data.ctlHysteresisRatio));
     m_settings->setValue(prefix + "ctl_max_distance_px", static_cast<double>(data.ctlMaxDistancePx));
     m_settings->setValue(prefix + "ctl_random_seed", data.ctlRandomSeed);
@@ -614,8 +737,19 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.fovY = m_settings->value(prefix + "fovY", 74).toInt();
     data.aimClasses      = m_settings->value(prefix + "aim_classes", QString()).toString();
     data.crosshairDetectEnabled = m_settings->value(prefix + "crosshair_detect_enabled", false).toBool();
+    data.laserDetectEnabled = m_settings->value(prefix + "laser_detect_enabled", false).toBool()
+                              && !data.crosshairDetectEnabled;
     data.dynamicFovEnabled = m_settings->value(prefix + "dynamic_fov_enabled", false).toBool();
-    data.dynamicFovStrength = m_settings->value(prefix + "dynamic_fov_strength", 0.60).toFloat();
+    data.dynamicFovSize = std::clamp(m_settings->value(prefix + "dynamic_fov_size", 40).toInt(), 1, 4096);
+    data.dynamicFovExpandMs = std::clamp(m_settings->value(prefix + "dynamic_fov_expand_ms", 120).toInt(), 0, 2000);
+    data.dynamicFovShrinkMs = std::clamp(m_settings->value(prefix + "dynamic_fov_shrink_ms", 200).toInt(), 0, 2000);
+    data.maskX = m_settings->value(prefix + "mask_x", false).toBool();
+    data.blockHotkey = m_settings->value(prefix + "block_hotkey", false).toBool();
+    data.maskY = m_settings->value(prefix + "mask_y", false).toBool();
+    data.unlockX = m_settings->value(prefix + "unlock_x", false).toBool();
+    data.unlockY = m_settings->value(prefix + "unlock_y", false).toBool();
+    data.unlockYDelayMs = std::clamp(m_settings->value(prefix + "unlock_y_delay_ms", 0).toInt(), 0, 5000);
+    data.aimDelayMs = std::clamp(m_settings->value(prefix + "aim_delay_ms", 0).toInt(), 0, 2000);
     data.ctlEnabled = m_settings->value(prefix + "ctl_enabled", false).toBool();
     data.ctlKpX = m_settings->value(prefix + "ctl_kp_x", 35.0).toDouble();
     data.ctlKpY = m_settings->value(prefix + "ctl_kp_y", 35.0).toDouble();
@@ -638,6 +772,8 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.ctlInflightDeadTimeMs = m_settings->value(prefix + "ctl_inflight_dead_time_ms", 46.0).toDouble();
     data.ctlYOffset = m_settings->value(prefix + "ctl_y_offset", 0.5).toDouble();
     data.ctlYOffsetMax = m_settings->value(prefix + "ctl_y_offset_max", 0.5).toDouble();
+    data.ctlXOffset = m_settings->value(prefix + "ctl_x_offset", 0.5).toDouble();
+    data.ctlXOffsetMax = m_settings->value(prefix + "ctl_x_offset_max", 0.5).toDouble();
     data.ctlHysteresisRatio = m_settings->value(prefix + "ctl_hysteresis_ratio", 1.3).toDouble();
     data.ctlMaxDistancePx = m_settings->value(prefix + "ctl_max_distance_px", 0.0).toDouble();
     data.ctlRandomSeed = m_settings->value(prefix + "ctl_random_seed", 0).toInt();

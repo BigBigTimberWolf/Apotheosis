@@ -16,15 +16,16 @@ inline int clamp_byte(int v, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-cv::Rect dynamic_center_roi(const cv::Size& frame, int rect_w, int rect_h)
+cv::Rect dynamic_center_roi(const cv::Size& frame, int rect_w, int rect_h, int offset_y)
 {
-    const int w = std::clamp(rect_w, 8, frame.width);
-    const int h = std::clamp(rect_h, 8, frame.height);
+    const int w = std::clamp(rect_w, 4, frame.width);
+    const int h = std::clamp(rect_h, 4, frame.height);
 
     const int cx = frame.width / 2;
     const int cy = frame.height / 2;
     const int x = cx - w / 2;
-    const int y = cy - static_cast<int>(h * 0.6f);
+    const int y = std::clamp(cy - h + 10 + offset_y,
+                             0, frame.height - h);
 
     cv::Rect roi(x, y, w, h);
     return roi & cv::Rect(0, 0, frame.width, frame.height);
@@ -196,7 +197,8 @@ std::optional<cv::Point2f> CrosshairDetector::detect(
     }
     if (!any_enabled) return std::nullopt;
 
-    const cv::Rect roi = dynamic_center_roi(bgrFrame.size(), settings.rect_w, settings.rect_h);
+    const cv::Rect roi = dynamic_center_roi(bgrFrame.size(), settings.rect_w,
+                                             settings.rect_h, settings.offset_y);
     if (roi.width < 4 || roi.height < 4) return std::nullopt;
 
     cv::Mat region = bgrFrame(roi);

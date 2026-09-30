@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "control/aim_controller.h"
+#include "control/controller_contract.h"
 
 struct HotkeyProfile;
 struct ClassFilterState;
@@ -19,13 +19,19 @@ void reset();
 void resetMouse();
 
 bool active();
-
-// 在途补偿观测日志（速度/自动延迟/实际提前时间/推进量/是否被钳制）。
-// 关闭状态下不打日志，保持"没开这个功能就什么都没变"。
-void logPredictor(const control::ControlOutput& out);
+// Active hotkey index only while a fresh, selected target is actually being aimed at.
+int activeTargetHotkey();
+bool prepareForMacro();
+void finishMacroControl(bool moved);
+void resetPidAxes(bool x, bool y);
 
 struct FlatConfig
 {
+    int fovX = 106, fovY = 74;
+    bool dynamicFovEnabled = false;
+    int dynamicFovSize = 40;
+    int dynamicFovShrinkMs = 200;
+    int dynamicFovExpandMs = 120;
     double kpX = 35.0, kpY = 35.0;
     double kiX = 0.0, kiY = 0.0;
     double kdX = 0.0, kdY = 0.0;
@@ -51,6 +57,8 @@ struct FlatConfig
 
     double yOffset = 0.5;
     double yOffsetMax = 0.5;
+    double xOffset = 0.5;
+    double xOffsetMax = 0.5;
     double hysteresisRatio = 1.3;
     double maxDistancePx = 0.0;
     int    randomSeed = 0;
@@ -62,7 +70,7 @@ struct FlatConfig
     double maxAspect = 5.0;
     std::vector<int> aimClassIds;
 
-    std::vector<std::array<double, 3>> classAimPoints;
+    std::vector<std::array<double, 5>> classAimPoints;
 
     std::vector<std::pair<int, double>> classMinConf;
 

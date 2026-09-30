@@ -10,6 +10,8 @@ namespace runtime
 {
 
 extern std::atomic<int> g_active_hotkey_index;
+extern std::atomic<int> g_secondary_aim_hotkey_index;
+extern std::atomic<bool> g_hotkey_activation_dirty;
 
 extern std::mutex g_model_metadata_mutex;
 extern detector::ModelMetadata g_model_metadata;

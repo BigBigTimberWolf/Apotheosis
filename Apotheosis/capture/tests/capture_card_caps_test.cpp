@@ -161,6 +161,9 @@ int main()
 
         MFDeviceInfo unprobed;
         CHECK(mfcap::Describe(unprobed) == "(not probed)", "未探测设备描述合理");
+
+        empty.probe_error = "ActivateObject failed (0x80070005)";
+        CHECK(mfcap::Describe(empty) == empty.probe_error, "探测失败时显示具体错误");
     }
 
     printf("\n=====================================\n");

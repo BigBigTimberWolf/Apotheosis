@@ -26,8 +26,13 @@
 #include "mouse/Makcu.h"
 #include "mouse/MakcuNew.h"
 #include "mouse/kmboxNetConnection.h"
+#include "mouse/dhzbox_driver.h"
+#include "mouse/ferrum_driver.h"
+#include "mouse/cat_driver.h"
+#include "mouse/windows_driver.h"
 #include "Apotheosis.h"
 #include "keyboard_listener.h"
+#include "macro/macro_engine.h"
 #include "app_log.h"
 #include "preview_window.h"
 #include "other_tools.h"
@@ -70,6 +75,14 @@ MakcuNewConnection* makcuNewSerial = nullptr;
 // 第二台 MAKCUNEW(键盘那台)。nullptr = 未配置, 键盘动作回落到第一台。
 MakcuNewConnection* makcuNewSerialKbd = nullptr;
 KmboxNetConnection* kmboxNetSerial = nullptr;
+std::string kmboxNetLastError;
+std::shared_ptr<mouse_driver::IDriver> dhzboxDriver;
+std::shared_ptr<mouse_driver::IDriver> ferrumDriver;
+std::shared_ptr<mouse_driver::WindowsDriver> windowsDriver;
+std::shared_ptr<mouse_driver::IDriver> catDriver;
+std::string catLastError;
+std::string ferrumLastError;
+std::string dhzboxLastError;
 
 std::atomic<bool> detection_resolution_changed(false);
 std::atomic<bool> capture_method_changed(false);
@@ -81,6 +94,8 @@ std::string g_iconLastError;
 
 std::atomic<bool> g_replay_playback_active(false);
 std::atomic<int>  g_replay_playback_frame(0);
+std::atomic<int>  g_replay_playback_total(0);
+std::atomic<unsigned int> g_replay_playback_request(0);
 
 static int FatalExit(const std::string& message)
 {
@@ -118,6 +133,7 @@ static std::thread StartThreadGuarded(const char* name, Func func)
 
 void createInputDevices()
 {
+    macros::DevicePause macroPause;
     static std::mutex reconnectMutex;
     std::lock_guard<std::mutex> reconnect(reconnectMutex);
     const auto cfg = runtime_config::read();
@@ -134,12 +150,20 @@ void createInputDevices()
     std::unique_ptr<MakcuNewConnection> oldNew;
     std::unique_ptr<MakcuNewConnection> oldNewKbd;
     std::unique_ptr<KmboxNetConnection> oldKmboxNet;
+    std::shared_ptr<mouse_driver::IDriver> oldDhzbox;
+    std::shared_ptr<mouse_driver::IDriver> oldFerrum;
+    std::shared_ptr<mouse_driver::IDriver> oldCat;
+    std::shared_ptr<mouse_driver::WindowsDriver> oldWindows;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
         oldMakcu.reset(makcuSerial);
         oldNew.reset(makcuNewSerial);
         oldNewKbd.reset(makcuNewSerialKbd);
         oldKmboxNet.reset(kmboxNetSerial);
+        oldDhzbox = std::move(dhzboxDriver);
+        oldFerrum = std::move(ferrumDriver);
+        oldCat = std::move(catDriver);
+        oldWindows = std::move(windowsDriver);
         makcuSerial = nullptr;
         makcuNewSerial = nullptr;
         makcuNewSerialKbd = nullptr;
@@ -149,11 +173,21 @@ void createInputDevices()
     oldNew.reset();
     oldNewKbd.reset();
     oldKmboxNet.reset();
+    oldDhzbox.reset();
+    oldFerrum.reset();
+    oldCat.reset();
+    oldWindows.reset();
     std::unique_ptr<MakcuConnection> nextMakcu;
     std::unique_ptr<MakcuNewConnection> nextNew;
     std::unique_ptr<MakcuNewConnection> nextNewKbd;
     std::unique_ptr<KmboxNetConnection> nextKmboxNet;
-    if (cfg->input_method == "MAKCU")
+    std::shared_ptr<mouse_driver::IDriver> nextDhzbox;
+    std::shared_ptr<mouse_driver::IDriver> nextFerrum;
+    std::shared_ptr<mouse_driver::IDriver> nextCat;
+    std::shared_ptr<mouse_driver::WindowsDriver> nextWindows;
+    if (cfg->input_method == "WINDOWS")
+        nextWindows = std::make_shared<mouse_driver::WindowsDriver>();
+    else if (cfg->input_method == "MAKCU")
     {
         // ── 混合模式 (hybrid) ─────────────────────────────────────────────
         //
@@ -219,7 +253,37 @@ void createInputDevices()
     {
         nextKmboxNet = std::make_unique<KmboxNetConnection>(
             cfg->kmbox_net_ip, cfg->kmbox_net_port, cfg->kmbox_net_uuid);
-        if (!nextKmboxNet->isOpen()) nextKmboxNet.reset();
+        if (!nextKmboxNet->isOpen())
+        {
+            std::lock_guard<std::mutex> lock(inputDeviceMutex);
+            kmboxNetLastError = nextKmboxNet->lastError();
+            nextKmboxNet.reset();
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(inputDeviceMutex);
+            kmboxNetLastError.clear();
+        }
+    }
+    else if (cfg->input_method == "DHZBOX_MINI")
+    {
+        nextDhzbox = std::make_shared<mouse_driver::DhzboxMiniDriver>(
+            cfg->dhzbox_ip, static_cast<unsigned short>(cfg->dhzbox_port), cfg->dhzbox_key);
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); dhzboxLastError = nextDhzbox->lastError(); }
+        if (!nextDhzbox->isOpen()) nextDhzbox.reset();
+    }
+    else if (cfg->input_method == "CAT")
+    {
+        nextCat = std::make_shared<mouse_driver::CatDriver>(cfg->cat_ip,
+            static_cast<unsigned short>(cfg->cat_port),cfg->cat_uuid,static_cast<unsigned short>(cfg->cat_monitor_port));
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); catLastError=nextCat->lastError(); }
+        if(!nextCat->isOpen()) nextCat.reset();
+    }
+    else if (cfg->input_method == "FERRUM")
+    {
+        nextFerrum = std::make_shared<mouse_driver::FerrumDriver>(cfg->ferrum_port, cfg->ferrum_baudrate);
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); ferrumLastError = nextFerrum->lastError(); }
+        if (!nextFerrum->isOpen()) nextFerrum.reset();
     }
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
@@ -227,6 +291,10 @@ void createInputDevices()
         makcuNewSerial = nextNew.release();
         makcuNewSerialKbd = nextNewKbd.release();
         kmboxNetSerial = nextKmboxNet.release();
+        dhzboxDriver = std::move(nextDhzbox);
+        ferrumDriver = std::move(nextFerrum);
+        catDriver = std::move(nextCat);
+        windowsDriver = std::move(nextWindows);
     }
     // 注意: 这里【不再】调用 resetMouse() —— 它已经在函数开头、销毁旧连接之前调过了。
     // 放在这里会造成"旧连接已释放、MouseThread 还指着它"的释放后使用。
@@ -234,6 +302,7 @@ void createInputDevices()
 
 void reconnectMouseDevice()
 {
+    macros::DevicePause macroPause;
     static std::mutex reconnectMtx;
     std::lock_guard<std::mutex> reconnect(reconnectMtx);
     const auto cfg = runtime_config::read();
@@ -244,11 +313,19 @@ void reconnectMouseDevice()
     std::unique_ptr<MakcuConnection> oldMakcu;
     std::unique_ptr<MakcuNewConnection> oldNew;
     std::unique_ptr<KmboxNetConnection> oldKmboxNet;
+    std::shared_ptr<mouse_driver::IDriver> oldDhzbox;
+    std::shared_ptr<mouse_driver::IDriver> oldFerrum;
+    std::shared_ptr<mouse_driver::IDriver> oldCat;
+    std::shared_ptr<mouse_driver::WindowsDriver> oldWindows;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
         oldMakcu.reset(makcuSerial);
         oldNew.reset(makcuNewSerial);
         oldKmboxNet.reset(kmboxNetSerial);
+        oldDhzbox = std::move(dhzboxDriver);
+        oldFerrum = std::move(ferrumDriver);
+        oldCat = std::move(catDriver);
+        oldWindows = std::move(windowsDriver);
         makcuSerial = nullptr;
         makcuNewSerial = nullptr;
         kmboxNetSerial = nullptr;
@@ -256,12 +333,22 @@ void reconnectMouseDevice()
     oldMakcu.reset();
     oldNew.reset();
     oldKmboxNet.reset();
+    oldDhzbox.reset();
+    oldFerrum.reset();
+    oldCat.reset();
+    oldWindows.reset();
 
     std::unique_ptr<MakcuConnection> nextMakcu;
     std::unique_ptr<MakcuNewConnection> nextNew;
     std::unique_ptr<KmboxNetConnection> nextKmboxNet;
+    std::shared_ptr<mouse_driver::IDriver> nextDhzbox;
+    std::shared_ptr<mouse_driver::IDriver> nextFerrum;
+    std::shared_ptr<mouse_driver::IDriver> nextCat;
+    std::shared_ptr<mouse_driver::WindowsDriver> nextWindows;
 
-    if (cfg->input_method == "MAKCU")
+    if (cfg->input_method == "WINDOWS")
+        nextWindows = std::make_shared<mouse_driver::WindowsDriver>();
+    else if (cfg->input_method == "MAKCU")
     {
         nextMakcu = std::make_unique<MakcuConnection>(cfg->makcu_port, cfg->makcu_baudrate);
         if (!nextMakcu->isOpen()) nextMakcu.reset();
@@ -275,7 +362,37 @@ void reconnectMouseDevice()
     {
         nextKmboxNet = std::make_unique<KmboxNetConnection>(
             cfg->kmbox_net_ip, cfg->kmbox_net_port, cfg->kmbox_net_uuid);
-        if (!nextKmboxNet->isOpen()) nextKmboxNet.reset();
+        if (!nextKmboxNet->isOpen())
+        {
+            std::lock_guard<std::mutex> lock(inputDeviceMutex);
+            kmboxNetLastError = nextKmboxNet->lastError();
+            nextKmboxNet.reset();
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(inputDeviceMutex);
+            kmboxNetLastError.clear();
+        }
+    }
+    else if (cfg->input_method == "DHZBOX_MINI")
+    {
+        nextDhzbox = std::make_shared<mouse_driver::DhzboxMiniDriver>(
+            cfg->dhzbox_ip, static_cast<unsigned short>(cfg->dhzbox_port), cfg->dhzbox_key);
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); dhzboxLastError = nextDhzbox->lastError(); }
+        if (!nextDhzbox->isOpen()) nextDhzbox.reset();
+    }
+    else if (cfg->input_method == "CAT")
+    {
+        nextCat = std::make_shared<mouse_driver::CatDriver>(cfg->cat_ip,
+            static_cast<unsigned short>(cfg->cat_port),cfg->cat_uuid,static_cast<unsigned short>(cfg->cat_monitor_port));
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); catLastError=nextCat->lastError(); }
+        if(!nextCat->isOpen()) nextCat.reset();
+    }
+    else if (cfg->input_method == "FERRUM")
+    {
+        nextFerrum = std::make_shared<mouse_driver::FerrumDriver>(cfg->ferrum_port, cfg->ferrum_baudrate);
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); ferrumLastError = nextFerrum->lastError(); }
+        if (!nextFerrum->isOpen()) nextFerrum.reset();
     }
 
     {
@@ -283,6 +400,10 @@ void reconnectMouseDevice()
         makcuSerial = nextMakcu.release();
         makcuNewSerial = nextNew.release();
         kmboxNetSerial = nextKmboxNet.release();
+        dhzboxDriver = std::move(nextDhzbox);
+        ferrumDriver = std::move(nextFerrum);
+        catDriver = std::move(nextCat);
+        windowsDriver = std::move(nextWindows);
     }
     // 注意: resetMouse() 已在函数开头调过(那时旧连接仍有效)。
     // 绝不能放在这里 —— 旧连接已经释放, 而 MouseThread 的驱动还指着它们。
@@ -290,6 +411,7 @@ void reconnectMouseDevice()
 
 void reconnectKeyboardDevice()
 {
+    macros::DevicePause macroPause;
     static std::mutex reconnectMtx;
     std::lock_guard<std::mutex> reconnect(reconnectMtx);
     const auto cfg = runtime_config::read();
@@ -647,6 +769,10 @@ int main(int argc, char* argv[])
         delete makcuNewSerialKbd;
         makcuNewSerialKbd = nullptr;
         delete kmboxNetSerial;
+        dhzboxDriver.reset();
+        ferrumDriver.reset();
+        catDriver.reset();
+        windowsDriver.reset();
         kmboxNetSerial = nullptr;
 
         timeEndPeriod(1);

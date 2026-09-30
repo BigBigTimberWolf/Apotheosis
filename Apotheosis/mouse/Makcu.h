@@ -4,6 +4,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <array>
 
 #include "../modules/makcu/include/makcu.h"
 
@@ -20,6 +21,8 @@ public:
     void release(int button);
     void move(int x, int y);
     void wheel(int delta);
+    bool maskPhysicalButton(int button, bool enabled);
+    bool maskPhysicalAxis(int axis, bool enabled);
 
     bool aiming_active;
     bool shooting_active;
@@ -35,6 +38,8 @@ private:
     makcu::Device device_;
     std::atomic<bool> is_open_;
     std::mutex write_mutex_;
+    std::array<bool,6> ownedMasks_{};
+    std::array<bool,2> ownedAxisMasks_{};
 };
 
 #endif // MAKCU_CONNECTION_H

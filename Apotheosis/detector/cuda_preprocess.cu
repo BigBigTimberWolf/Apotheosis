@@ -3,6 +3,34 @@
 
 #include "cuda_preprocess.h"
 
+static __global__ void pack_bgr_u8_to_chw_rgb_f16_kernel(
+    const unsigned char* __restrict__ src,
+    int srcStepBytes, int srcChannels,
+    __half* __restrict__ dst, int side)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int hw = side * side;
+    if (idx >= hw) return;
+
+    const int y = idx / side;
+    const int x = idx - y * side;
+    const unsigned char* pixel = src + y * srcStepBytes + x * srcChannels;
+    constexpr float kInv255 = 1.0f / 255.0f;
+    if (srcChannels == 1)
+    {
+        const __half value = __float2half(pixel[0] * kInv255);
+        dst[idx] = value;
+        dst[hw + idx] = value;
+        dst[2 * hw + idx] = value;
+    }
+    else
+    {
+        dst[idx] = __float2half(pixel[2] * kInv255);
+        dst[hw + idx] = __float2half(pixel[1] * kInv255);
+        dst[2 * hw + idx] = __float2half(pixel[0] * kInv255);
+    }
+}
+
 static __global__ void resize_bgr_u8_to_chw_rgb_f16_kernel(
     const unsigned char* __restrict__ src,
     int srcStepBytes, int srcW, int srcH, int srcChannels,
@@ -70,6 +98,15 @@ void launch_resize_bgr_u8_to_chw_rgb_f16(
     cudaStream_t stream)
 {
     if (src.empty()) return;
+    if (src.cols == side && src.rows == side)
+    {
+        constexpr int kBlockSize = 256;
+        const int pixelCount = side * side;
+        pack_bgr_u8_to_chw_rgb_f16_kernel<<<(pixelCount + kBlockSize - 1) / kBlockSize,
+                                               kBlockSize, 0, stream>>>(
+            src.data, static_cast<int>(src.step), src.channels, dstChw, side);
+        return;
+    }
     const dim3 block(16, 16);
     const dim3 grid((side + block.x - 1) / block.x, (side + block.y - 1) / block.y);
 

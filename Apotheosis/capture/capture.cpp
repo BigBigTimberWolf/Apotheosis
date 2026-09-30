@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "capture.h"
+#include "capture/auto_capture.h"
 #include "crosshair/crosshair_runtime.h"
 #include "tensorrt/nvinf.h"
 #include "Apotheosis.h"
@@ -28,9 +29,14 @@
 #include "keyboard_listener.h"
 #include "other_tools.h"
 #include "mf_capture.h"
+#include "magewell_capture.h"
 #include "capture_card_probe.h"
+#include "dshow_capture.h"
+#include "stream_capture.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
+#include "runtime/config_snapshot.h"
+#include "runtime/sched_boost.h"
 #include "gpu_color_ops.h"
 #include <cuda_runtime.h>
 #include "capture_utils.h"
@@ -65,6 +71,8 @@ namespace
 struct CaptureThreadConfig
 {
     std::string capture_device;
+    std::string capture_source;
+    std::string capture_stream_url;
     std::string capture_format;
     int  capture_width  = 0;
     int  capture_height = 0;
@@ -76,6 +84,7 @@ struct CaptureThreadConfig
     std::vector<std::string> screenshot_button;
     int  screenshot_delay = 0;
     bool show_window = false;
+    bool auto_capture_enabled = false;
     bool verbose = false;
 
 };
@@ -85,6 +94,8 @@ CaptureThreadConfig SnapshotCaptureConfig()
     std::lock_guard<std::recursive_mutex> cfgLock(configMutex);
     CaptureThreadConfig snapshot;
     snapshot.capture_device = config.capture_device;
+    snapshot.capture_source = config.capture_source;
+    snapshot.capture_stream_url = config.capture_stream_url;
     snapshot.capture_format = config.capture_format;
     snapshot.capture_width  = config.capture_width;
     snapshot.capture_height = config.capture_height;
@@ -96,6 +107,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.screenshot_button = config.screenshot_button;
     snapshot.screenshot_delay = config.screenshot_delay;
     snapshot.show_window = config.show_window;
+    snapshot.auto_capture_enabled = config.auto_capture_enabled;
     snapshot.verbose = config.verbose;
 
     return snapshot;
@@ -434,6 +446,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 {
     try
     {
+        sched_boost::LiveThreadBoost threadBoost;
         detection_resolution_changed.exchange(false);
         capture_method_changed.exchange(false);
         CaptureThreadConfig currentCfg = SnapshotCaptureConfig();
@@ -456,6 +469,20 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 const bool crop_enabled = true;
                 const int  out_side = std::max(1, cfg.detection_resolution);
 
+                if (stream_capture::IsNetworkSource(cfg.capture_source))
+                    return stream_capture::Create(cfg.capture_source,
+                                                  cfg.capture_stream_url, out_side);
+
+                if (magewell::IsDeviceKey(cfg.capture_device))
+                {
+                    auto sdk_capture = magewell::Create(cfg.capture_device, out_side,
+                                                        cfg.capture_fps);
+                    if (!sdk_capture)
+                        std::cerr << "[Capture] Selected Magewell SDK channel is unavailable. "
+                                     "Check the card, driver, and Magewell runtime." << std::endl;
+                    return sdk_capture;
+                }
+
                 const auto devices = MFCapture::EnumerateDevices();
                 int device_index = -1;
                 for (const auto& d : devices)
@@ -469,6 +496,37 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                                  "open the capture settings and pick a connected card."
                               << std::endl;
                     return nullptr;
+                }
+
+                auto probed = capture_card::ProbeOne(device_index);
+                const MFDeviceInfo* selected = capture_card::FindByName(probed, cfg.capture_device);
+                if (selected && selected->directshow_fallback)
+                {
+                    std::string format = cfg.capture_format;
+                    int width = cfg.capture_width;
+                    int height = cfg.capture_height;
+                    int fps = cfg.capture_fps;
+                    if (!mfcap::Validate(*selected, format, width, height, fps))
+                    {
+                        std::string reason;
+                        if (!mfcap::PickBest(*selected, width, height, fps,
+                                             format, width, height, fps, &reason))
+                        {
+                            std::cerr << "[Capture] DirectShow has no usable mode for "
+                                      << cfg.capture_device << std::endl;
+                            return nullptr;
+                        }
+                        std::cout << "[Capture] DirectShow selected available mode: "
+                                  << format << " " << width << "x" << height
+                                  << "@" << fps << "fps" << std::endl;
+                    }
+                    std::cout << "[Capture] Media Foundation cannot activate this card; using DirectShow."
+                              << std::endl;
+                    std::cout << "[Capture] DirectShow opening device #" << selected->directshow_index
+                              << " | " << format << " " << width << "x" << height
+                              << "@" << fps << "fps" << std::endl;
+                    return dshow::Create(selected->directshow_index, width,
+                                         height, fps, format, out_side);
                 }
 
                 if (cfg.verbose)
@@ -631,6 +689,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         {
             try
             {
+                const auto scheduling = runtime_config::read();
+                threadBoost.update(scheduling->use_mmcss,
+                                   scheduling->mmcss_task_name.c_str());
                 const bool resolutionChanged = detection_resolution_changed.exchange(false);
                 const bool captureChanged = capture_method_changed.exchange(false);
                 const bool fpsChanged = capture_fps_changed.exchange(false);
@@ -738,10 +799,15 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 || detectorNeedsCpu;
             const bool gpuCrosshairActive = crosshair_runtime::gpu_path_active();
             const bool cpuColourActive = crosshair_runtime::cpu_path_active();
-            const bool needCpuAsync = currentCfg.show_window || cpuColourActive;
+            const bool needCpuAsync = currentCfg.show_window
+                || cpuColourActive;
 
             if (!screenshotGpu.empty())
             {
+                if (currentCfg.auto_capture_enabled)
+                    AutoCapture::submit_frame(screenshotGpu,
+                        {runtime::latency::loadCaptureSeq(), capturer->GetLastFrameCaptureNs(),
+                         screenshotGpu.cols(), screenshotGpu.rows()});
                 if (gpuCrosshairActive)
                     gpuCrosshairWorker.Submit(screenshotGpu);
 
@@ -792,6 +858,10 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 crosshair_runtime::process_frame(screenshotCpu, capturer->GetLastFrameCaptureNs());
 
             detectionFrame = screenshotCpu;
+            if (currentCfg.auto_capture_enabled && screenshotGpu.empty() && !screenshotCpu.empty())
+                AutoCapture::submit_frame(screenshotCpu,
+                    {runtime::latency::loadCaptureSeq(), capturer->GetLastFrameCaptureNs(),
+                     screenshotCpu.cols, screenshotCpu.rows});
 
             if (g_detector)
             {
@@ -886,8 +956,14 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 }
             }
 
-                bool shouldLimit = !capturer->SupportsEventWait();
-                if (!shouldLimit
+                // A backend that already paces delivery must not be paced a
+                // second time here. In particular, DirectShow waits for its
+                // frame callback inside GetNextFrameGpu(); an independent
+                // 240 Hz sleep makes its callback-to-consume age drift across
+                // an entire frame period before snapping back.
+                bool shouldLimit = !capturer->SupportsEventWait()
+                    && !capturer->HandlesTargetFps();
+                if (capturer->SupportsEventWait()
                     && !capturer->HandlesTargetFps()
                     && frameDuration.has_value()
                     && currentCfg.capture_fps > 0)

@@ -158,6 +158,13 @@ struct Shared
 {
     std::mutex mu;
     Stage      stages[kStageCount];
+    Stage      gpu_preprocess;
+    Stage      gpu_engine;
+    Stage      gpu_copy;
+    Stage      gpu_pipeline;
+    Stage      cpu_postprocess;
+    Stage      aim_tick;
+    bool       last_timing_was_graph = false;
     Counters   counters;
     uint64_t   last_capture_seq_seen = 0;
     int64_t    last_capture_ns_seen  = 0;
@@ -281,6 +288,13 @@ struct Snapshot
     double   capture_fps         = 0.0;
     double   capture_interval_ms = 0.0;
     Stage    stages[kStageCount];
+    Stage    gpu_preprocess;
+    Stage    gpu_engine;
+    Stage    gpu_copy;
+    Stage    gpu_pipeline;
+    Stage    cpu_postprocess;
+    Stage    aim_tick;
+    bool     last_timing_was_graph = false;
     double   engine_inference_ms = -1.0;
 
     double   sync_wait_ms        = -1.0;
@@ -293,6 +307,26 @@ inline void noteEngineInferenceMs(double ms)
     auto& sh = shared();
     std::lock_guard<std::mutex> lk(sh.mu);
     sh.engine_inference_ms = ms;
+    sh.engine_update_ns = nowNs();
+}
+
+inline void notePipelineTimes(bool graph, double preprocessMs, double inferenceMs, double copyMs,
+                              double postprocessMs, double aimTickMs)
+{
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    const double totalGpuMs = preprocessMs + inferenceMs + copyMs;
+    if (!graph)
+    {
+        sh.gpu_preprocess.push(preprocessMs);
+        sh.gpu_engine.push(inferenceMs);
+        sh.gpu_copy.push(copyMs);
+    }
+    sh.gpu_pipeline.push(totalGpuMs);
+    sh.cpu_postprocess.push(postprocessMs);
+    sh.aim_tick.push(aimTickMs);
+    sh.last_timing_was_graph = graph;
+    sh.engine_inference_ms = totalGpuMs;
     sh.engine_update_ns = nowNs();
 }
 
@@ -328,6 +362,13 @@ inline Snapshot snapshot()
                           : 0.0;
     for (int i = 0; i < kStageCount; ++i)
         out.stages[i] = sh.stages[i];
+    out.gpu_preprocess = sh.gpu_preprocess;
+    out.gpu_engine = sh.gpu_engine;
+    out.gpu_copy = sh.gpu_copy;
+    out.gpu_pipeline = sh.gpu_pipeline;
+    out.cpu_postprocess = sh.cpu_postprocess;
+    out.aim_tick = sh.aim_tick;
+    out.last_timing_was_graph = sh.last_timing_was_graph;
     return out;
 }
 
@@ -363,6 +404,13 @@ inline void reset()
     std::lock_guard<std::mutex> lk(sh.mu);
     for (int i = 0; i < kStageCount; ++i)
         sh.stages[i].reset();
+    sh.gpu_preprocess.reset();
+    sh.gpu_engine.reset();
+    sh.gpu_copy.reset();
+    sh.gpu_pipeline.reset();
+    sh.cpu_postprocess.reset();
+    sh.aim_tick.reset();
+    sh.last_timing_was_graph = false;
     sh.counters = Counters{};
     sh.last_capture_seq_seen = loadCaptureSeq();
     sh.last_capture_ns_seen  = 0;
@@ -552,7 +600,8 @@ inline std::string summaryLine()
         buf, sizeof(buf),
         "E2E=%.2f avg=%.2f pk=%.2f | cap2det=%.2f infer=%.2f pub2aim=%.2f "
         "aim2mv=%.2f total=%.2f | devq=%.2f | src=%.1ffps frames=%llu seen=%llu "
-        "dropped=%llu stale=%llu | sync=%.2f%s fb=%llu",
+        "dropped=%llu stale=%llu | gpu=%.3f%s post=%.3f tick=%.3f max=%.3f "
+        "| sync=%.2f%s fb=%llu",
         s.stages[kEndToEnd].n > 0 ? s.stages[kEndToEnd].last_ms : -1.0, s.stages[kEndToEnd].ema_ms,
         s.stages[kEndToEnd].max_ms,
         s.stages[kCaptureWait].ema_ms, s.stages[kInference].ema_ms,
@@ -563,6 +612,8 @@ inline std::string summaryLine()
         static_cast<unsigned long long>(s.detections_seen),
         static_cast<unsigned long long>(s.dropped_capture),
         static_cast<unsigned long long>(s.stale_consumes),
+        s.gpu_pipeline.ema_ms, s.last_timing_was_graph ? "(graph)" : "(direct)",
+        s.cpu_postprocess.ema_ms, s.aim_tick.ema_ms, s.aim_tick.max_ms,
         s.sync_wait_ms,
         s.sync_spun ? "spin" : "block",
         static_cast<unsigned long long>(s.sync_fallbacks));

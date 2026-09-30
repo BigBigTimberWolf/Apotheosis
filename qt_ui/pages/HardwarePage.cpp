@@ -34,6 +34,7 @@
 #include "mouse/Makcu.h"
 #include "mouse/MakcuNew.h"
 #include "mouse/kmboxNetConnection.h"
+#include "mouse/windows_driver.h"
 
 namespace {
 
@@ -47,8 +48,8 @@ QString zh(const char* text)
 // MAKCU      : 纯 ASCII 鼠标固件。可单独用, 也可加一台键盘硬件 -> hybrid。
 // MAKCUNEW   : 二进制鼠标固件(与键盘那台同协议), 双硬件由 WrappedMakcuNewDriver 处理。
 // KMBOXNET   : 网络盒子。
-constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET"};
-constexpr int kInputMethodCount = 3;
+constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET", "FERRUM", "DHZBOX_MINI", "WINDOWS", "CAT"};
+constexpr int kInputMethodCount = sizeof(kInputMethodIds) / sizeof(kInputMethodIds[0]);
 
 // ── 串口枚举 ──────────────────────────────────────────────────────────────
 //
@@ -154,6 +155,10 @@ HardwarePage::HardwarePage(QWidget* parent)
         QStringLiteral("MAKCU"),
         QStringLiteral("MAKCUNEW"),
         QStringLiteral("KMBOXNET")
+        ,QStringLiteral("Ferrum")
+        ,zh(u8"DHZBox Mini（网络）")
+        ,zh(u8"Windows 原生输入（SendInput）")
+        ,zh(u8"CAT（加密网络）")
     });
     inputCard->contentLayout()->addWidget(
         FormKit::fieldRow(zh(u8"方式"), m_inputMethodCombo));
@@ -272,10 +277,74 @@ HardwarePage::HardwarePage(QWidget* parent)
         m_kmboxNetPort = new QLineEdit;
         panel->addWidget(FormKit::fieldRow(zh(u8"端口"), m_kmboxNetPort));
         m_kmboxNetUuid = new QLineEdit;
-        panel->addWidget(FormKit::fieldRow(zh(u8"UUID / MAC"), m_kmboxNetUuid));
+        m_kmboxNetUuid->setPlaceholderText(zh(u8"盒子屏幕上的 8 位十六进制 UUID"));
+        panel->addWidget(FormKit::fieldRow(zh(u8"UUID（8 位十六进制）"), m_kmboxNetUuid));
         m_deviceStack->addWidget(page);
     }
 
+    {
+        auto* page = new QWidget;
+        auto* panel = new QVBoxLayout(page);
+        panel->setContentsMargins(0, 0, 0, 0);
+        panel->setSpacing(10);
+        m_ferrumPort = makePortCombo();
+        m_ferrumBaud = makeBaudCombo();
+        panel->addWidget(FormKit::fieldRow(zh(u8"Ferrum 串口"), m_ferrumPort));
+        panel->addWidget(FormKit::fieldRow(zh(u8"目标波特率"), m_ferrumBaud));
+        const QString ferrumHint = zh(u8"优先选择 Ferrum App 提供的虚拟串口（新版 Software API，支持键鼠）。直连 CP210x 为旧 Legacy API，仅支持鼠标，设备重上电后波特率为 115200。");
+        page->setToolTip(ferrumHint);
+        m_ferrumPort->setToolTip(ferrumHint);
+        m_ferrumBaud->setToolTip(ferrumHint);
+        m_deviceStack->addWidget(page);
+    }
+
+    {
+        auto* page = new QWidget;
+        auto* panel = new QVBoxLayout(page);
+        panel->setContentsMargins(0, 0, 0, 0);
+        panel->setSpacing(10);
+        m_dhzboxIp = new QLineEdit;
+        m_dhzboxPort = new QSpinBox;
+        m_dhzboxPort->setRange(1, 65535);
+        m_dhzboxKey = new QSpinBox;
+        m_dhzboxKey->setRange(0, 255);
+        panel->addWidget(FormKit::fieldRow(zh(u8"盒子 IP"), m_dhzboxIp));
+        panel->addWidget(FormKit::fieldRow(zh(u8"端口"), m_dhzboxPort));
+        panel->addWidget(FormKit::fieldRow(zh(u8"Rand 密钥"), m_dhzboxKey));
+        const QString hint = zh(u8"适用 DHZBox Mini 的 UDP 协议。发送端就绪不代表已收到设备确认；请以实际鼠标动作验证。");
+        page->setToolTip(hint);
+        m_dhzboxIp->setToolTip(hint);
+        m_deviceStack->addWidget(page);
+    }
+
+    {
+        auto* page = new QWidget;
+        auto* panel = new QVBoxLayout(page);
+        panel->setContentsMargins(0,0,0,0);
+        page->setToolTip(zh(u8"无需外接硬件，瞄准与宏通过 Windows 系统接口发送键盘、鼠标和滚轮。输入作用于运行本程序的这台电脑。\n"
+            u8"无需填写串口或网络参数。原生输入不支持屏蔽真实键盘；目标程序是否接受系统模拟输入取决于该程序。"));
+        m_deviceStack->addWidget(page);
+    }
+    {
+        auto* page = new QWidget;
+        auto* panel = new QVBoxLayout(page);
+        panel->setContentsMargins(0,0,0,0);
+        panel->setSpacing(10);
+        m_catIp = new QLineEdit;
+        m_catPort = new QSpinBox; m_catPort->setRange(1,65535);
+        m_catUuid = new QLineEdit; m_catUuid->setMaxLength(8);
+        m_catUuid->setPlaceholderText(zh(u8"盒子上的 8 位十六进制 UUID"));
+        m_catMonitorPort = new QSpinBox; m_catMonitorPort->setRange(1,65535);
+        panel->addWidget(FormKit::fieldRow(zh(u8"CAT IP"),m_catIp));
+        panel->addWidget(FormKit::fieldRow(zh(u8"命令端口"),m_catPort));
+        m_catUuid->setPlaceholderText(zh(u8"1–8 位十六进制 UUID，可带 0x"));
+        panel->addWidget(FormKit::fieldRow(zh(u8"UUID"),m_catUuid));
+        panel->addWidget(FormKit::fieldRow(zh(u8"本机监听端口"),m_catMonitorPort));
+        const QString catHint = zh(u8"UUID 按设备显示的十六进制数字填写；命令端口是盒子端口，监听端口是本机接收端口。两端口须不同且本机可用。支持键鼠按键、物理监听与按键屏蔽；当前协议未定义轴屏蔽和滚轮输出。");
+        page->setToolTip(catHint);
+        m_catUuid->setToolTip(catHint);
+        m_deviceStack->addWidget(page);
+    }
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
 
@@ -288,12 +357,11 @@ HardwarePage::HardwarePage(QWidget* parent)
     {
         auto* kbdLayout = m_kbdCard->contentLayout();
 
-        auto* kbdHint = new QLabel(zh(
+        const QString kbdHint = zh(
             u8"独立的一台硬件, 真实键盘插在它上面。键盘注入与自动急停的屏蔽命令都只走这台,"
-            u8"因此不接它也不影响鼠标位移/按键/滚轮 —— 只是键盘功能不可用。"));
-        kbdHint->setWordWrap(true);
-        kbdHint->setStyleSheet("color:#6B7280; font-size:12px;");
-        kbdLayout->addWidget(kbdHint);
+            u8"因此不接它也不影响鼠标位移/按键/滚轮 —— 只是键盘功能不可用。");
+        m_kbdCard->setToolTip(kbdHint);
+        m_kbdUnitEnabled->setToolTip(kbdHint);
 
         kbdLayout->addWidget(m_kbdUnitEnabled);
         kbdLayout->addWidget(m_kbdUnitPanel);
@@ -361,6 +429,19 @@ HardwarePage::HardwarePage(QWidget* parent)
     connect(m_kmboxNetUuid, &QLineEdit::textChanged, this, [](const QString& value) {
         ConfigManager::instance().setKmboxNetUuid(value);
     });
+    connect(m_ferrumPort, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setFerrumPort(comboText(m_ferrumPort));
+    });
+    connect(m_ferrumBaud, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setFerrumBaudrate(comboNumber(m_ferrumBaud));
+    });
+    connect(m_dhzboxIp, &QLineEdit::textChanged, this, [](const QString& v) { ConfigManager::instance().setDhzboxIp(v); });
+    connect(m_dhzboxPort, &QSpinBox::valueChanged, this, [](int v) { ConfigManager::instance().setDhzboxPort(v); });
+    connect(m_dhzboxKey, &QSpinBox::valueChanged, this, [](int v) { ConfigManager::instance().setDhzboxKey(v); });
+    connect(m_catIp, &QLineEdit::textChanged, this, [](const QString& v) { ConfigManager::instance().setCatIp(v); });
+    connect(m_catPort, &QSpinBox::valueChanged, this, [](int v) { ConfigManager::instance().setCatPort(v); });
+    connect(m_catUuid, &QLineEdit::textChanged, this, [](const QString& v) { ConfigManager::instance().setCatUuid(v); });
+    connect(m_catMonitorPort, &QSpinBox::valueChanged, this, [](int v) { ConfigManager::instance().setCatMonitorPort(v); });
     // 两个独立按钮: 鼠标一台、键盘一台, 互不影响。
     connect(m_connectBtn, &QPushButton::clicked, this, &HardwarePage::reconnectMouseOnly);
     connect(m_connectKbdBtn, &QPushButton::clicked, this, &HardwarePage::reconnectKbdOnly);
@@ -395,11 +476,16 @@ void HardwarePage::loadFieldsFromConfig()
     int index = 0;
     if (method == QStringLiteral("MAKCUNEW")) index = 1;
     else if (method == QStringLiteral("KMBOXNET")) index = 2;
+    else if (method == QStringLiteral("FERRUM")) index = 3;
+    else if (method == QStringLiteral("DHZBOX_MINI")) index = 4;
+    else if (method == QStringLiteral("WINDOWS")) index = 5;
+    else if (method == QStringLiteral("CAT")) index = 6;
 
     m_inputMethodCombo->blockSignals(true);
     m_inputMethodCombo->setCurrentIndex(index);
     m_deviceStack->setCurrentIndex(index);
     m_inputMethodCombo->blockSignals(false);
+    m_inputMethodCombo->setToolTip(m_deviceStack->currentWidget()->toolTip());
     updateKbdCardVisibility(index);
 
     // 下拉按【值】选中, 不按文本 —— "未检测到"的保留项显示文本带后缀, 与配置值不同。
@@ -416,6 +502,8 @@ void HardwarePage::loadFieldsFromConfig()
     selectByValue(m_makcuNewBaud, cm.makcuNewBaudrate());
     selectByValue(m_makcuNewPortKbd, cm.makcuNewPortKbd());
     selectByValue(m_makcuNewBaudKbd, cm.makcuNewBaudrateKbd());
+    selectByValue(m_ferrumPort, cm.ferrumPort());
+    selectByValue(m_ferrumBaud, cm.ferrumBaudrate());
     // 有端口即视为"接了键盘硬件"。空端口表示没有第二台 -> 不勾选, 面板隐藏。
     {
         const bool on = !cm.makcuNewPortKbd().isEmpty();
@@ -426,6 +514,13 @@ void HardwarePage::loadFieldsFromConfig()
     m_kmboxNetIp->setText(cm.kmboxNetIp());
     m_kmboxNetPort->setText(cm.kmboxNetPort());
     m_kmboxNetUuid->setText(cm.kmboxNetUuid());
+    m_dhzboxIp->setText(cm.dhzboxIp());
+    m_dhzboxPort->setValue(cm.dhzboxPort());
+    m_catIp->setText(cm.catIp());
+    m_catPort->setValue(cm.catPort());
+    m_catUuid->setText(cm.catUuid());
+    m_catMonitorPort->setValue(cm.catMonitorPort());
+    m_dhzboxKey->setValue(cm.dhzboxKey());
 }
 
 QString HardwarePage::comboText(const QComboBox* box)
@@ -471,6 +566,7 @@ void HardwarePage::refreshPortLists()
     fill(m_makcuPort,       cm.makcuPort());
     fill(m_makcuNewPort,    cm.makcuNewPort());
     fill(m_makcuNewPortKbd, cm.makcuNewPortKbd());
+    fill(m_ferrumPort, cm.ferrumPort());
 
     // 波特率: 档位是固定的, 但配置值可能不在档位里(手改过 ini) —— 补进去, 避免被冲掉。
     const auto ensureBaud = [&](QComboBox* box, int value) {
@@ -482,11 +578,13 @@ void HardwarePage::refreshPortLists()
     ensureBaud(m_makcuBaud,        cm.makcuBaudrate());
     ensureBaud(m_makcuNewBaud,     cm.makcuNewBaudrate());
     ensureBaud(m_makcuNewBaudKbd,  cm.makcuNewBaudrateKbd());
+    ensureBaud(m_ferrumBaud, cm.ferrumBaudrate());
 }
 
 void HardwarePage::onInputMethodChanged(int index)
 {
     m_deviceStack->setCurrentIndex(index);
+    m_inputMethodCombo->setToolTip(m_deviceStack->currentWidget()->toolTip());
     updateKbdCardVisibility(index);
     if (index >= 0 && index < kInputMethodCount)
         ConfigManager::instance().setInputMethod(QString::fromLatin1(kInputMethodIds[index]));
@@ -507,6 +605,15 @@ void HardwarePage::syncConfigToRuntime()
     config.kmbox_net_ip = cm.kmboxNetIp().toStdString();
     config.kmbox_net_port = cm.kmboxNetPort().toStdString();
     config.kmbox_net_uuid = cm.kmboxNetUuid().toStdString();
+    config.ferrum_port = cm.ferrumPort().toStdString();
+    config.ferrum_baudrate = cm.ferrumBaudrate();
+    config.dhzbox_ip = cm.dhzboxIp().toStdString();
+    config.dhzbox_port = cm.dhzboxPort();
+    config.cat_ip = cm.catIp().toStdString();
+    config.cat_port = cm.catPort();
+    config.cat_uuid = cm.catUuid().toStdString();
+    config.cat_monitor_port = cm.catMonitorPort();
+    config.dhzbox_key = cm.dhzboxKey();
 }
 
 void HardwarePage::reconnectDevice()
@@ -595,23 +702,69 @@ void HardwarePage::refreshStatus()
         pointerExists = (kmboxNetSerial != nullptr);
         connected = pointerExists && kmboxNetSerial->isOpen();
         break;
+    case 3:
+        deviceName = QStringLiteral("Ferrum");
+        pointerExists = ferrumDriver != nullptr;
+        connected = pointerExists && ferrumDriver->isOpen();
+        break;
+    case 4:
+        deviceName = zh(u8"DHZBox Mini");
+        pointerExists = dhzboxDriver != nullptr;
+        connected = pointerExists && dhzboxDriver->isOpen();
+        break;
+    case 6:
+        deviceName = QStringLiteral("CAT");
+        pointerExists = catDriver != nullptr;
+        connected = pointerExists && catDriver->isOpen();
+        break;
+    case 5:
+        deviceName = zh(u8"Windows 原生输入");
+        pointerExists = windowsDriver != nullptr;
+        connected = pointerExists && windowsDriver->isOpen();
+        break;
     default:
         deviceName = zh(u8"未知");
         break;
     }
 
     if (connected) {
-        m_statusDot->setStyleSheet("color:#22C55E; font-size:16px;");
-        m_statusText->setText(deviceName + zh(u8" — 已连接"));
-        m_statusText->setStyleSheet("color:#22C55E; font-size:13px;");
+        const QString color = idx == 4 ? QStringLiteral("#F59E0B") : QStringLiteral("#22C55E");
+        m_statusDot->setStyleSheet("color:" + color + "; font-size:16px;");
+        QString status = idx == 4 ? zh(u8" — UDP 发送端就绪（设备未确认）") : zh(u8" — 已连接");
+        if (idx == 4 && !dhzboxLastError.empty())
+            status += zh(u8"；物理按键监听不可用");
+        if (idx == 3) status += (ferrumDriver->capabilities() & mouse_driver::kCapKeyboard)
+            ? zh(u8"（Software API，键鼠）") : zh(u8"（Legacy API，仅鼠标）");
+        if (idx == 5) {
+            status = zh(u8" — 系统接口就绪");
+            if (!windowsDriver->lastError().empty()) status += zh(u8"；") + QString::fromStdString(windowsDriver->lastError());
+        }
+        m_statusText->setText(deviceName + status);
+        m_statusText->setStyleSheet("color:" + color + "; font-size:13px;");
         m_connectBtn->setText(zh(u8"重连鼠标"));
     } else {
         m_statusDot->setStyleSheet("color:#EF4444; font-size:16px;");
-        m_statusText->setText(deviceName + (pointerExists
-            ? zh(u8" — 连接失败(检查IP/端口/UUID或串口号)")
-            : zh(u8" — 未初始化")));
+        if (idx == 2 && !kmboxNetLastError.empty())
+            m_statusText->setText(deviceName + zh(u8" — 连接失败: ")
+                                  + QString::fromStdString(kmboxNetLastError));
+        else if (idx == 3 && !ferrumLastError.empty())
+            m_statusText->setText(deviceName + zh(u8" — 连接失败: ")
+                                  + QString::fromStdString(ferrumLastError));
+        else if (idx == 6 && !catLastError.empty())
+            m_statusText->setText(deviceName + zh(u8" — 连接失败: ") + QString::fromStdString(catLastError));
+        else if (idx == 4 && !dhzboxLastError.empty())
+            m_statusText->setText(deviceName + zh(u8" — 初始化失败: ")
+                                  + QString::fromStdString(dhzboxLastError));
+        else
+            m_statusText->setText(deviceName + (pointerExists
+                ? zh(u8" — 连接失败(检查IP/端口/UUID或串口号)")
+                : zh(u8" — 未初始化")));
         m_statusText->setStyleSheet("color:#EF4444; font-size:13px;");
         m_connectBtn->setText(zh(u8"连接鼠标"));
+    }
+    if (idx == 5) {
+        m_connectBtn->setText(zh(u8"重新初始化"));
+        if (pointerExists && !connected) m_statusText->setText(deviceName + zh(u8" — ") + QString::fromStdString(windowsDriver->lastError()));
     }
 
     // ── 键盘那台的状态, 独立显示在键盘卡片里 ─────────────────────────────

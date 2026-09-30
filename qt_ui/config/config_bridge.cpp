@@ -11,6 +11,7 @@
 #include "capture.h"
 #include "runtime/inference_session.h"
 #include "runtime/config_snapshot.h"
+#include "runtime/aim_telemetry.h"
 
 extern std::atomic<bool> detector_model_changed;
 
@@ -53,6 +54,8 @@ void ConfigBridge::syncToRuntime() {
     auto qs = [](const QString& s) { return s.toStdString(); };
 
     const std::string oldCaptureDevice = config.capture_device;
+    const std::string oldCaptureSource = config.capture_source;
+    const std::string oldCaptureStreamUrl = config.capture_stream_url;
     const std::string oldCaptureFormat = config.capture_format;
     const int  oldCaptureWidth  = config.capture_width;
     const int  oldCaptureHeight = config.capture_height;
@@ -60,6 +63,8 @@ void ConfigBridge::syncToRuntime() {
     const bool oldCaptureGpu    = config.capture_gpu_decode;
 
     config.capture_device     = qs(cm.captureDevice());
+    config.capture_source     = qs(cm.captureSource());
+    config.capture_stream_url = qs(cm.captureStreamUrl());
     config.capture_format     = qs(cm.captureFormat());
     config.capture_width      = cm.captureWidth();
     config.capture_height     = cm.captureHeight();
@@ -79,6 +84,15 @@ void ConfigBridge::syncToRuntime() {
     config.kmbox_net_ip       = qs(cm.kmboxNetIp());
     config.kmbox_net_port     = qs(cm.kmboxNetPort());
     config.kmbox_net_uuid     = qs(cm.kmboxNetUuid());
+    config.ferrum_port = qs(cm.ferrumPort());
+    config.ferrum_baudrate = cm.ferrumBaudrate();
+    config.dhzbox_ip = qs(cm.dhzboxIp());
+    config.dhzbox_port = cm.dhzboxPort();
+    config.dhzbox_key = cm.dhzboxKey();
+    config.cat_ip = qs(cm.catIp());
+    config.cat_port = cm.catPort();
+    config.cat_uuid = qs(cm.catUuid());
+    config.cat_monitor_port = cm.catMonitorPort();
     std::string oldModel = config.ai_model;
     const std::string oldPrecision = config.engine_precision;
     config.backend              = "TRT";
@@ -98,8 +112,21 @@ void ConfigBridge::syncToRuntime() {
 
     config.crosshair_rect_w         = cm.crosshairRectW();
     config.crosshair_rect_h         = cm.crosshairRectH();
+    config.crosshair_offset_y       = cm.crosshairOffsetY();
     config.crosshair_min_pixel_count = cm.crosshairMinPixelCount();
     config.crosshair_close_radius   = cm.crosshairCloseRadius();
+    config.laser_rect_w = cm.laserRectW();
+    config.laser_rect_h = cm.laserRectH();
+    config.laser_center_x = cm.laserCenterX();
+    config.laser_center_y = cm.laserCenterY();
+    config.laser_target_center_x = cm.laserTargetCenterX();
+    config.laser_target_center_y = cm.laserTargetCenterY();
+    config.laser_target_rect_w = cm.laserTargetRectW();
+    config.laser_target_rect_h = cm.laserTargetRectH();
+    config.laser_min_pixel_count = cm.laserMinPixelCount();
+    config.laser_close_radius = cm.laserCloseRadius();
+    config.laser_min_elongation = cm.laserMinElongation();
+    config.laser_smooth = cm.laserSmooth();
 
     {
         auto qcolors = cm.crosshairColors();
@@ -118,6 +145,20 @@ void ConfigBridge::syncToRuntime() {
         }
     }
 
+    {
+        auto qcolors = cm.laserColors();
+        config.laser_colors.clear();
+        for (const auto& qc : qcolors) {
+            CrosshairColorProfileConfig c;
+            c.name = qs(qc.name);
+            c.enabled = qc.enabled;
+            c.h_low = qc.hLow; c.h_high = qc.hHigh;
+            c.s_min = qc.sMin; c.s_max = qc.sMax;
+            c.v_min = qc.vMin; c.v_max = qc.vMax;
+            config.laser_colors.push_back(c);
+        }
+    }
+
     config.show_fps   = cm.showFps();
     config.verbose    = cm.verbose();
     config.screenshot_delay = cm.screenshotDelay();
@@ -126,6 +167,8 @@ void ConfigBridge::syncToRuntime() {
     config.replay_record_enabled = cm.replayRecordEnabled();
     config.replay_seconds        = cm.replaySeconds();
     config.replay_playback_speed = cm.replayPlaybackSpeed();
+    runtime::ReplayBuffer::instance().setRetentionSeconds(config.replay_seconds);
+    runtime::ReplayBuffer::instance().setEnabled(config.replay_record_enabled);
 
     // 全局选靶与稳定器
     config.target_hysteresis_ratio   = cm.targetHysteresisRatio();
@@ -138,6 +181,8 @@ void ConfigBridge::syncToRuntime() {
 
     const bool captureDeviceChanged =
         config.capture_device != oldCaptureDevice
+        || config.capture_source != oldCaptureSource
+        || config.capture_stream_url != oldCaptureStreamUrl
         || config.capture_format != oldCaptureFormat
         || config.capture_width  != oldCaptureWidth
         || config.capture_height != oldCaptureHeight
@@ -171,6 +216,8 @@ void ConfigBridge::syncFromRuntime()
     QSignalBlocker blocker(&cm);
 
     cm.setCaptureDevice(qstr(config.capture_device));
+    cm.setCaptureSource(qstr(config.capture_source));
+    cm.setCaptureStreamUrl(qstr(config.capture_stream_url));
     cm.setCaptureFormat(qstr(config.capture_format));
     cm.setCaptureWidth(config.capture_width);
     cm.setCaptureHeight(config.capture_height);
@@ -189,6 +236,15 @@ void ConfigBridge::syncFromRuntime()
     cm.setKmboxNetIp(qstr(config.kmbox_net_ip));
     cm.setKmboxNetPort(qstr(config.kmbox_net_port));
     cm.setKmboxNetUuid(qstr(config.kmbox_net_uuid));
+    cm.setFerrumPort(qstr(config.ferrum_port));
+    cm.setFerrumBaudrate(config.ferrum_baudrate);
+    cm.setDhzboxIp(qstr(config.dhzbox_ip));
+    cm.setDhzboxPort(config.dhzbox_port);
+    cm.setDhzboxKey(config.dhzbox_key);
+    cm.setCatIp(qstr(config.cat_ip));
+    cm.setCatPort(config.cat_port);
+    cm.setCatUuid(qstr(config.cat_uuid));
+    cm.setCatMonitorPort(config.cat_monitor_port);
     cm.setAiModel(qstr(config.ai_model));
     cm.setEnginePrecision(qstr(config.engine_precision));
     cm.setInt8CalibDir(qstr(config.int8_calib_dir));
@@ -205,8 +261,21 @@ void ConfigBridge::syncFromRuntime()
 
     cm.setCrosshairRectW(config.crosshair_rect_w);
     cm.setCrosshairRectH(config.crosshair_rect_h);
+    cm.setCrosshairOffsetY(config.crosshair_offset_y);
     cm.setCrosshairMinPixelCount(config.crosshair_min_pixel_count);
     cm.setCrosshairCloseRadius(config.crosshair_close_radius);
+    cm.setLaserRectW(config.laser_rect_w);
+    cm.setLaserRectH(config.laser_rect_h);
+    cm.setLaserCenterX(config.laser_center_x);
+    cm.setLaserCenterY(config.laser_center_y);
+    cm.setLaserTargetCenterX(config.laser_target_center_x);
+    cm.setLaserTargetCenterY(config.laser_target_center_y);
+    cm.setLaserTargetRectW(config.laser_target_rect_w);
+    cm.setLaserTargetRectH(config.laser_target_rect_h);
+    cm.setLaserMinPixelCount(config.laser_min_pixel_count);
+    cm.setLaserCloseRadius(config.laser_close_radius);
+    cm.setLaserMinElongation(config.laser_min_elongation);
+    cm.setLaserSmooth(config.laser_smooth);
     {
         QList<ConfigManager::ColorProfile> qcolors;
         for (const auto& c : config.crosshair_colors) {
@@ -223,6 +292,18 @@ void ConfigBridge::syncFromRuntime()
         }
         cm.setCrosshairColors(qcolors);
     }
+    {
+        QList<ConfigManager::ColorProfile> qcolors;
+        for (const auto& c : config.laser_colors) {
+            ConfigManager::ColorProfile qc;
+            qc.name = qstr(c.name); qc.enabled = c.enabled;
+            qc.hLow = c.h_low; qc.hHigh = c.h_high;
+            qc.sMin = c.s_min; qc.sMax = c.s_max;
+            qc.vMin = c.v_min; qc.vMax = c.v_max;
+            qcolors.append(qc);
+        }
+        cm.setLaserColors(qcolors);
+    }
     cm.setShowFps(config.show_fps);
     cm.setVerbose(config.verbose);
     cm.setScreenshotDelay(config.screenshot_delay);
@@ -233,6 +314,8 @@ void ConfigBridge::syncFromRuntime()
     cm.setReplayRecordEnabled(config.replay_record_enabled);
     cm.setReplaySeconds(config.replay_seconds);
     cm.setReplayPlaybackSpeed(config.replay_playback_speed);
+    runtime::ReplayBuffer::instance().setRetentionSeconds(config.replay_seconds);
+    runtime::ReplayBuffer::instance().setEnabled(config.replay_record_enabled);
 
     // 全局选靶与稳定器
     cm.setTargetHysteresisRatio(config.target_hysteresis_ratio);
@@ -269,12 +352,26 @@ void ConfigBridge::syncFromRuntime()
                 joined.append(QString::number(ac.y_offset_max, 'f', 3));
                 joined.append(':');
                 joined.append(QString::number(ac.min_conf, 'f', 3));
+                joined.append(':');
+                joined.append(QString::number(ac.x_offset, 'f', 3));
+                joined.append(':');
+                joined.append(QString::number(ac.x_offset_max, 'f', 3));
             }
             hd.aimClasses = joined;
         }
         hd.crosshairDetectEnabled  = hp.crosshair_detect_enabled;
+        hd.laserDetectEnabled = hp.laser_detect_enabled && !hp.crosshair_detect_enabled;
         hd.dynamicFovEnabled  = hp.dynamic_fov_enabled;
-        hd.dynamicFovStrength = hp.dynamic_fov_strength;
+        hd.dynamicFovSize = hp.dynamic_fov_size;
+        hd.dynamicFovExpandMs = hp.dynamic_fov_expand_ms;
+        hd.dynamicFovShrinkMs = hp.dynamic_fov_shrink_ms;
+        hd.maskX = hp.mask_x;
+        hd.blockHotkey = hp.block_hotkey;
+        hd.maskY = hp.mask_y;
+        hd.unlockX = hp.unlock_x;
+        hd.unlockY = hp.unlock_y;
+        hd.unlockYDelayMs = hp.unlock_y_delay_ms;
+        hd.aimDelayMs = hp.aim_delay_ms;
         hd.ctlEnabled          = hp.ctl_enabled;
         hd.ctlKpX              = hp.ctl_kp_x;
         hd.ctlKpY              = hp.ctl_kp_y;
@@ -295,6 +392,8 @@ void ConfigBridge::syncFromRuntime()
         hd.ctlInflightDeadTimeMs = hp.ctl_inflight_dead_time_ms;
         hd.ctlYOffset          = hp.ctl_y_offset;
         hd.ctlYOffsetMax       = hp.ctl_y_offset_max;
+        hd.ctlXOffset          = hp.ctl_x_offset;
+        hd.ctlXOffsetMax       = hp.ctl_x_offset_max;
         hd.ctlHysteresisRatio  = hp.ctl_hysteresis_ratio;
         hd.ctlMaxDistancePx    = hp.ctl_max_distance_px;
         hd.ctlRandomSeed       = hp.ctl_random_seed;

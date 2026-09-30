@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include "config.h"
+#include "macro/macro_config.h"
 #define SI_NO_CONVERSION
 #include "modules/SimpleIni.h"
 
@@ -67,7 +68,9 @@ std::string serialize_aim_classes(const std::vector<HotkeyAimClass>& classes)
         oss << classes[i].class_id
             << ':' << classes[i].y_offset
             << ':' << classes[i].y_offset_max
-            << ':' << classes[i].min_conf;
+            << ':' << classes[i].min_conf
+            << ':' << classes[i].x_offset
+            << ':' << classes[i].x_offset_max;
     }
     return oss.str();
 }
@@ -97,6 +100,11 @@ std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
             {
                 c.y_offset_max = values[1];
                 c.min_conf = values[2];
+                if (values.size() >= 5)
+                {
+                    c.x_offset = values[3];
+                    c.x_offset_max = values[4];
+                }
             }
             else
             {
@@ -107,10 +115,61 @@ std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
             c.y_offset_max = std::clamp(c.y_offset_max, 0.0f, 1.0f);
             if (c.y_offset > c.y_offset_max)
                 std::swap(c.y_offset, c.y_offset_max);
+            c.x_offset = std::clamp(c.x_offset, 0.0f, 1.0f);
+            c.x_offset_max = std::clamp(c.x_offset_max, 0.0f, 1.0f);
+            if (c.x_offset > c.x_offset_max)
+                std::swap(c.x_offset, c.x_offset_max);
             c.min_conf = std::clamp(c.min_conf, 0.0f, 1.0f);
             out.push_back(c);
         }
         catch (...) {   }
+    }
+    return out;
+}
+
+std::string serialize_trigger_classes(const std::vector<TriggerAimClass>& classes)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+    for (size_t i = 0; i < classes.size(); ++i) {
+        if (i) oss << ';';
+        const auto& c = classes[i];
+        oss << c.class_id << ':' << c.x_offset << ':' << c.y_offset
+            << ':' << c.range_x_percent << ':' << c.range_y_percent;
+    }
+    return oss.str();
+}
+
+std::vector<TriggerAimClass> parse_trigger_classes(const std::string& raw)
+{
+    std::vector<TriggerAimClass> out;
+    std::stringstream ss(raw);
+    std::string token;
+    while (std::getline(ss, token, ';')) {
+        std::stringstream fields(token);
+        std::string value;
+        TriggerAimClass c;
+        try {
+            if (!std::getline(fields, value, ':')) continue;
+            c.class_id = std::stoi(value);
+            if (!std::getline(fields, value, ':')) continue;
+            c.x_offset = std::stof(value);
+            if (!std::getline(fields, value, ':')) continue;
+            c.y_offset = std::stof(value);
+            if (!std::getline(fields, value, ':')) continue;
+            c.range_x_percent = std::stoi(value);
+            if (!std::getline(fields, value, ':')) continue;
+            c.range_y_percent = std::stoi(value);
+            if (c.class_id < 0 || !std::isfinite(c.x_offset) || !std::isfinite(c.y_offset) ||
+                std::any_of(out.begin(), out.end(), [&](const auto& existing) {
+                    return existing.class_id == c.class_id;
+                })) continue;
+            c.x_offset = std::clamp(c.x_offset, 0.0f, 1.0f);
+            c.y_offset = std::clamp(c.y_offset, 0.0f, 1.0f);
+            c.range_x_percent = std::clamp(c.range_x_percent, 10, 1000);
+            c.range_y_percent = std::clamp(c.range_y_percent, 10, 1000);
+            out.push_back(c);
+        } catch (...) {}
     }
     return out;
 }
@@ -204,14 +263,17 @@ std::string Config::joinStrings(const std::vector<std::string>& vec, const std::
 
 void Config::writeDefaultsInPlace()
 {
+
     capture_device = "";
+    capture_source = "device";
+    capture_stream_url.clear();
     capture_format = "";
     capture_width = 0;
     capture_height = 0;
     capture_fps = 0;
     capture_gpu_decode = true;
     detection_resolution = 320;
-    circle_mask = true;
+    circle_mask = false;
 
     backend = "TRT";
     ai_model = "sunxds_0.5.6.engine";
@@ -232,14 +294,14 @@ void Config::writeDefaultsInPlace()
     // 代价仅墙钟 +0.1ms/次。本机解码已占约 2 个核, 这 1.2 个核更值钱, 故默认关闭。
     use_spin_wait_sync = false;
     spin_wait_timeout_ms = 50;
-    use_process_boost = true;
-    use_mmcss = true;
+    use_process_boost = false;
+    use_mmcss = false;
     mmcss_task_name = "Games";
     gpuMemoryReserveMB = 2048;
     enableGpuExclusiveMode = true;
 
-    cpuCoreReserveCount = 4;
-    systemMemoryReserveMB = 2048;
+    cpuCoreReserveCount = 0;
+    systemMemoryReserveMB = 0;
 
     screenshot_button = splitString("None");
     screenshot_delay = 500;
@@ -253,6 +315,9 @@ void Config::writeDefaultsInPlace()
     active_hotkey_group = u8"\xe9\xbb\x98\xe8\xae\xa4";
 
     macro_enabled = false;
+    macro_programs_enabled = false;
+    macro_stop_key = "F12";
+    macro_programs.clear();
     macro_script_path.clear();
     macro_primary_button_events = false;
 }
@@ -293,8 +358,16 @@ bool Config::loadConfig(const std::string& filename)
     auto get_double = [&](const char* section, const char* key, double defval) {
         return ini.GetDoubleValue(section, key, defval);
     };
+    auto get_follow_strength = [&](const char* section, const char* key) {
+        const double value = get_double(section, key, 0.0);
+        return std::isfinite(value) ? static_cast<float>(std::clamp(value, 0.0, 50.0)) : 0.0f;
+    };
 
     capture_device = get_string("", "capture_device", "");
+    capture_source = get_string("", "capture_source", "device");
+    if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp")
+        capture_source = "device";
+    capture_stream_url = get_string("", "capture_stream_url", "");
     capture_format = get_string("", "capture_format", "");
     capture_width  = static_cast<int>(get_long("", "capture_width", 0));
     capture_height = static_cast<int>(get_long("", "capture_height", 0));
@@ -305,10 +378,13 @@ bool Config::loadConfig(const std::string& filename)
     capture_gpu_decode = get_bool("", "capture_gpu_decode", true);
     detection_resolution = std::clamp(static_cast<int>(get_long("", "detection_resolution", 320)), 32, 2048);
 
-    circle_mask = true;
+    // Keep full rectangular capture/preview; old saved circle_mask values no
+    // longer force black corners into the shared CPU/GPU image.
+    circle_mask = false;
 
     input_method = get_string("", "input_method", "MAKCU");
-    if (input_method != "MAKCU" && input_method != "MAKCUNEW" && input_method != "KMBOXNET")
+    if (input_method != "MAKCU" && input_method != "MAKCUNEW" && input_method != "KMBOXNET" &&
+        input_method != "FERRUM" && input_method != "DHZBOX_MINI" && input_method != "WINDOWS" && input_method != "CAT")
         input_method = "MAKCU";
     const auto finiteSetting = [&](const char* key, double fallback, double low, double high) {
         const double value = get_double("", key, fallback);
@@ -327,7 +403,16 @@ bool Config::loadConfig(const std::string& filename)
     makcu_new_port_kbd = get_string("", "makcu_new_port_kbd", "");
     kmbox_net_ip = get_string("", "kmbox_net_ip", "192.168.2.88");
     kmbox_net_port = get_string("", "kmbox_net_port", "6234");
-    kmbox_net_uuid = get_string("", "kmbox_net_uuid", "12345");
+    ferrum_port = get_string("", "ferrum_port", "");
+    ferrum_baudrate = std::clamp(static_cast<int>(get_long("", "ferrum_baudrate", 3000000)), 115200, 6000000);
+    cat_ip = get_string("", "cat_ip", "192.168.7.1");
+    cat_port = std::clamp(static_cast<int>(get_long("", "cat_port", 8888)), 1, 65535);
+    cat_uuid = get_string("", "cat_uuid", "");
+    cat_monitor_port = std::clamp(static_cast<int>(get_long("", "cat_monitor_port", 1234)), 1, 65535);
+    dhzbox_ip = get_string("", "dhzbox_ip", "192.168.2.88");
+    dhzbox_port = std::clamp(static_cast<int>(get_long("", "dhzbox_port", 8888)), 1, 65535);
+    dhzbox_key = std::clamp(static_cast<int>(get_long("", "dhzbox_key", 88)), 0, 255);
+    kmbox_net_uuid = get_string("", "kmbox_net_uuid", "");
     backend = "TRT";
     ai_model = get_string("", "ai_model", "sunxds_0.5.6.engine");
     confidence_threshold = static_cast<float>(get_double("", "confidence_threshold", 0.15));
@@ -348,14 +433,14 @@ bool Config::loadConfig(const std::string& filename)
     use_cuda_graph = get_bool("", "use_cuda_graph", true);
     use_spin_wait_sync = get_bool("", "use_spin_wait_sync", false);
     spin_wait_timeout_ms = static_cast<int>(std::clamp<long>(get_long("", "spin_wait_timeout_ms", 50), 1L, 1000L));
-    use_process_boost = get_bool("", "use_process_boost", true);
-    use_mmcss = get_bool("", "use_mmcss", true);
+    use_process_boost = get_bool("", "use_process_boost", false);
+    use_mmcss = get_bool("", "use_mmcss", false);
     mmcss_task_name = get_string("", "mmcss_task_name", "Games");
     gpuMemoryReserveMB = get_long("", "gpuMemoryReserveMB", 2048);
     enableGpuExclusiveMode = get_bool("", "enableGpuExclusiveMode", true);
 
-    cpuCoreReserveCount = get_long("", "cpuCoreReserveCount", 4);
-    systemMemoryReserveMB = get_long("", "systemMemoryReserveMB", 2048);
+    cpuCoreReserveCount = get_long("", "cpuCoreReserveCount", 0);
+    systemMemoryReserveMB = get_long("", "systemMemoryReserveMB", 0);
 
     show_window = get_bool("", "show_window", true);
     show_fps = get_bool("", "show_fps", false);
@@ -365,9 +450,11 @@ bool Config::loadConfig(const std::string& filename)
 
     replay_record_enabled  = get_bool("", "replay_record_enabled", false);
     replay_seconds         = std::clamp(get_long("", "replay_seconds", 10), 1, 60);
-    replay_playback_speed  = std::clamp(
-        static_cast<float>(get_double("", "replay_playback_speed", 0.25)),
-        0.05f, 2.0f);
+    const float storedReplaySpeed = static_cast<float>(
+        get_double("", "replay_playback_speed", 0.25));
+    replay_playback_speed = std::isfinite(storedReplaySpeed) &&
+        storedReplaySpeed > 0.0f
+        ? std::clamp(storedReplaySpeed, 0.05f, 2.0f) : 0.25f;
 
     auto_capture_enabled    = get_bool("",   "auto_capture_enabled",    false);
     auto_capture_use_high   = get_bool("",   "auto_capture_use_high",   true);
@@ -384,11 +471,38 @@ bool Config::loadConfig(const std::string& filename)
     auto_capture_output_dir = get_string("", "auto_capture_output_dir",
                                          "screenshots/auto");
     auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
+    auto_flash_enabled = get_bool("", "auto_flash_enabled", false);
+    auto_flash_area_percent = finiteSetting("auto_flash_area_percent", 5.0, 0.1, 100.0);
+    auto_flash_key = get_string("", "auto_flash_key", "");
 
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
     crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
+    crosshair_offset_y         = std::clamp(get_long("", "crosshair_offset_y", 0), -2048, 2048);
     crosshair_min_pixel_count  = std::clamp(get_long("", "crosshair_min_pixel_count", 4), 1, 10000);
     crosshair_close_radius     = std::clamp(get_long("", "crosshair_close_radius",    1), 0, 7);
+    aimpoint_recoil_speed_px_s = finiteSetting("aimpoint_recoil_speed_px_s", 30.0, 0.0, 2000.0);
+    aimpoint_recoil_max_px = finiteSetting("aimpoint_recoil_max_px", 60.0, 0.0, 2000.0);
+    aimpoint_recoil_fire_key = get_string("", "aimpoint_recoil_fire_key", "LeftMouseButton");
+    if (aimpoint_recoil_fire_key != "LeftMouseButton" &&
+        aimpoint_recoil_fire_key != "RightMouseButton" &&
+        aimpoint_recoil_fire_key != "MiddleMouseButton" &&
+        aimpoint_recoil_fire_key != "X1MouseButton" &&
+        aimpoint_recoil_fire_key != "X2MouseButton")
+        aimpoint_recoil_fire_key = "LeftMouseButton";
+    const bool hasGlobalRecoilSpeed = ini.GetValue("", "aimpoint_recoil_speed_px_s", nullptr) != nullptr;
+    const bool hasGlobalRecoilMaximum = ini.GetValue("", "aimpoint_recoil_max_px", nullptr) != nullptr;
+    laser_rect_w = std::clamp(get_long("", "laser_rect_w", 160), 4, 4096);
+    laser_rect_h = std::clamp(get_long("", "laser_rect_h", 240), 4, 4096);
+    laser_center_x = std::clamp(get_long("", "laser_center_x", 160), 0, 8192);
+    laser_center_y = std::clamp(get_long("", "laser_center_y", 200), 0, 8192);
+    laser_target_center_x = std::clamp(get_long("", "laser_target_center_x", 160), 0, 8192);
+    laser_target_center_y = std::clamp(get_long("", "laser_target_center_y", 160), 0, 8192);
+    laser_target_rect_w = std::clamp(get_long("", "laser_target_rect_w", 60), 4, 4096);
+    laser_target_rect_h = std::clamp(get_long("", "laser_target_rect_h", 60), 4, 4096);
+    laser_min_pixel_count = std::clamp(get_long("", "laser_min_pixel_count", 10), 1, 10000);
+    laser_close_radius = std::clamp(get_long("", "laser_close_radius", 1), 0, 9);
+    laser_min_elongation = static_cast<float>(finiteSetting("laser_min_elongation", 3.0, 1.0, 30.0));
+    laser_smooth = static_cast<float>(finiteSetting("laser_smooth", 0.5, 0.0, 1.0));
 
     crosshair_colors.clear();
     {
@@ -432,7 +546,77 @@ bool Config::loadConfig(const std::string& filename)
         }
     }
 
+    laser_colors.clear();
+    {
+        CSimpleIniA::TNamesDepend sections;
+        ini.GetAllSections(sections);
+        std::vector<std::pair<int, std::string>> entries;
+        const std::string prefix = "laser_color.";
+        for (const auto& s : sections) {
+            const std::string section = s.pItem;
+            if (section.rfind(prefix, 0) != 0) continue;
+            try { entries.emplace_back(std::stoi(section.substr(prefix.size())), section); }
+            catch (...) {}
+        }
+        std::sort(entries.begin(), entries.end());
+        for (const auto& entry : entries) {
+            const char* sec = entry.second.c_str();
+            CrosshairColorProfileConfig c;
+            c.name = get_string(sec, "name", "Laser");
+            c.enabled = get_bool(sec, "enabled", true);
+            c.h_low = std::clamp(get_long(sec, "h_low", 0), 0, 179);
+            c.h_high = std::clamp(get_long(sec, "h_high", 10), 0, 179);
+            c.s_min = std::clamp(get_long(sec, "s_min", 120), 0, 255);
+            c.s_max = std::clamp(get_long(sec, "s_max", 255), 0, 255);
+            c.v_min = std::clamp(get_long(sec, "v_min", 120), 0, 255);
+            c.v_max = std::clamp(get_long(sec, "v_max", 255), 0, 255);
+            laser_colors.push_back(std::move(c));
+        }
+        if (laser_colors.empty()) {
+            CrosshairColorProfileConfig low, high;
+            low.name = "Laser-Red-Low"; low.h_low = 0; low.h_high = 10;
+            high.name = "Laser-Red-High"; high.h_low = 160; high.h_high = 179;
+            laser_colors.push_back(std::move(low));
+            laser_colors.push_back(std::move(high));
+        }
+    }
+
     macro_enabled = get_bool("", "macro_enabled", false);
+    macro_programs_enabled = get_bool("macro_editor", "enabled", false);
+    macro_stop_key = get_string("macro_editor", "stop_key", "F12");
+    macro_programs.clear();
+    const int macroCount = std::clamp(get_long("macro_editor", "count", 0),0,macros::maxPrograms);
+    std::unordered_set<std::string> macroIds;
+    for(int i=0;i<macroCount;++i) {
+        const std::string section="macro."+std::to_string(i);
+        const char* s=section.c_str();
+        macros::Program p;
+        p.id=get_string(s,"id",section); p.name=get_string(s,"name",u8"新建宏");
+        p.trigger=get_string(s,"trigger",""); p.enabled=get_bool(s,"enabled",false);
+        p.blockTrigger=get_bool(s,"block_trigger",false);
+        p.mode=static_cast<macros::Mode>(get_long(s,"mode",0));
+        p.targetOnly=get_bool(s,"target_only",false);
+        p.heightFilter=get_bool(s,"height_filter",false);
+        p.minHeightPercent=get_long(s,"min_height_percent",0);
+        p.maxHeightPercent=get_long(s,"max_height_percent",100);
+        p.loopIntervalMs=get_long(s,"loop_interval_ms",20);
+        std::istringstream ids(get_string(s,"classes",""));
+        int classId; while(ids>>classId) if(classId>=0) p.classes.push_back(classId);
+        const int count=std::clamp(get_long(s,"action_count",0),0,macros::maxActions);
+        for(int j=0;j<count;++j) {
+            const std::string prefix="action."+std::to_string(j)+".";
+            macros::Action a;
+            a.type=static_cast<macros::ActionType>(get_long(s,(prefix+"type").c_str(),0));
+            a.key=get_string(s,(prefix+"key").c_str(),"Key1");
+            a.a=get_long(s,(prefix+"a").c_str(),100); a.b=get_long(s,(prefix+"b").c_str(),100);
+            p.actions.push_back(a);
+        }
+        macros::normalize(p);
+        if(p.id.empty() || macroIds.count(p.id)) p.id=section;
+        while(macroIds.count(p.id)) p.id+="_";
+        macroIds.insert(p.id);
+        macro_programs.push_back(std::move(p));
+    }
     macro_script_path = get_string("", "macro_script_path", "");
     macro_primary_button_events = get_bool("", "macro_primary_button_events", false);
 
@@ -461,6 +645,9 @@ bool Config::loadConfig(const std::string& filename)
                 return a.class_id < b.class_id;
             });
     }
+    head_body_fusion_enabled = get_bool("head_body_fusion", "enabled", false);
+    head_body_head_class_id = std::max(-1, static_cast<int>(get_long("head_body_fusion", "head_class_id", -1)));
+    head_body_body_class_id = std::max(-1, static_cast<int>(get_long("head_body_fusion", "body_class_id", -1)));
 
     // 全局选靶与稳定器
     target_hysteresis_ratio   = get_double("target_stabilizer", "target_hysteresis_ratio",   target_hysteresis_ratio);
@@ -479,6 +666,9 @@ bool Config::loadConfig(const std::string& filename)
     target_max_aspect         = std::clamp(target_max_aspect, 1e-3, 100.0);
 
     hotkeys.clear();
+    bool migratedRecoilSpeed = false;
+    bool migratedRecoilMaximum = false;
+    std::vector<size_t> legacySecondaryProfiles;
     {
         CSimpleIniA::TNamesDepend sections;
         ini.GetAllSections(sections);
@@ -506,8 +696,23 @@ bool Config::loadConfig(const std::string& filename)
             if (hk.group.empty())
                 hk.group = u8"默认";
             hk.keys = splitString(get_string(sec, "keys", "RightMouseButton"));
+            hk.keys_chord = get_bool(sec, "keys_chord", false);
+            hk.block_hotkey = get_bool(sec, "block_hotkey", false);
 
             hk.fovX = get_long(sec, "fovX", hk.fovX);
+            hk.mask_x = get_bool(sec, "mask_x", false);
+            hk.mask_y = get_bool(sec, "mask_y", false);
+            hk.unlock_x = get_bool(sec, "unlock_x", false);
+            hk.unlock_y = get_bool(sec, "unlock_y", false);
+            hk.unlock_y_delay_ms = static_cast<int>(std::clamp(
+                get_long(sec, "unlock_y_delay_ms", 0), 0, 5000));
+            hk.aim_delay_ms = static_cast<int>(std::clamp(get_long(sec, "aim_delay_ms", 0), 0, 2000));
+            hk.dynamic_fov_shrink_ms = static_cast<int>(std::clamp(
+                get_long(sec, "dynamic_fov_shrink_ms", 200), 0, 2000));
+            hk.dynamic_fov_size = static_cast<int>(std::clamp(
+                get_long(sec, "dynamic_fov_size", 40), 1, 4096));
+            hk.dynamic_fov_expand_ms = static_cast<int>(std::clamp(
+                get_long(sec, "dynamic_fov_expand_ms", 120), 0, 2000));
             hk.fovY = get_long(sec, "fovY", hk.fovY);
 
             {
@@ -540,17 +745,92 @@ bool Config::loadConfig(const std::string& filename)
             }
 
             hk.crosshair_detect_enabled  = get_bool(sec, "crosshair_detect_enabled", false);
+            hk.laser_detect_enabled = get_bool(sec, "laser_detect_enabled", false);
+            hk.aimpoint_recoil_enabled = get_bool(sec, "aimpoint_recoil_enabled", false);
+            if (!hasGlobalRecoilSpeed && !migratedRecoilSpeed &&
+                ini.GetValue(sec, "aimpoint_recoil_speed_px_s", nullptr)) {
+                const double value = get_double(sec, "aimpoint_recoil_speed_px_s", 30.0);
+                aimpoint_recoil_speed_px_s = std::isfinite(value) ? std::clamp(value, 0.0, 2000.0) : 30.0;
+                migratedRecoilSpeed = true;
+            }
+            if (!hasGlobalRecoilMaximum && !migratedRecoilMaximum &&
+                ini.GetValue(sec, "aimpoint_recoil_max_px", nullptr)) {
+                const double value = get_double(sec, "aimpoint_recoil_max_px", 60.0);
+                aimpoint_recoil_max_px = std::isfinite(value) ? std::clamp(value, 0.0, 2000.0) : 60.0;
+                migratedRecoilMaximum = true;
+            }
+            if (hk.crosshair_detect_enabled) {
+                hk.laser_detect_enabled = false;
+                hk.aimpoint_recoil_enabled = false;
+            } else if (hk.laser_detect_enabled) {
+                hk.aimpoint_recoil_enabled = false;
+            }
 
             {
                 hk.dynamic_fov_enabled = get_bool(sec, "dynamic_fov_enabled", hk.dynamic_fov_enabled);
-                const float legacy_margin = static_cast<float>(
-                    get_double(sec, "dynamic_fov_margin_frac", 2.0 - hk.dynamic_fov_strength));
-                const float legacy_strength = std::clamp(2.0f - legacy_margin, 0.0f, 1.0f);
-                hk.dynamic_fov_strength = static_cast<float>(
-                    get_double(sec, "dynamic_fov_strength", legacy_strength));
+                // The former strength depended on target box size and cannot
+                // be converted to a fixed diameter. Missing new fields use defaults.
             }
 
             hk.ctl_kp_x = get_double(sec, "ctl_kp_x", hk.ctl_kp_x);
+            hk.recovered_pid.kpX = static_cast<float>(get_double(sec, "recovered_pid_kp_x", hk.recovered_pid.kpX));
+            hk.recovered_pid.kiX = static_cast<float>(get_double(sec, "recovered_pid_ki_x", hk.recovered_pid.kiX));
+            hk.recovered_pid.kdX = static_cast<float>(get_double(sec, "recovered_pid_kd_x", hk.recovered_pid.kdX));
+            hk.recovered_pid.kpY = static_cast<float>(get_double(sec, "recovered_pid_kp_y", hk.recovered_pid.kpY));
+            hk.recovered_pid.kiY = static_cast<float>(get_double(sec, "recovered_pid_ki_y", hk.recovered_pid.kiY));
+            hk.recovered_pid.kdY = static_cast<float>(get_double(sec, "recovered_pid_kd_y", hk.recovered_pid.kdY));
+            hk.recovered_pid.deadzoneX = static_cast<float>(get_double(sec, "recovered_pid_deadzone_x", hk.recovered_pid.deadzoneX));
+            hk.recovered_pid.deadzoneY = static_cast<float>(get_double(sec, "recovered_pid_deadzone_y", hk.recovered_pid.deadzoneY));
+            hk.recovered_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_pid_ff_x", hk.recovered_pid.feedforwardX));
+            hk.recovered_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_pid_ff_y", hk.recovered_pid.feedforwardY));
+            hk.recovered_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_pid_smooth_max_pixel", hk.recovered_pid.smoothMaxPixel));
+            hk.recovered_pid.followX = get_follow_strength(sec, "recovered_pid_follow_x");
+            hk.recovered_pid.followY = get_follow_strength(sec, "recovered_pid_follow_y");
+            hk.recovered_pid.segmentEnabled = get_bool(sec, "recovered_pid_segment_enabled", hk.recovered_pid.segmentEnabled);
+            hk.recovered_pid.segment = static_cast<float>(get_double(sec, "recovered_pid_segment", hk.recovered_pid.segment));
+            hk.activation_key = get_string(sec, "activation_key", "");
+            hk.activation_selected = get_bool(sec, "activation_selected", false);
+            if (!ini.GetValue(sec, "activation_key", nullptr) &&
+                (ini.GetValue(sec, "secondary_select_key", nullptr) ||
+                 ini.GetValue(sec, "secondary_toggle_key", nullptr)))
+                legacySecondaryProfiles.push_back(hotkeys.size());
+            hk.primary_select_key = get_string(sec, "primary_select_key", hk.primary_select_key);
+            // Preserve the old binding as the secondary activation key only.
+            // An explicitly disabled old binding stays disabled.
+            hk.secondary_select_key = get_string(sec, "secondary_select_key",
+                get_string(sec, "secondary_toggle_key", hk.secondary_select_key));
+            hk.recovered_secondary_pid = hk.recovered_pid;
+            hk.recovered_secondary_pid.kpX = static_cast<float>(get_double(sec, "recovered_secondary_pid_kp_x", hk.recovered_secondary_pid.kpX));
+            hk.recovered_secondary_pid.kiX = static_cast<float>(get_double(sec, "recovered_secondary_pid_ki_x", hk.recovered_secondary_pid.kiX));
+            hk.recovered_secondary_pid.kdX = static_cast<float>(get_double(sec, "recovered_secondary_pid_kd_x", hk.recovered_secondary_pid.kdX));
+            hk.recovered_secondary_pid.kpY = static_cast<float>(get_double(sec, "recovered_secondary_pid_kp_y", hk.recovered_secondary_pid.kpY));
+            hk.recovered_secondary_pid.kiY = static_cast<float>(get_double(sec, "recovered_secondary_pid_ki_y", hk.recovered_secondary_pid.kiY));
+            hk.recovered_secondary_pid.kdY = static_cast<float>(get_double(sec, "recovered_secondary_pid_kd_y", hk.recovered_secondary_pid.kdY));
+            hk.recovered_secondary_pid.deadzoneX = static_cast<float>(get_double(sec, "recovered_secondary_pid_deadzone_x", hk.recovered_secondary_pid.deadzoneX));
+            hk.recovered_secondary_pid.deadzoneY = static_cast<float>(get_double(sec, "recovered_secondary_pid_deadzone_y", hk.recovered_secondary_pid.deadzoneY));
+            hk.recovered_secondary_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_secondary_pid_ff_x", hk.recovered_secondary_pid.feedforwardX));
+            hk.recovered_secondary_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_secondary_pid_ff_y", hk.recovered_secondary_pid.feedforwardY));
+            hk.recovered_secondary_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_secondary_pid_smooth_max_pixel", hk.recovered_secondary_pid.smoothMaxPixel));
+            hk.recovered_secondary_pid.followX = get_follow_strength(sec, "recovered_secondary_pid_follow_x");
+            hk.recovered_secondary_pid.followY = get_follow_strength(sec, "recovered_secondary_pid_follow_y");
+            hk.recovered_secondary_pid.segmentEnabled = get_bool(sec, "recovered_secondary_pid_segment_enabled", hk.recovered_secondary_pid.segmentEnabled);
+            hk.recovered_secondary_pid.segment = static_cast<float>(get_double(sec, "recovered_secondary_pid_segment", hk.recovered_secondary_pid.segment));
+            hk.recovered_scope_pid = hk.recovered_pid;
+            hk.recovered_scope_pid.kpX = static_cast<float>(get_double(sec, "recovered_scope_pid_kp_x", hk.recovered_scope_pid.kpX));
+            hk.recovered_scope_pid.kiX = static_cast<float>(get_double(sec, "recovered_scope_pid_ki_x", hk.recovered_scope_pid.kiX));
+            hk.recovered_scope_pid.kdX = static_cast<float>(get_double(sec, "recovered_scope_pid_kd_x", hk.recovered_scope_pid.kdX));
+            hk.recovered_scope_pid.kpY = static_cast<float>(get_double(sec, "recovered_scope_pid_kp_y", hk.recovered_scope_pid.kpY));
+            hk.recovered_scope_pid.kiY = static_cast<float>(get_double(sec, "recovered_scope_pid_ki_y", hk.recovered_scope_pid.kiY));
+            hk.recovered_scope_pid.kdY = static_cast<float>(get_double(sec, "recovered_scope_pid_kd_y", hk.recovered_scope_pid.kdY));
+            hk.recovered_scope_pid.deadzoneX = static_cast<float>(get_double(sec, "recovered_scope_pid_deadzone_x", hk.recovered_scope_pid.deadzoneX));
+            hk.recovered_scope_pid.deadzoneY = static_cast<float>(get_double(sec, "recovered_scope_pid_deadzone_y", hk.recovered_scope_pid.deadzoneY));
+            hk.recovered_scope_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_scope_pid_ff_x", hk.recovered_scope_pid.feedforwardX));
+            hk.recovered_scope_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_scope_pid_ff_y", hk.recovered_scope_pid.feedforwardY));
+            hk.recovered_scope_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_scope_pid_smooth_max_pixel", hk.recovered_scope_pid.smoothMaxPixel));
+            hk.recovered_scope_pid.followX = get_follow_strength(sec, "recovered_scope_pid_follow_x");
+            hk.recovered_scope_pid.followY = get_follow_strength(sec, "recovered_scope_pid_follow_y");
+            hk.recovered_scope_pid.segmentEnabled = get_bool(sec, "recovered_scope_pid_segment_enabled", hk.recovered_scope_pid.segmentEnabled);
+            hk.recovered_scope_pid.segment = static_cast<float>(get_double(sec, "recovered_scope_pid_segment", hk.recovered_scope_pid.segment));
             hk.ctl_kp_y = get_double(sec, "ctl_kp_y", hk.ctl_kp_y);
             hk.ctl_ki_x = get_double(sec, "ctl_ki_x", hk.ctl_ki_x);
             hk.ctl_ki_y = get_double(sec, "ctl_ki_y", hk.ctl_ki_y);
@@ -576,6 +856,8 @@ bool Config::loadConfig(const std::string& filename)
                 get_double(sec, "ctl_inflight_dead_time_ms", hk.ctl_inflight_dead_time_ms);
             hk.ctl_y_offset     = get_double(sec, "ctl_y_offset",     hk.ctl_y_offset);
             hk.ctl_y_offset_max = get_double(sec, "ctl_y_offset_max", hk.ctl_y_offset_max);
+            hk.ctl_x_offset     = get_double(sec, "ctl_x_offset",     hk.ctl_x_offset);
+            hk.ctl_x_offset_max = get_double(sec, "ctl_x_offset_max", hk.ctl_x_offset_max);
             hk.ctl_hysteresis_ratio = get_double(sec, "ctl_hysteresis_ratio", hk.ctl_hysteresis_ratio);
             hk.ctl_enabled = get_bool(sec, "ctl_enabled", false);
             hk.ctl_max_distance_px = get_double(sec, "ctl_max_distance_px", hk.ctl_max_distance_px);
@@ -624,6 +906,24 @@ bool Config::loadConfig(const std::string& filename)
                 get_double(sec, "ctl_scope_random_seed", hk.ctl_scope.random_seed));
 
             hk.trigger_enabled = get_bool(sec, "trigger_enabled", false);
+            hk.trigger_mode = static_cast<int>(get_double(sec, "trigger_mode", 0));
+            hk.trigger_snap_px_per_count = get_double(sec, "trigger_snap_px_per_count", 1.0);
+            hk.trigger_snap_max_counts = static_cast<int>(get_double(sec, "trigger_snap_max_counts", 500));
+            hk.trigger_snap_tolerance_px = get_double(sec, "trigger_snap_tolerance_px", 3.0);
+            hk.trigger_snap_counts_per_second = static_cast<int>(get_double(sec, "trigger_snap_counts_per_second", 4000));
+            hk.trigger_return_counts_per_second = static_cast<int>(get_double(sec, "trigger_return_counts_per_second", 16000));
+            hk.trigger_return_y_percent = static_cast<int>(get_double(sec, "trigger_return_y_percent", 75));
+            hk.trigger_spin_counts_per_turn = static_cast<int>(get_double(sec, "trigger_spin_counts_per_turn", 2400));
+            hk.trigger_spin_step_degrees = static_cast<int>(get_double(sec, "trigger_spin_step_degrees", 90));
+            hk.trigger_spin_step_ms = static_cast<int>(get_double(sec, "trigger_spin_step_ms", 40));
+            hk.trigger_spin_hold_ms = static_cast<int>(get_double(sec, "trigger_spin_hold_ms", 300));
+            hk.trigger_spin_counts_per_second = static_cast<int>(get_double(sec, "trigger_spin_counts_per_second", 5000));
+            hk.trigger_spin_turns = static_cast<int>(get_double(sec, "trigger_spin_turns", 1));
+            hk.trigger_snap_fire_hold_ms = static_cast<int>(get_double(sec, "trigger_snap_fire_hold_ms", 30));
+            hk.trigger_snap_cooldown_ms = static_cast<int>(get_double(sec, "trigger_snap_cooldown_ms", 200));
+            hk.trigger_flash_disappear_ms = static_cast<int>(get_double(sec, "trigger_flash_disappear_ms", 80));
+            hk.trigger_classes = parse_trigger_classes(get_string(sec, "trigger_classes", ""));
+            hk.trigger_loss_delay_ms = static_cast<int>(get_double(sec, "trigger_loss_delay_ms", hk.trigger_loss_delay_ms));
             hk.trigger_fire_delay = static_cast<int>(get_double(sec, "trigger_fire_delay", hk.trigger_fire_delay));
             hk.trigger_fire_duration = static_cast<int>(get_double(sec, "trigger_fire_duration", hk.trigger_fire_duration));
             hk.trigger_fire_interval = static_cast<int>(get_double(sec, "trigger_fire_interval", hk.trigger_fire_interval));
@@ -635,13 +935,58 @@ bool Config::loadConfig(const std::string& filename)
             hk.trigger_auto_scope = static_cast<int>(get_double(sec, "trigger_auto_scope", hk.trigger_auto_scope));
             hk.trigger_scope_delay_ms = static_cast<int>(get_double(sec, "trigger_scope_delay_ms", hk.trigger_scope_delay_ms));
             hk.trigger_auto_stop = static_cast<int>(get_double(sec, "trigger_auto_stop", hk.trigger_auto_stop));
-            hk.trigger_stop_ms = static_cast<int>(get_double(sec, "trigger_stop_ms", hk.trigger_stop_ms));
+            hk.trigger_stop_before_ms = static_cast<int>(get_double(
+                sec, "trigger_stop_before_ms", hk.trigger_stop_before_ms));
+            // Old configurations used one duration starting at the shot.
+            hk.trigger_stop_after_ms = static_cast<int>(get_double(
+                sec, "trigger_stop_after_ms",
+                get_double(sec, "trigger_stop_ms", hk.trigger_stop_after_ms)));
             hk.trigger_weapon_switch31 = get_bool(
                 sec, "trigger_weapon_switch31", hk.trigger_weapon_switch31);
             hk.trigger_switch31_delay_ms = static_cast<int>(get_double(
                 sec, "trigger_switch31_delay_ms", hk.trigger_switch31_delay_ms));
             hk.trigger_switch31_step_ms = static_cast<int>(get_double(
                 sec, "trigger_switch31_step_ms", hk.trigger_switch31_step_ms));
+            hk.secondary_trigger = triggerParamsOf(hk);
+            hk.secondary_trigger_custom = get_bool(sec, "secondary_trigger_custom", false);
+            if (hk.secondary_trigger_custom)
+            {
+                auto& t = hk.secondary_trigger;
+                t.trigger_enabled = get_bool(sec, "secondary_trigger_enabled", t.trigger_enabled);
+                t.trigger_mode = static_cast<int>(get_double(sec, "secondary_trigger_mode", t.trigger_mode));
+                t.trigger_snap_px_per_count = get_double(sec, "secondary_trigger_snap_px_per_count", t.trigger_snap_px_per_count);
+                t.trigger_snap_max_counts = static_cast<int>(get_double(sec, "secondary_trigger_snap_max_counts", t.trigger_snap_max_counts));
+                t.trigger_snap_tolerance_px = get_double(sec, "secondary_trigger_snap_tolerance_px", t.trigger_snap_tolerance_px);
+                t.trigger_snap_counts_per_second = static_cast<int>(get_double(sec, "secondary_trigger_snap_counts_per_second", t.trigger_snap_counts_per_second));
+                t.trigger_return_counts_per_second = static_cast<int>(get_double(sec, "secondary_trigger_return_counts_per_second", t.trigger_return_counts_per_second));
+                t.trigger_return_y_percent = static_cast<int>(get_double(sec, "secondary_trigger_return_y_percent", t.trigger_return_y_percent));
+                t.trigger_spin_counts_per_turn = static_cast<int>(get_double(sec, "secondary_trigger_spin_counts_per_turn", t.trigger_spin_counts_per_turn));
+                t.trigger_spin_step_degrees = static_cast<int>(get_double(sec, "secondary_trigger_spin_step_degrees", t.trigger_spin_step_degrees));
+                t.trigger_spin_step_ms = static_cast<int>(get_double(sec, "secondary_trigger_spin_step_ms", t.trigger_spin_step_ms));
+                t.trigger_spin_hold_ms = static_cast<int>(get_double(sec, "secondary_trigger_spin_hold_ms", t.trigger_spin_hold_ms));
+                t.trigger_spin_counts_per_second = static_cast<int>(get_double(sec, "secondary_trigger_spin_counts_per_second", t.trigger_spin_counts_per_second));
+                t.trigger_spin_turns = static_cast<int>(get_double(sec, "secondary_trigger_spin_turns", t.trigger_spin_turns));
+                t.trigger_snap_fire_hold_ms = static_cast<int>(get_double(sec, "secondary_trigger_snap_fire_hold_ms", t.trigger_snap_fire_hold_ms));
+                t.trigger_snap_cooldown_ms = static_cast<int>(get_double(sec, "secondary_trigger_snap_cooldown_ms", t.trigger_snap_cooldown_ms));
+                t.trigger_flash_disappear_ms = static_cast<int>(get_double(sec, "secondary_trigger_flash_disappear_ms", t.trigger_flash_disappear_ms));
+                t.trigger_loss_delay_ms = static_cast<int>(get_double(sec, "secondary_trigger_loss_delay_ms", t.trigger_loss_delay_ms));
+                t.trigger_fire_delay = static_cast<int>(get_double(sec, "secondary_trigger_fire_delay", t.trigger_fire_delay));
+                t.trigger_fire_duration = static_cast<int>(get_double(sec, "secondary_trigger_fire_duration", t.trigger_fire_duration));
+                t.trigger_fire_interval = static_cast<int>(get_double(sec, "secondary_trigger_fire_interval", t.trigger_fire_interval));
+                t.trigger_y_percent = static_cast<int>(get_double(sec, "secondary_trigger_y_percent", t.trigger_y_percent));
+                t.trigger_delay_jitter_ms = static_cast<int>(get_double(sec, "secondary_trigger_delay_jitter_ms", t.trigger_delay_jitter_ms));
+                t.trigger_duration_jitter_ms = static_cast<int>(get_double(sec, "secondary_trigger_duration_jitter_ms", t.trigger_duration_jitter_ms));
+                t.trigger_interval_jitter_ms = static_cast<int>(get_double(sec, "secondary_trigger_interval_jitter_ms", t.trigger_interval_jitter_ms));
+                t.trigger_switch_cooldown_ms = static_cast<int>(get_double(sec, "secondary_trigger_switch_cooldown_ms", t.trigger_switch_cooldown_ms));
+                t.trigger_auto_scope = static_cast<int>(get_double(sec, "secondary_trigger_auto_scope", t.trigger_auto_scope));
+                t.trigger_scope_delay_ms = static_cast<int>(get_double(sec, "secondary_trigger_scope_delay_ms", t.trigger_scope_delay_ms));
+                t.trigger_auto_stop = static_cast<int>(get_double(sec, "secondary_trigger_auto_stop", t.trigger_auto_stop));
+                t.trigger_stop_before_ms = static_cast<int>(get_double(sec, "secondary_trigger_stop_before_ms", t.trigger_stop_before_ms));
+                t.trigger_stop_after_ms = static_cast<int>(get_double(sec, "secondary_trigger_stop_after_ms", t.trigger_stop_after_ms));
+                t.trigger_weapon_switch31 = get_bool(sec, "secondary_trigger_weapon_switch31", t.trigger_weapon_switch31);
+                t.trigger_switch31_delay_ms = static_cast<int>(get_double(sec, "secondary_trigger_switch31_delay_ms", t.trigger_switch31_delay_ms));
+                t.trigger_switch31_step_ms = static_cast<int>(get_double(sec, "secondary_trigger_switch31_step_ms", t.trigger_switch31_step_ms));
+            }
 
             hk.aim_path_mode = static_cast<int>(get_double(sec, "aim_path_mode", hk.aim_path_mode));
             hk.aim_path_influence = static_cast<int>(get_double(sec, "aim_path_influence", hk.aim_path_influence));
@@ -735,10 +1080,12 @@ bool Config::loadConfig(const std::string& filename)
             ac.y_offset_max = std::clamp(ac.y_offset_max, 0.0f, 1.0f);
             if (ac.y_offset > ac.y_offset_max)
                 std::swap(ac.y_offset, ac.y_offset_max);
+            ac.x_offset = std::clamp(ac.x_offset, 0.0f, 1.0f);
+            ac.x_offset_max = std::clamp(ac.x_offset_max, 0.0f, 1.0f);
+            if (ac.x_offset > ac.x_offset_max)
+                std::swap(ac.x_offset, ac.x_offset_max);
             ac.min_conf = std::clamp(ac.min_conf, 0.0f, 1.0f);
         }
-
-        hk.dynamic_fov_strength = std::clamp(hk.dynamic_fov_strength, 0.0f, 1.0f);
 
         // ── 瞄准控制器参数组 (默认档) ─────────────────────────────────────
         // ★ 借道 AimCtlParams::clamp(): 默认档与开镜档共用【同一份】夹取规则,
@@ -756,6 +1103,10 @@ bool Config::loadConfig(const std::string& filename)
         hk.ctl_y_offset_max = std::clamp(hk.ctl_y_offset_max, 0.0, 1.0);
         if (hk.ctl_y_offset > hk.ctl_y_offset_max)
             std::swap(hk.ctl_y_offset, hk.ctl_y_offset_max);
+        hk.ctl_x_offset = std::clamp(hk.ctl_x_offset, 0.0, 1.0);
+        hk.ctl_x_offset_max = std::clamp(hk.ctl_x_offset_max, 0.0, 1.0);
+        if (hk.ctl_x_offset > hk.ctl_x_offset_max)
+            std::swap(hk.ctl_x_offset, hk.ctl_x_offset_max);
         hk.ctl_hysteresis_ratio = std::clamp(hk.ctl_hysteresis_ratio, 1.0, 10.0);
 
         hk.ctl_max_distance_px = std::max(0.0, hk.ctl_max_distance_px);
@@ -767,20 +1118,50 @@ bool Config::loadConfig(const std::string& filename)
         if (hk.ctl_min_aspect > hk.ctl_max_aspect)
             std::swap(hk.ctl_min_aspect, hk.ctl_max_aspect);
 
-        hk.trigger_fire_delay    = std::max(0, hk.trigger_fire_delay);
-        hk.trigger_fire_duration = std::max(0, hk.trigger_fire_duration);
-        hk.trigger_fire_interval = std::max(1, hk.trigger_fire_interval);
-        hk.trigger_delay_jitter_ms    = std::max(0, hk.trigger_delay_jitter_ms);
-        hk.trigger_duration_jitter_ms = std::max(0, hk.trigger_duration_jitter_ms);
-        hk.trigger_interval_jitter_ms = std::max(0, hk.trigger_interval_jitter_ms);
-        hk.trigger_switch_cooldown_ms = std::max(0, hk.trigger_switch_cooldown_ms);
-        hk.trigger_scope_delay_ms = std::max(0, hk.trigger_scope_delay_ms);
-        hk.trigger_y_percent = std::clamp(hk.trigger_y_percent, 10, 300);
-        hk.trigger_auto_scope = std::clamp(hk.trigger_auto_scope, 0, 2);
-        hk.trigger_auto_stop = hk.trigger_auto_stop > 0 ? 1 : 0;
-        hk.trigger_stop_ms = std::clamp(hk.trigger_stop_ms, 20, 300);
-        hk.trigger_switch31_delay_ms = std::clamp(hk.trigger_switch31_delay_ms, 0, 2000);
-        hk.trigger_switch31_step_ms = std::clamp(hk.trigger_switch31_step_ms, 5, 100);
+        auto clampTrigger = [](TriggerParams& t) {
+            t.trigger_mode = std::clamp(t.trigger_mode, 0, 2);
+            t.trigger_snap_px_per_count = std::isfinite(t.trigger_snap_px_per_count)
+                ? std::clamp(t.trigger_snap_px_per_count, 0.05, 50.0) : 1.0;
+            t.trigger_snap_max_counts = std::clamp(t.trigger_snap_max_counts, 1, 500);
+            t.trigger_snap_tolerance_px = std::isfinite(t.trigger_snap_tolerance_px)
+                ? std::clamp(t.trigger_snap_tolerance_px, 1.0, 30.0) : 3.0;
+            t.trigger_snap_counts_per_second = std::clamp(t.trigger_snap_counts_per_second, 50, 20000);
+            t.trigger_return_counts_per_second = std::clamp(t.trigger_return_counts_per_second, 2000, 40000);
+            t.trigger_return_y_percent = std::clamp(t.trigger_return_y_percent, 0, 150);
+            t.trigger_spin_counts_per_turn = std::clamp(t.trigger_spin_counts_per_turn, 100, 200000);
+            t.trigger_spin_step_degrees = std::clamp(t.trigger_spin_step_degrees, 1, 180);
+            t.trigger_spin_step_ms = std::clamp(t.trigger_spin_step_ms, 10, 1000);
+            t.trigger_spin_hold_ms = std::clamp(t.trigger_spin_hold_ms, 0, 10000);
+            t.trigger_spin_counts_per_second = std::clamp(t.trigger_spin_counts_per_second, 500, 200000);
+            t.trigger_spin_turns = std::clamp(t.trigger_spin_turns, 1, 10);
+            t.trigger_snap_fire_hold_ms = std::clamp(t.trigger_snap_fire_hold_ms, 20, 2000);
+            t.trigger_snap_cooldown_ms = std::clamp(t.trigger_snap_cooldown_ms, 1, 2000);
+            t.trigger_flash_disappear_ms = std::clamp(t.trigger_flash_disappear_ms, 0, 2000);
+            t.trigger_fire_delay = std::max(0, t.trigger_fire_delay);
+            t.trigger_fire_duration = std::max(0, t.trigger_fire_duration);
+            t.trigger_fire_interval = std::max(1, t.trigger_fire_interval);
+            t.trigger_delay_jitter_ms = std::max(0, t.trigger_delay_jitter_ms);
+            t.trigger_duration_jitter_ms = std::max(0, t.trigger_duration_jitter_ms);
+            t.trigger_interval_jitter_ms = std::max(0, t.trigger_interval_jitter_ms);
+            t.trigger_switch_cooldown_ms = std::max(0, t.trigger_switch_cooldown_ms);
+            t.trigger_loss_delay_ms = std::clamp(t.trigger_loss_delay_ms, 0, 2000);
+            t.trigger_scope_delay_ms = std::max(0, t.trigger_scope_delay_ms);
+            t.trigger_y_percent = std::clamp(t.trigger_y_percent, 10, 1000);
+            if (t.trigger_auto_scope == 3) t.trigger_auto_scope = 0;
+            t.trigger_auto_scope = std::clamp(t.trigger_auto_scope, 0, 2);
+            t.trigger_auto_stop = std::clamp(t.trigger_auto_stop, 0, 2);
+            t.trigger_stop_before_ms = std::clamp(t.trigger_stop_before_ms, 0, 1000);
+            t.trigger_stop_after_ms = std::clamp(t.trigger_stop_after_ms, 0, 1000);
+            t.trigger_switch31_delay_ms = std::clamp(t.trigger_switch31_delay_ms, 0, 2000);
+            t.trigger_switch31_step_ms = std::clamp(t.trigger_switch31_step_ms, 5, 100);
+        };
+        auto primaryTrigger = triggerParamsOf(hk);
+        clampTrigger(primaryTrigger);
+        applyTriggerParams(hk, primaryTrigger);
+        if (hk.secondary_trigger_custom)
+            clampTrigger(hk.secondary_trigger);
+        else
+            hk.secondary_trigger = primaryTrigger;
 
         hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 4);
         hk.aim_path_neural_examples = std::clamp(hk.aim_path_neural_examples, 0, 200);
@@ -807,15 +1188,42 @@ bool Config::loadConfig(const std::string& filename)
     for (auto& hk : hotkeys)
         clamp_target_fields(hk);
 
+    // Preserve configured legacy secondary settings as a complete, editable
+    // profile. Saving activation_key (even empty) makes this migration one-shot.
+    for (size_t index : legacySecondaryProfiles) {
+        auto& main = hotkeys[index];
+        if (main.keys.empty() || main.primary_select_key.empty() || main.secondary_select_key.empty() ||
+            main.primary_select_key == main.secondary_select_key) continue;
+        const auto& a = main.recovered_pid;
+        const auto& b = main.recovered_secondary_pid;
+        const bool different = a.kpX != b.kpX || a.kiX != b.kiX || a.kdX != b.kdX ||
+            a.kpY != b.kpY || a.kiY != b.kiY || a.kdY != b.kdY ||
+            a.followX != b.followX || a.followY != b.followY ||
+            a.deadzoneX != b.deadzoneX || a.deadzoneY != b.deadzoneY ||
+            a.feedforwardX != b.feedforwardX || a.feedforwardY != b.feedforwardY ||
+            a.smoothMaxPixel != b.smoothMaxPixel || a.segmentEnabled != b.segmentEnabled ||
+            a.segment != b.segment;
+        if (!different && !main.secondary_trigger_custom) continue;
+        HotkeyProfile secondary = main;
+        main.activation_key = main.primary_select_key;
+        main.activation_selected = true;
+        secondary.name += u8" · 备用";
+        secondary.activation_key = main.secondary_select_key;
+        secondary.activation_selected = false;
+        secondary.recovered_pid = main.recovered_secondary_pid;
+        if (main.secondary_trigger_custom) applyTriggerParams(secondary, main.secondary_trigger);
+        hotkeys.push_back(std::move(secondary));
+    }
+
     static const std::unordered_set<std::string> kAllowedAimKeys = {
         "None", "LeftMouseButton", "RightMouseButton",
-        "X1MouseButton", "X2MouseButton",
+        "MiddleMouseButton", "X1MouseButton", "X2MouseButton",
     };
     for (auto& hk : hotkeys)
     {
         for (auto& k : hk.keys)
         {
-            if (kAllowedAimKeys.find(k) == kAllowedAimKeys.end())
+            if (kAllowedAimKeys.find(k) == kAllowedAimKeys.end() && macros::hidKey(k) == 0)
                 k = "None";
         }
         if (hk.keys.empty())
@@ -860,6 +1268,8 @@ bool Config::saveConfig(const std::string& filename)
     file << u8"# Capture  (只有「采集卡」一种方式; 参数必须来自设备真实能力探测,\n"
             u8"# 组合对不上会直接报错, 不做任何替换)\n"
         << "capture_device = " << capture_device << "\n"
+        << "capture_source = " << capture_source << "\n"
+        << "capture_stream_url = " << capture_stream_url << "\n"
         << "capture_format = " << capture_format << "\n"
         << "capture_width = " << capture_width << "\n"
         << "capture_height = " << capture_height << "\n"
@@ -869,7 +1279,7 @@ bool Config::saveConfig(const std::string& filename)
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
 
     file << "# Hardware / input device\n"
-        << "# MAKCU | MAKCUNEW | KMBOXNET  (三档共用 mouse/mouse_driver.h 的驱动抽象)\n"
+        << "# MAKCU | MAKCUNEW | KMBOXNET | FERRUM | DHZBOX_MINI | WINDOWS | CAT\n"
         << "input_method = " << input_method << "\n"
         << "makcu_baudrate = " << makcu_baudrate << "\n"
         << "makcu_port = " << makcu_port << "\n"
@@ -880,7 +1290,16 @@ bool Config::saveConfig(const std::string& filename)
         << "# KMBox Net: 三个值照抄盒子屏幕上显示的 ip / port / uuid\n"
         << "kmbox_net_ip = " << kmbox_net_ip << "\n"
         << "kmbox_net_port = " << kmbox_net_port << "\n"
-        << "kmbox_net_uuid = " << kmbox_net_uuid << "\n\n";
+        << "kmbox_net_uuid = " << kmbox_net_uuid << "\n"
+        << "ferrum_port = " << ferrum_port << "\n"
+        << "ferrum_baudrate = " << ferrum_baudrate << "\n"
+        << "cat_ip = " << cat_ip << "\n"
+        << "cat_port = " << cat_port << "\n"
+        << "cat_uuid = " << cat_uuid << "\n"
+        << "cat_monitor_port = " << cat_monitor_port << "\n"
+        << "dhzbox_ip = " << dhzbox_ip << "\n"
+        << "dhzbox_port = " << dhzbox_port << "\n"
+        << "dhzbox_key = " << dhzbox_key << "\n\n";
 
     file << "# AI\n"
         << "ai_model = " << ai_model << "\n"
@@ -919,8 +1338,26 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Crosshair color detector (palette + ROI; per-hotkey toggle lives on each [hotkey.N])\n"
         << "crosshair_rect_w = "          << crosshair_rect_w          << "\n"
         << "crosshair_rect_h = "          << crosshair_rect_h          << "\n"
+        << "crosshair_offset_y = "        << crosshair_offset_y        << "\n"
         << "crosshair_min_pixel_count = " << crosshair_min_pixel_count << "\n"
-        << "crosshair_close_radius = "    << crosshair_close_radius    << "\n\n";
+        << "crosshair_close_radius = "    << crosshair_close_radius    << "\n"
+        << std::fixed << std::setprecision(1)
+        << "aimpoint_recoil_speed_px_s = " << aimpoint_recoil_speed_px_s << "\n"
+        << "aimpoint_recoil_max_px = " << aimpoint_recoil_max_px << "\n"
+        << "aimpoint_recoil_fire_key = " << aimpoint_recoil_fire_key << "\n"
+        << std::setprecision(3)
+        << "laser_rect_w = " << laser_rect_w << "\n"
+        << "laser_rect_h = " << laser_rect_h << "\n"
+        << "laser_center_x = " << laser_center_x << "\n"
+        << "laser_center_y = " << laser_center_y << "\n"
+        << "laser_target_center_x = " << laser_target_center_x << "\n"
+        << "laser_target_center_y = " << laser_target_center_y << "\n"
+        << "laser_target_rect_w = " << laser_target_rect_w << "\n"
+        << "laser_target_rect_h = " << laser_target_rect_h << "\n"
+        << "laser_min_pixel_count = " << laser_min_pixel_count << "\n"
+        << "laser_close_radius = " << laser_close_radius << "\n"
+        << "laser_min_elongation = " << laser_min_elongation << "\n"
+        << "laser_smooth = " << laser_smooth << "\n\n";
 
     file << "# Debug\n"
         << "show_window = " << to_bool_str(show_window) << "\n"
@@ -941,10 +1378,13 @@ bool Config::saveConfig(const std::string& filename)
         << "auto_capture_output_dir = " << auto_capture_output_dir << "\n"
         << "auto_capture_save_label = " << to_bool_str(auto_capture_save_label) << "\n\n";
 
-    file << "# Macro (G HUB-compatible Lua). Drop a .lua script path into\n"
-            "# macro_script_path; runtime loads it on startup when macro_enabled\n"
-            "# is true. macro_primary_button_events mirrors the script-side\n"
-            "# EnablePrimaryMouseButtonEvents default.\n"
+    file << "# Auto flash: percent of the full detection frame area\n"
+         << "auto_flash_enabled = " << to_bool_str(auto_flash_enabled) << "\n"
+         << "auto_flash_area_percent = " << auto_flash_area_percent << "\n"
+         << "auto_flash_key = " << auto_flash_key << "\n\n";
+
+    file << "# Legacy Lua fields retained for configuration compatibility.\n"
+            "# Visual macros use [macro_editor] and [macro.N] below.\n"
         << "macro_enabled = " << to_bool_str(macro_enabled) << "\n"
         << "macro_script_path = " << macro_script_path << "\n"
         << "macro_primary_button_events = " << to_bool_str(macro_primary_button_events) << "\n\n";
@@ -963,6 +1403,11 @@ bool Config::saveConfig(const std::string& filename)
 
     file << "active_hotkey_group = " << active_hotkey_group << "\n\n";
 
+    file << "[head_body_fusion]\n"
+         << "enabled = " << to_bool_str(head_body_fusion_enabled) << "\n"
+         << "head_class_id = " << head_body_head_class_id << "\n"
+         << "body_class_id = " << head_body_body_class_id << "\n\n";
+
     for (size_t i = 0; i < hotkeys.size(); ++i)
     {
         const auto& hk = hotkeys[i];
@@ -970,14 +1415,26 @@ bool Config::saveConfig(const std::string& filename)
         file << "name = " << hk.name << "\n";
         file << "group = " << hk.group << "\n";
         file << "keys = " << joinStrings(hk.keys) << "\n";
+        file << "keys_chord = " << to_bool_str(hk.keys_chord) << "\n";
+        file << "block_hotkey = " << to_bool_str(hk.block_hotkey) << "\n";
         file << "fovX = " << hk.fovX << "\n";
+        file << "mask_x = " << to_bool_str(hk.mask_x) << "\n"
+             << "mask_y = " << to_bool_str(hk.mask_y) << "\n"
+             << "unlock_x = " << to_bool_str(hk.unlock_x) << "\n"
+             << "unlock_y = " << to_bool_str(hk.unlock_y) << "\n"
+             << "unlock_y_delay_ms = " << std::clamp(hk.unlock_y_delay_ms, 0, 5000) << "\n"
+             << "aim_delay_ms = " << std::clamp(hk.aim_delay_ms, 0, 2000) << "\n"
+             << "dynamic_fov_shrink_ms = " << std::clamp(hk.dynamic_fov_shrink_ms, 0, 2000) << "\n";
         file << "fovY = " << hk.fovY << "\n";
         file << std::setprecision(0)
              << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
+             << "laser_detect_enabled = " << to_bool_str(hk.laser_detect_enabled && !hk.crosshair_detect_enabled) << "\n"
+             << "aimpoint_recoil_enabled = " << to_bool_str(hk.aimpoint_recoil_enabled && !hk.crosshair_detect_enabled && !hk.laser_detect_enabled) << "\n"
              << "dynamic_fov_enabled = " << to_bool_str(hk.dynamic_fov_enabled) << "\n"
              << std::fixed << std::setprecision(3)
-             << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"
+             << "dynamic_fov_size = " << std::clamp(hk.dynamic_fov_size, 1, 4096) << "\n"
+             << "dynamic_fov_expand_ms = " << std::clamp(hk.dynamic_fov_expand_ms, 0, 2000) << "\n"
              << std::setprecision(4);
 
         file << std::fixed << std::setprecision(4)
@@ -1000,6 +1457,8 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_inflight_dead_time_ms = "  << hk.ctl_inflight_dead_time_ms << "\n"
              << "ctl_y_offset = "         << hk.ctl_y_offset << "\n"
              << "ctl_y_offset_max = "     << hk.ctl_y_offset_max << "\n"
+             << "ctl_x_offset = "         << hk.ctl_x_offset << "\n"
+             << "ctl_x_offset_max = "     << hk.ctl_x_offset_max << "\n"
              << "ctl_hysteresis_ratio = " << hk.ctl_hysteresis_ratio << "\n"
              << "ctl_max_output_counts = " << hk.ctl_max_output_counts << "\n"
              << "ctl_max_distance_px = "    << hk.ctl_max_distance_px << "\n"
@@ -1010,6 +1469,58 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_max_aspect = "         << hk.ctl_max_aspect << "\n"
              << "ctl_random_seed = "        << hk.ctl_random_seed << "\n";
 
+        const auto& recovered = hk.recovered_pid;
+        file << "recovered_pid_kp_x = " << recovered.kpX << "\n"
+             << "recovered_pid_ki_x = " << recovered.kiX << "\n"
+             << "recovered_pid_kd_x = " << recovered.kdX << "\n"
+             << "recovered_pid_kp_y = " << recovered.kpY << "\n"
+             << "recovered_pid_ki_y = " << recovered.kiY << "\n"
+             << "recovered_pid_kd_y = " << recovered.kdY << "\n"
+             << "recovered_pid_deadzone_x = " << recovered.deadzoneX << "\n"
+             << "recovered_pid_deadzone_y = " << recovered.deadzoneY << "\n"
+             << "recovered_pid_ff_x = " << recovered.feedforwardX << "\n"
+             << "recovered_pid_ff_y = " << recovered.feedforwardY << "\n"
+             << "recovered_pid_smooth_max_pixel = " << recovered.smoothMaxPixel << "\n"
+             << "recovered_pid_follow_x = " << recovered.followX << "\n"
+             << "recovered_pid_follow_y = " << recovered.followY << "\n"
+             << "recovered_pid_segment_enabled = " << to_bool_str(recovered.segmentEnabled) << "\n"
+             << "recovered_pid_segment = " << recovered.segment << "\n";
+        const auto& secondary = hk.recovered_secondary_pid;
+        file << "activation_key = " << hk.activation_key << "\n"
+             << "activation_selected = " << to_bool_str(hk.activation_selected) << "\n"
+             << "primary_select_key = " << hk.primary_select_key << "\n"
+             << "secondary_select_key = " << hk.secondary_select_key << "\n"
+             << "recovered_secondary_pid_kp_x = " << secondary.kpX << "\n"
+             << "recovered_secondary_pid_ki_x = " << secondary.kiX << "\n"
+             << "recovered_secondary_pid_kd_x = " << secondary.kdX << "\n"
+             << "recovered_secondary_pid_kp_y = " << secondary.kpY << "\n"
+             << "recovered_secondary_pid_ki_y = " << secondary.kiY << "\n"
+             << "recovered_secondary_pid_kd_y = " << secondary.kdY << "\n"
+             << "recovered_secondary_pid_deadzone_x = " << secondary.deadzoneX << "\n"
+             << "recovered_secondary_pid_deadzone_y = " << secondary.deadzoneY << "\n"
+             << "recovered_secondary_pid_ff_x = " << secondary.feedforwardX << "\n"
+             << "recovered_secondary_pid_ff_y = " << secondary.feedforwardY << "\n"
+             << "recovered_secondary_pid_smooth_max_pixel = " << secondary.smoothMaxPixel << "\n"
+             << "recovered_secondary_pid_follow_x = " << secondary.followX << "\n"
+             << "recovered_secondary_pid_follow_y = " << secondary.followY << "\n"
+             << "recovered_secondary_pid_segment_enabled = " << to_bool_str(secondary.segmentEnabled) << "\n"
+             << "recovered_secondary_pid_segment = " << secondary.segment << "\n";
+        const auto& recoveredScope = hk.recovered_scope_pid;
+        file << "recovered_scope_pid_kp_x = " << recoveredScope.kpX << "\n"
+             << "recovered_scope_pid_ki_x = " << recoveredScope.kiX << "\n"
+             << "recovered_scope_pid_kd_x = " << recoveredScope.kdX << "\n"
+             << "recovered_scope_pid_kp_y = " << recoveredScope.kpY << "\n"
+             << "recovered_scope_pid_ki_y = " << recoveredScope.kiY << "\n"
+             << "recovered_scope_pid_kd_y = " << recoveredScope.kdY << "\n"
+             << "recovered_scope_pid_deadzone_x = " << recoveredScope.deadzoneX << "\n"
+             << "recovered_scope_pid_deadzone_y = " << recoveredScope.deadzoneY << "\n"
+             << "recovered_scope_pid_ff_x = " << recoveredScope.feedforwardX << "\n"
+             << "recovered_scope_pid_ff_y = " << recoveredScope.feedforwardY << "\n"
+             << "recovered_scope_pid_smooth_max_pixel = " << recoveredScope.smoothMaxPixel << "\n"
+             << "recovered_scope_pid_follow_x = " << recoveredScope.followX << "\n"
+             << "recovered_scope_pid_follow_y = " << recoveredScope.followY << "\n"
+             << "recovered_scope_pid_segment_enabled = " << to_bool_str(recoveredScope.segmentEnabled) << "\n"
+             << "recovered_scope_pid_segment = " << recoveredScope.segment << "\n";
         // ── 开镜档 (自动开镜生效期间取代上面的默认档) ────────────────────
         // ★ 键名 = 默认档的键名前缀 "ctl_scope_", 一一对应, 方便手改与对照。
         file << std::fixed << std::setprecision(4)
@@ -1036,6 +1547,23 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_scope_random_seed = "       << hk.ctl_scope.random_seed << "\n";
 
         file << "trigger_enabled = "        << to_bool_str(hk.trigger_enabled) << "\n"
+             << "trigger_mode = " << hk.trigger_mode << "\n"
+             << "trigger_snap_px_per_count = " << hk.trigger_snap_px_per_count << "\n"
+             << "trigger_snap_max_counts = " << hk.trigger_snap_max_counts << "\n"
+             << "trigger_snap_tolerance_px = " << hk.trigger_snap_tolerance_px << "\n"
+             << "trigger_snap_counts_per_second = " << hk.trigger_snap_counts_per_second << "\n"
+             << "trigger_return_counts_per_second = " << hk.trigger_return_counts_per_second << "\n"
+             << "trigger_return_y_percent = " << hk.trigger_return_y_percent << "\n"
+             << "trigger_spin_counts_per_turn = " << hk.trigger_spin_counts_per_turn << "\n"
+             << "trigger_spin_step_degrees = " << hk.trigger_spin_step_degrees << "\n"
+             << "trigger_spin_step_ms = " << hk.trigger_spin_step_ms << "\n"
+             << "trigger_spin_hold_ms = " << hk.trigger_spin_hold_ms << "\n"
+             << "trigger_spin_counts_per_second = " << hk.trigger_spin_counts_per_second << "\n"
+             << "trigger_spin_turns = " << hk.trigger_spin_turns << "\n"
+             << "trigger_snap_fire_hold_ms = " << hk.trigger_snap_fire_hold_ms << "\n"
+             << "trigger_snap_cooldown_ms = " << hk.trigger_snap_cooldown_ms << "\n"
+             << "trigger_flash_disappear_ms = " << hk.trigger_flash_disappear_ms << "\n"
+             << "trigger_classes = " << serialize_trigger_classes(hk.trigger_classes) << "\n"
              << "trigger_fire_delay = "     << hk.trigger_fire_delay << "\n"
              << "trigger_fire_duration = "  << hk.trigger_fire_duration << "\n"
              << "trigger_fire_interval = "  << hk.trigger_fire_interval << "\n"
@@ -1044,13 +1572,52 @@ bool Config::saveConfig(const std::string& filename)
              << "trigger_duration_jitter_ms = " << hk.trigger_duration_jitter_ms << "\n"
              << "trigger_interval_jitter_ms = " << hk.trigger_interval_jitter_ms << "\n"
              << "trigger_switch_cooldown_ms = " << hk.trigger_switch_cooldown_ms << "\n"
+             << "trigger_loss_delay_ms = " << hk.trigger_loss_delay_ms << "\n"
              << "trigger_auto_scope = "     << hk.trigger_auto_scope << "\n"
              << "trigger_scope_delay_ms = " << hk.trigger_scope_delay_ms << "\n"
              << "trigger_auto_stop = "      << hk.trigger_auto_stop << "\n"
-             << "trigger_stop_ms = "        << hk.trigger_stop_ms << "\n"
+             << "trigger_stop_before_ms = " << hk.trigger_stop_before_ms << "\n"
+             << "trigger_stop_after_ms = "  << hk.trigger_stop_after_ms << "\n"
              << "trigger_weapon_switch31 = " << to_bool_str(hk.trigger_weapon_switch31) << "\n"
              << "trigger_switch31_delay_ms = " << hk.trigger_switch31_delay_ms << "\n"
              << "trigger_switch31_step_ms = " << hk.trigger_switch31_step_ms << "\n";
+
+        const auto& t = hk.secondary_trigger;
+        file << "secondary_trigger_custom = " << to_bool_str(hk.secondary_trigger_custom) << "\n"
+             << "secondary_trigger_enabled = " << to_bool_str(t.trigger_enabled) << "\n"
+             << "secondary_trigger_mode = " << t.trigger_mode << "\n"
+             << "secondary_trigger_snap_px_per_count = " << t.trigger_snap_px_per_count << "\n"
+             << "secondary_trigger_snap_max_counts = " << t.trigger_snap_max_counts << "\n"
+             << "secondary_trigger_snap_tolerance_px = " << t.trigger_snap_tolerance_px << "\n"
+             << "secondary_trigger_snap_counts_per_second = " << t.trigger_snap_counts_per_second << "\n"
+             << "secondary_trigger_return_counts_per_second = " << t.trigger_return_counts_per_second << "\n"
+             << "secondary_trigger_return_y_percent = " << t.trigger_return_y_percent << "\n"
+             << "secondary_trigger_spin_counts_per_turn = " << t.trigger_spin_counts_per_turn << "\n"
+             << "secondary_trigger_spin_step_degrees = " << t.trigger_spin_step_degrees << "\n"
+             << "secondary_trigger_spin_step_ms = " << t.trigger_spin_step_ms << "\n"
+             << "secondary_trigger_spin_hold_ms = " << t.trigger_spin_hold_ms << "\n"
+             << "secondary_trigger_spin_counts_per_second = " << t.trigger_spin_counts_per_second << "\n"
+             << "secondary_trigger_spin_turns = " << t.trigger_spin_turns << "\n"
+             << "secondary_trigger_snap_fire_hold_ms = " << t.trigger_snap_fire_hold_ms << "\n"
+             << "secondary_trigger_snap_cooldown_ms = " << t.trigger_snap_cooldown_ms << "\n"
+             << "secondary_trigger_flash_disappear_ms = " << t.trigger_flash_disappear_ms << "\n"
+             << "secondary_trigger_fire_delay = " << t.trigger_fire_delay << "\n"
+             << "secondary_trigger_fire_duration = " << t.trigger_fire_duration << "\n"
+             << "secondary_trigger_fire_interval = " << t.trigger_fire_interval << "\n"
+             << "secondary_trigger_y_percent = " << t.trigger_y_percent << "\n"
+             << "secondary_trigger_delay_jitter_ms = " << t.trigger_delay_jitter_ms << "\n"
+             << "secondary_trigger_duration_jitter_ms = " << t.trigger_duration_jitter_ms << "\n"
+             << "secondary_trigger_interval_jitter_ms = " << t.trigger_interval_jitter_ms << "\n"
+             << "secondary_trigger_switch_cooldown_ms = " << t.trigger_switch_cooldown_ms << "\n"
+             << "secondary_trigger_loss_delay_ms = " << t.trigger_loss_delay_ms << "\n"
+             << "secondary_trigger_auto_scope = " << t.trigger_auto_scope << "\n"
+             << "secondary_trigger_scope_delay_ms = " << t.trigger_scope_delay_ms << "\n"
+             << "secondary_trigger_auto_stop = " << t.trigger_auto_stop << "\n"
+             << "secondary_trigger_stop_before_ms = " << t.trigger_stop_before_ms << "\n"
+             << "secondary_trigger_stop_after_ms = " << t.trigger_stop_after_ms << "\n"
+             << "secondary_trigger_weapon_switch31 = " << to_bool_str(t.trigger_weapon_switch31) << "\n"
+             << "secondary_trigger_switch31_delay_ms = " << t.trigger_switch31_delay_ms << "\n"
+             << "secondary_trigger_switch31_step_ms = " << t.trigger_switch31_step_ms << "\n";
 
         file << "aim_path_mode = "          << hk.aim_path_mode << "\n"
              << "aim_path_influence = "     << hk.aim_path_influence << "\n"
@@ -1112,6 +1679,20 @@ bool Config::saveConfig(const std::string& filename)
              << "v_max = "   << c.v_max   << "\n\n";
     }
 
+    for (size_t i = 0; i < laser_colors.size(); ++i)
+    {
+        const auto& c = laser_colors[i];
+        file << "[laser_color." << i << "]\n"
+             << "name = " << c.name << "\n"
+             << "enabled = " << to_bool_str(c.enabled) << "\n"
+             << "h_low = " << c.h_low << "\n"
+             << "h_high = " << c.h_high << "\n"
+             << "s_min = " << c.s_min << "\n"
+             << "s_max = " << c.s_max << "\n"
+             << "v_min = " << c.v_min << "\n"
+             << "v_max = " << c.v_max << "\n\n";
+    }
+
     file << "[target_stabilizer]\n"
          << "target_hysteresis_ratio = "   << target_hysteresis_ratio << "\n"
          << "target_max_distance_px = "    << target_max_distance_px << "\n"
@@ -1121,8 +1702,29 @@ bool Config::saveConfig(const std::string& filename)
          << "target_min_aspect = "         << target_min_aspect << "\n"
          << "target_max_aspect = "         << target_max_aspect << "\n\n";
 
+    file << "[macro_editor]\n" << "enabled = " << to_bool_str(macro_programs_enabled)
+         << "\nstop_key = " << macro_stop_key << "\ncount = " << macro_programs.size() << "\n\n";
+    for(size_t i=0;i<macro_programs.size();++i) {
+        auto p=macro_programs[i]; macros::normalize(p);
+        file << "[macro." << i << "]\nid = " << p.id << "\nname = " << p.name
+             << "\nenabled = " << to_bool_str(p.enabled) << "\ntrigger = " << p.trigger
+             << "\nblock_trigger = " << to_bool_str(p.blockTrigger)
+             << "\nmode = " << static_cast<int>(p.mode) << "\nloop_interval_ms = " << p.loopIntervalMs
+             << "\ntarget_only = " << to_bool_str(p.targetOnly) << "\nheight_filter = " << to_bool_str(p.heightFilter)
+             << "\nmin_height_percent = " << p.minHeightPercent << "\nmax_height_percent = " << p.maxHeightPercent
+             << "\nclasses = ";
+        for(int id:p.classes) file << id << ' ';
+        file << "\naction_count = " << p.actions.size() << '\n';
+        for(size_t j=0;j<p.actions.size();++j) {
+            const auto& a=p.actions[j]; const auto prefix="action."+std::to_string(j)+".";
+            file << prefix << "type = " << static_cast<int>(a.type) << '\n'
+                 << prefix << "key = " << a.key << '\n' << prefix << "a = " << a.a << '\n'
+                 << prefix << "b = " << a.b << '\n';
+        }
+        file << '\n';
+    }
     file.close();
-    return true;
+    return !file.fail();
 }
 
 void Config::sync_class_filters_from_model(int class_count,

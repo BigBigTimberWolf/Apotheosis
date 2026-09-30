@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/lan">
+    <file alias="index.html">web/index.html</file>
+    <file alias="app.js">web/app.js</file>
+    <file alias="style.css">web/style.css</file>
+  </qresource>
+</RCC>

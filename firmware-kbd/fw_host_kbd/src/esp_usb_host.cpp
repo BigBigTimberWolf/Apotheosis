@@ -299,11 +299,7 @@ void EspUsbHost::onConfig(const uint8_t bDescriptorType, const uint8_t *p)
         descriptor_device.idVendor = dev_desc->idVendor;
         descriptor_device.idProduct = dev_desc->idProduct;
 
-        // ★ 拿到真键盘身份后立刻告知左板 —— 左板正阻塞等这一帧,
-        //   收到后才会用真值去枚举, 所以这里要尽早发。
-        kbdHostSendIdentity(dev_desc->idVendor,
-                            dev_desc->idProduct,
-                            dev_desc->bcdDevice);
+        // 设备角色在接口描述符里，身份帧要等配置解析完再发。
         descriptor_device.bcdDevice = dev_desc->bcdDevice;
         descriptor_device.iManufacturer = dev_desc->iManufacturer;
         descriptor_device.iProduct = dev_desc->iProduct;
@@ -602,6 +598,9 @@ void EspUsbHost::_clientEventCallback(const usb_host_client_event_msg_t *eventMs
         usbHost->hidDescriptorCounter = 0;
         usbHost->unknownDescriptorCounter = 0;
         memset(usbHost->endpoint_data_list, 0, sizeof(usbHost->endpoint_data_list));
+        g_isKeyboard = false;
+        g_isMouse = false;
+        g_kbdInterface = -1;
 
         ESP_LOGD("EspUsbHost", "New device event detected. Raw event message:");
 
@@ -628,9 +627,9 @@ void EspUsbHost::_clientEventCallback(const usb_host_client_event_msg_t *eventMs
             usbHost->device_info.dev_addr = dev_info.dev_addr;
             usbHost->device_info.vMaxPacketSize0 = dev_info.bMaxPacketSize0;
             usbHost->device_info.bConfigurationValue = dev_info.bConfigurationValue;
-            strcpy(usbHost->device_info.str_desc_manufacturer, getUsbDescString(dev_info.str_desc_manufacturer).c_str());
-            strcpy(usbHost->device_info.str_desc_product, getUsbDescString(dev_info.str_desc_product).c_str());
-            strcpy(usbHost->device_info.str_desc_serial_num, getUsbDescString(dev_info.str_desc_serial_num).c_str());
+            strlcpy(usbHost->device_info.str_desc_manufacturer, getUsbDescString(dev_info.str_desc_manufacturer).c_str(), sizeof(usbHost->device_info.str_desc_manufacturer));
+            strlcpy(usbHost->device_info.str_desc_product, getUsbDescString(dev_info.str_desc_product).c_str(), sizeof(usbHost->device_info.str_desc_product));
+            strlcpy(usbHost->device_info.str_desc_serial_num, getUsbDescString(dev_info.str_desc_serial_num).c_str(), sizeof(usbHost->device_info.str_desc_serial_num));
 
             ESP_LOGI("EspUsbHost", "Device info retrieved successfully");
         }
@@ -688,6 +687,11 @@ void EspUsbHost::_clientEventCallback(const usb_host_client_event_msg_t *eventMs
             ESP_LOGI("EspUsbHost::_clientEventCallback", "Configuration descriptor retrieved successfully");
 
             usbHost->_configCallback(config_desc);
+            if (g_isKeyboard || g_isMouse) {
+                kbdHostSendIdentity(usbHost->descriptor_device.idVendor,
+                                    usbHost->descriptor_device.idProduct,
+                                    usbHost->descriptor_device.bcdDevice);
+            }
         }
         else
         {
@@ -704,6 +708,18 @@ void EspUsbHost::_clientEventCallback(const usb_host_client_event_msg_t *eventMs
         usbHost->isReady = false;
         EspUsbHost::deviceConnected = false;
         deviceMouseReady = false;
+
+        // Release the last physical input state before the source disappears.
+        if (g_isKeyboard) {
+            const uint8_t released[8] = {};
+            kbdHostOnRawReport(released, sizeof(released));
+        } else if (g_isMouse) {
+            const uint8_t released[4] = {};
+            kbdHostOnRawReport(released, sizeof(released));
+        }
+        g_isKeyboard = false;
+        g_isMouse = false;
+        g_kbdInterface = -1;
 
         // 通知 Device 侧外设已拔出
         usbHost->serial1Send("USB_GOODBYE\n");

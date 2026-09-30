@@ -7,31 +7,57 @@
 namespace boss
 {
 
-// 自动急停: 开火那一拍屏蔽真实键盘输入 N 毫秒。
-//
-// 语义已从"注入反向键刹车"改为"屏蔽真实键盘输入"。固件侧屏蔽窗口自带硬超时
-// (上限 2000ms), 这里只做本地记账, 避免在窗口内重复下发 km.mask —— 重复下发
-// 虽被固件拒绝重入, 但会在链路上产生无谓流量。
+// 自动急停: 开枪前开始屏蔽，在开枪后指定时间下发 maskoff。
+// MAKCUNEW 固件有超时；KMBoxNet 按键屏蔽需要显式解除。
 class AutoStopController
 {
 public:
+    enum class Phase { Idle, Preparing, AfterFire, Continuous };
+
     void reset()
     {
-        mask_until_ms_ = 0;
+        phase_ = Phase::Idle;
+        cancel_at_ms_ = 0;
     }
 
-    bool maskActive(int64_t now_ms) const
+    bool active() const { return phase_ != Phase::Idle; }
+    bool preparing() const { return phase_ == Phase::Preparing; }
+    bool continuous() const { return phase_ == Phase::Continuous; }
+    Phase phase() const { return phase_; }
+
+    void markPrepared()
     {
-        return mask_until_ms_ != 0 && now_ms < mask_until_ms_;
+        phase_ = Phase::Preparing;
+        cancel_at_ms_ = 0;
     }
 
-    void markMasked(int64_t now_ms, int duration_ms)
+    void markFired(int64_t now_ms, int after_ms)
     {
-        mask_until_ms_ = now_ms + std::max<int64_t>(0, duration_ms);
+        phase_ = Phase::AfterFire;
+        cancel_at_ms_ = now_ms + std::max(0, after_ms);
+    }
+
+    void markContinuous(int64_t now_ms)
+    {
+        phase_ = Phase::Continuous;
+        // Firmware cannot extend an active mask and hard-stops after 2 s.
+        // Refresh before that limit by explicitly releasing and restarting it.
+        cancel_at_ms_ = now_ms + 1500;
+    }
+
+    bool continuousNeedsRefresh(int64_t now_ms) const
+    {
+        return continuous() && now_ms >= cancel_at_ms_;
+    }
+
+    bool shouldCancel(int64_t now_ms) const
+    {
+        return phase_ == Phase::AfterFire && now_ms >= cancel_at_ms_;
     }
 
 private:
-    int64_t mask_until_ms_ = 0;   // 屏蔽模式: 本地记账的窗口截止时刻
+    Phase phase_ = Phase::Idle;
+    int64_t cancel_at_ms_ = 0;
 };
 
 }

@@ -8,12 +8,14 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPropertyAnimation>
+#include <QProgressDialog>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <chrono>
+#include <algorithm>
 #include <mutex>
 
 #include "Apotheosis.h"
@@ -25,7 +27,10 @@
 #include "config/ConfigManager.h"
 #include "detector/i_detector.h"
 #include "runtime/inference_session.h"
+#include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
+#include "runtime/sched_boost.h"
+#include "tensorrt/trt_monitor.h"
 #include "widgets/StatusBar.h"
 #include "widgets/TopNavBar.h"
 #include "widgets/SideNav.h"
@@ -39,7 +44,11 @@
 #include "pages/AiModelPage.h"
 
 #include "pages/CrosshairPage.h"
-#include "pages/StabilizerPage.h"
+#include "pages/AimpointRecoilPage.h"
+#include "pages/AutoFlashPage.h"
+#include "pages/MacroPage.h"
+#include "pages/HeadBodyFusionPage.h"
+#include "pages/LanTuningPage.h"
 #include "pages/StatsPage.h"
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
@@ -67,10 +76,8 @@ const QVector<GroupDef>& navGroups() {
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
           QStringLiteral("cpu")}},
         {QString::fromUtf8(u8"控制"),
-         {QString::fromUtf8(u8"瞄准设置"), QString::fromUtf8(u8"准星找色"),
-          QString::fromUtf8(u8"稳定器")},
-         {QStringLiteral("crosshair"), QStringLiteral("color-swatch"),
-          QStringLiteral("layers-intersect")}},
+         {QString::fromUtf8(u8"瞄准设置"), QString::fromUtf8(u8"瞄点压枪"), QString::fromUtf8(u8"准星找色"), QString::fromUtf8(u8"自动爆闪"), QString::fromUtf8(u8"镭射找色"), QString::fromUtf8(u8"头身融合"), QString::fromUtf8(u8"宏编排"), QString::fromUtf8(u8"局域网调参")},
+         {QStringLiteral("crosshair"), QStringLiteral("target"), QStringLiteral("color-swatch"), QStringLiteral("keyboard"), QStringLiteral("target"), QStringLiteral("target"), QStringLiteral("keyboard"), QStringLiteral("device-desktop")}},
         {QString::fromUtf8(u8"监控"),
          {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
           QString::fromUtf8(u8"调试")},
@@ -137,6 +144,20 @@ MainWindow::MainWindow(QWidget* parent)
 
     setupPages();
 
+    connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
+            this, [this] {
+        bool boosted = false;
+        bool mmcss = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            boosted = config.use_process_boost;
+            mmcss = config.use_mmcss;
+        }
+        sched_boost::boostProcessPriority(boosted);
+        capture_method_changed.store(true);
+        if (m_overviewPage) m_overviewPage->setPerformanceMode(boosted && mmcss);
+    });
+
     m_statusBar->setInferenceStatus(false);
     m_statusBar->setBackend("TRT");
 
@@ -198,6 +219,29 @@ void MainWindow::setupPages() {
                     this, &MainWindow::onHeroToggleInference);
             connect(m_overviewPage, &OverviewPage::previewRequested,
                     this, [] { ConfigManager::instance().setShowWindow(true); });
+            connect(m_overviewPage, &OverviewPage::performanceModeRequested,
+                    this, [this](bool enabled) {
+                if (!sched_boost::boostProcessPriority(enabled)) {
+                    QMessageBox::warning(this, QString::fromUtf8(u8"性能模式"),
+                        QString::fromUtf8(u8"无法调整进程优先级。"));
+                    return;
+                }
+                {
+                    std::lock_guard<std::recursive_mutex> lock(configMutex);
+                    config.use_process_boost = enabled;
+                    config.use_mmcss = enabled;
+                    config.mmcss_task_name = "Games";
+                }
+                ConfigBridge::instance().markDirty();
+                // The MF source reader's MMCSS class is fixed at creation.
+                // Reopen capture so the mode switch covers its callback too.
+                capture_method_changed.store(true);
+                m_overviewPage->setPerformanceMode(enabled);
+            });
+            {
+                std::lock_guard<std::recursive_mutex> lock(configMutex);
+                m_overviewPage->setPerformanceMode(config.use_process_boost && config.use_mmcss);
+            }
             m_pageStack->addWidget(m_overviewPage);
             range.count = 1;
             ++pageIndex;
@@ -569,6 +613,100 @@ void MainWindow::pollSessionOperation()
     }
 }
 
+void MainWindow::pollTrtBuildProgress()
+{
+    const TrtBuildSnapshot build = TrtBuildRead();
+    if (build.generation == 0) return;
+
+    if (build.generation != m_trtBuildGeneration)
+    {
+        m_trtBuildGeneration = build.generation;
+        m_trtBuildFinishedMs = 0;
+        if (!m_trtBuildDialog)
+        {
+            m_trtBuildDialog = new QProgressDialog(this);
+            m_trtBuildDialog->setWindowTitle(QString::fromUtf8(u8"TensorRT 引擎构建"));
+            m_trtBuildDialog->setCancelButton(nullptr);
+            m_trtBuildDialog->setAutoClose(false);
+            m_trtBuildDialog->setAutoReset(false);
+            m_trtBuildDialog->setMinimumDuration(0);
+            m_trtBuildDialog->setMinimumWidth(470);
+        }
+        if (build.active || build.stage == TrtBuildStage::Failed)
+            m_trtBuildDialog->show();
+    }
+    if (!m_trtBuildDialog || !m_trtBuildDialog->isVisible()) return;
+
+    const struct { TrtBuildStage stage; const char* name; } stages[] = {
+        {TrtBuildStage::Reading, u8"读取模型"},
+        {TrtBuildStage::Parsing, u8"解析 ONNX"},
+        {TrtBuildStage::Configuring, u8"配置引擎"},
+        {TrtBuildStage::Optimizing, u8"TensorRT 优化"},
+        {TrtBuildStage::Loading, u8"加载引擎"},
+        {TrtBuildStage::Saving, u8"保存缓存"},
+    };
+    int stageIndex = 0;
+    QString stageName;
+    for (int i = 0; i < 6; ++i)
+        if (build.stage == stages[i].stage)
+        {
+            stageIndex = i + 1;
+            stageName = QString::fromUtf8(stages[i].name);
+            break;
+        }
+
+    QString label = QString::fromUtf8(u8"模型：%1\n").arg(QString::fromUtf8(build.model.c_str()));
+    if (build.active)
+    {
+        label += QString::fromUtf8(u8"阶段 %1/6：%2\n").arg(stageIndex).arg(stageName);
+        QStringList stageTrail;
+        for (int i = 0; i < 6; ++i)
+        {
+            const QString marker = i + 1 < stageIndex ? QString::fromUtf8(u8"✓")
+                : (i + 1 == stageIndex ? QString::fromUtf8(u8"●")
+                                       : QString::fromUtf8(u8"○"));
+            stageTrail << marker + QString::fromUtf8(stages[i].name);
+        }
+        label += stageTrail.mid(0, 3).join(QStringLiteral("  ")) + QLatin1Char('\n');
+        label += stageTrail.mid(3, 3).join(QStringLiteral("  ")) + QLatin1Char('\n');
+        if (!build.trtPhase.empty())
+        {
+            label += QString::fromUtf8(u8"TensorRT 内部阶段：%1").arg(
+                QString::fromUtf8(build.trtPhase.c_str()));
+            if (build.phaseMax > 0)
+                label += QStringLiteral("  %1/%2").arg(build.phaseStep).arg(build.phaseMax);
+            label += QLatin1Char('\n');
+        }
+        if (!build.detail.empty())
+            label += QString::fromUtf8(build.detail.c_str()) + QLatin1Char('\n');
+        const long long elapsed = std::max(0LL, TrtNowMs() - build.startedMs) / 1000;
+        label += QString::fromUtf8(u8"已用 %1 秒").arg(elapsed);
+        if (build.stage == TrtBuildStage::Optimizing && build.phaseMax > 0)
+        {
+            m_trtBuildDialog->setRange(0, build.phaseMax);
+            m_trtBuildDialog->setValue(build.phaseStep);
+        }
+        else
+        {
+            m_trtBuildDialog->setRange(0, 0);
+        }
+    }
+    else
+    {
+        const bool success = build.stage == TrtBuildStage::Complete;
+        label += success ? QString::fromUtf8(u8"引擎构建完成")
+                         : QString::fromUtf8(u8"引擎构建失败");
+        if (!build.detail.empty())
+            label += QString::fromUtf8(u8"：") + QString::fromUtf8(build.detail.c_str());
+        m_trtBuildDialog->setRange(0, 1);
+        m_trtBuildDialog->setValue(success ? 1 : 0);
+        if (m_trtBuildFinishedMs == 0) m_trtBuildFinishedMs = TrtNowMs();
+        if (TrtNowMs() - m_trtBuildFinishedMs >= (success ? 1500 : 4000))
+            m_trtBuildDialog->hide();
+    }
+    m_trtBuildDialog->setLabelText(label);
+}
+
 QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"推理启动"))   return new SessionPage();
     if (name == QString::fromUtf8(u8"模型工具"))   return new ModelToolsPage();
@@ -577,8 +715,13 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"硬件"))       return new HardwarePage();
     if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
     if (name == QString::fromUtf8(u8"瞄准设置")) { m_hotkeyPage = new AimSettingsPage(); return m_hotkeyPage; }
+    if (name == QString::fromUtf8(u8"瞄点压枪")) return new AimpointRecoilPage();
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
-    if (name == QString::fromUtf8(u8"稳定器"))     return new StabilizerPage();
+    if (name == QString::fromUtf8(u8"自动爆闪"))   return new AutoFlashPage();
+    if (name == QString::fromUtf8(u8"镭射找色"))   return new CrosshairPage(nullptr, true);
+    if (name == QString::fromUtf8(u8"宏编排"))     return new MacroPage();
+    if (name == QString::fromUtf8(u8"头身融合"))   return new HeadBodyFusionPage();
+    if (name == QString::fromUtf8(u8"局域网调参")) return new LanTuningPage();
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }
@@ -587,6 +730,9 @@ QWidget* MainWindow::createPage(const QString& name) {
 }
 
 void MainWindow::pollMonitorTelemetry() {
+    if (runtime::g_hotkey_activation_dirty.exchange(false))
+        ConfigBridge::instance().markDirty();
+    pollTrtBuildProgress();
     pollSessionOperation();
     if (g_inference_session && session_stop_requested.load()
         && m_cleanupRequested && !m_sessionOperation.valid())
@@ -597,18 +743,21 @@ void MainWindow::pollMonitorTelemetry() {
     const double sourceFps = static_cast<double>(captureSourceFps.load());
 
     const auto probe = runtime::latency::snapshot();
-    const bool hasProbe = probe.frames_consumed > 0 && fps > 0.0;
-    const double cap_ms        = hasProbe ? probe.stages[runtime::latency::kCaptureWait].ema_ms : -1.0;
-    const double total_ms      = hasProbe ? probe.stages[runtime::latency::kTotal].ema_ms : -1.0;
-    const double infer_chain_ms = hasProbe ? probe.stages[runtime::latency::kInference].ema_ms : -1.0;
-    const double pub2aim_ms    = hasProbe ? probe.stages[runtime::latency::kPublishToAim].ema_ms : -1.0;
-    const double e2e_ms = hasProbe && probe.stages[runtime::latency::kEndToEnd].n > 0
-        ? probe.stages[runtime::latency::kEndToEnd].ema_ms : -1.0;
-    const int deviceAgeUs = probe.device_frame_age_us;
-
-    const double infer_ms = probe.engine_inference_ms;
-
     const bool running = g_inference_session && g_inference_session->running();
+    // Capture and inference samples are available before any aim hotkey is
+    // active. frames_consumed only advances in the aim loop, so gating every
+    // latency row on it hid valid measurements while detection was running.
+    const auto stageMs = [&](runtime::latency::StageId stage) {
+        return running && probe.stages[stage].n > 0
+            ? probe.stages[stage].ema_ms : -1.0;
+    };
+    const double cap_ms = stageMs(runtime::latency::kCaptureWait);
+    const double infer_chain_ms = stageMs(runtime::latency::kInference);
+    const double pub2aim_ms = stageMs(runtime::latency::kPublishToAim);
+    const double total_ms = stageMs(runtime::latency::kTotal);
+    const double e2e_ms = stageMs(runtime::latency::kEndToEnd);
+    const int deviceAgeUs = running ? probe.device_frame_age_us : -1;
+    const double infer_ms = running ? probe.engine_inference_ms : -1.0;
 
     if (running && !m_sessionRunning)
         m_sessionStart = std::chrono::steady_clock::now();
@@ -666,6 +815,17 @@ void MainWindow::pollMonitorTelemetry() {
         m_statsPage->setTotalLatency(total_ms);
         m_statsPage->setCaptureChainDiagnostics(deviceAgeUs, cap_ms, infer_chain_ms,
                                                 pub2aim_ms, e2e_ms);
+        const bool hasPipeline = running && probe.gpu_pipeline.n > 0;
+        const bool hasBreakdown = hasPipeline && !probe.last_timing_was_graph;
+        m_statsPage->setPipelineDiagnostics(
+            hasPipeline ? probe.gpu_pipeline.ema_ms : -1.0,
+            hasBreakdown ? probe.gpu_preprocess.ema_ms : -1.0,
+            hasBreakdown ? probe.gpu_engine.ema_ms : -1.0,
+            hasBreakdown ? probe.gpu_copy.ema_ms : -1.0,
+            hasPipeline ? probe.cpu_postprocess.ema_ms : -1.0,
+            hasPipeline ? probe.aim_tick.ema_ms : -1.0,
+            hasPipeline ? probe.aim_tick.max_ms : -1.0,
+            hasPipeline && probe.last_timing_was_graph);
         m_statsPage->setGpuMemory(QStringLiteral("%1 MB").arg(gpuMb));
         m_statsPage->setCpuCores(QString::number(cpuCores));
     }

@@ -36,15 +36,15 @@ void ReplayBuffer::setRetentionSeconds(int seconds)
     retention_seconds_ = std::clamp(seconds, 1, 60);
 }
 
-void ReplayBuffer::push(const ReplayFrame& frame)
+void ReplayBuffer::push(ReplayFrame frame)
 {
     std::lock_guard<std::mutex> lk(mu_);
     if (!enabled_)
         return;
 
-    frames_.push_back(frame);
+    frames_.push_back(std::move(frame));
 
-    const auto cutoff = frame.ts - std::chrono::seconds(retention_seconds_);
+    const auto cutoff = frames_.back().ts - std::chrono::seconds(retention_seconds_);
     while (!frames_.empty() && frames_.front().ts < cutoff)
         frames_.pop_front();
 }

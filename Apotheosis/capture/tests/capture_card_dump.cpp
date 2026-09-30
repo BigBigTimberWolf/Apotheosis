@@ -32,8 +32,11 @@ std::string WideToUtf8(const wchar_t* text)
     const int required = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
     if (required <= 1)
         return std::string();
-    std::string result(static_cast<size_t>(required - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), required, nullptr, nullptr);
+    std::string result(static_cast<size_t>(required), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), required,
+                            nullptr, nullptr) == 0)
+        return {};
+    result.resize(static_cast<size_t>(required - 1));
     return result;
 }
 

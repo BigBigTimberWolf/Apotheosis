@@ -271,11 +271,38 @@ namespace makcu {
         return bytesWritten == static_cast<ssize_t>(fullCommand.length());
     }
 
+    std::future<std::string> SerialPort::sendPlainQuery(
+        const std::string& command, std::chrono::milliseconds timeout) {
+        if (!m_isOpen.load(std::memory_order_acquire)) {
+            std::promise<std::string> promise;
+            promise.set_exception(std::make_exception_ptr(std::runtime_error("Port not open")));
+            return promise.get_future();
+        }
+        const int cmdId = generateCommandId();
+        auto pending = std::make_unique<PendingCommand>(cmdId, command, true, timeout);
+        auto future = pending->promise.get_future();
+        {
+            std::lock_guard<std::mutex> lock(m_commandMutex);
+            m_pendingCommands[cmdId] = std::move(pending);
+        }
+        if (!sendCommand(command)) {
+            std::lock_guard<std::mutex> lock(m_commandMutex);
+            auto it = m_pendingCommands.find(cmdId);
+            if (it != m_pendingCommands.end()) {
+                it->second->promise.set_exception(
+                    std::make_exception_ptr(std::runtime_error("Plain query write failed")));
+                m_pendingCommands.erase(it);
+            }
+        }
+        return future;
+    }
+
     void SerialPort::listenerLoop() {
         // Optimized read buffers (shared logic)
         std::vector<uint8_t> readBuffer(BUFFER_SIZE);
         std::vector<uint8_t> lineBuffer(LINE_BUFFER_SIZE);
         size_t linePos = 0;
+        bool streamTerminators = false;
 
         auto lastCleanup = std::chrono::steady_clock::now();
         constexpr auto cleanupInterval = std::chrono::milliseconds(50);
@@ -285,6 +312,10 @@ namespace makcu {
                 // Unified bytes available check
                 size_t bytesAvailable = platformBytesAvailable();
                 if (bytesAvailable == 0) {
+                    const auto now=std::chrono::steady_clock::now();
+                    if(now-lastCleanup>cleanupInterval) {
+                        cleanupTimedOutCommands(); lastCleanup=now;
+                    }
                     std::this_thread::sleep_for(std::chrono::microseconds(500));
                     continue;
                 }
@@ -301,6 +332,21 @@ namespace makcu {
                 // Shared byte processing logic
                 for (ssize_t i = 0; i < bytesRead; ++i) {
                     uint8_t byte = readBuffer[i];
+
+                    if(streamTerminators) {
+                        if(byte=='\r' || byte=='\n') continue;
+                        streamTerminators=false;
+                    }
+                    const bool framedButton=linePos>=3 && lineBuffer[linePos-3]=='k' &&
+                        lineBuffer[linePos-2]=='m' && lineBuffer[linePos-1]=='.' && byte<32;
+                    if(m_buttonStreamEnabled && framedButton) {
+                        handleButtonData(byte); linePos=0; streamTerminators=true; continue;
+                    }
+                    // Bare 0x0A/0x0D are valid multi-button states, not line
+                    // endings, unless an actual ASCII response is in progress.
+                    if(m_buttonStreamEnabled && linePos==0 && byte<32) {
+                        handleButtonData(byte); continue;
+                    }
 
                     // Handle button data (non-printable characters < 32, except CR/LF)
                     if (byte < 32 && byte != 0x0D && byte != 0x0A) {
@@ -440,6 +486,22 @@ namespace makcu {
         std::lock_guard<std::mutex> lock(m_commandMutex);
         if (!m_pendingCommands.empty()) {
             auto it = m_pendingCommands.begin();
+            if (content == it->second->command || content == ">>> " || content == ">>>")
+                return;
+            if (it->second->command == "km.version()" &&
+                content.find("MAKCU") == std::string::npos)
+                return;
+            // A lock getter may echo its request before returning a value.
+            // Unknown-command echoes must never complete it as a successful reply.
+            const auto& command=it->second->command;
+            if(command.rfind("km.lock_",0)==0 && command.size()>=2 &&
+                command.compare(command.size()-2,2,"()")==0) {
+                const auto first=content.find_first_not_of(" \r\n\t");
+                const auto last=content.find_last_not_of(" \r\n\t");
+                const auto value=first==std::string::npos ? std::string{} : content.substr(first,last-first+1);
+                const auto prefix=command.substr(0,command.size()-2);
+                if(value!="0" && value!="1" && value!=prefix+"(0)" && value!=prefix+"(1)") return;
+            }
             try {
                 it->second->promise.set_value(content);
             }

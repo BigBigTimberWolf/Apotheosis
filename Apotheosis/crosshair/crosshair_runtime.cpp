@@ -9,6 +9,7 @@
 
 #include "Apotheosis.h"
 #include "config.h"
+#include "laser_detector.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/active_hotkey.h"
 #include "capture/gpu_color_ops.h"
@@ -27,6 +28,33 @@ PivotSnapshot g_snap{};
 PivotSnapshot g_static_ref{};
 
 crosshair::CrosshairDetector  g_detector;
+crosshair::LaserDetector g_laser_detector;
+
+struct LaserSmoother {
+    double x = 0.0, y = 0.0, dx = 0.0, dy = 0.0, last = -1.0;
+    void reset() { last = -1.0; }
+    cv::Point2f filter(cv::Point2f p, double t, double strength) {
+        if (last < 0.0 || t - last > 0.15) {
+            x = p.x; y = p.y; dx = dy = 0.0; last = t; return p;
+        }
+        const double dt = std::clamp(t - last, 1.0 / 1000.0, 0.1);
+        last = t;
+        const auto alpha = [dt](double cutoff) {
+            return 1.0 / (1.0 + 1.0 / (2.0 * 3.14159265358979323846 * cutoff * dt));
+        };
+        const double da = alpha(1.0);
+        dx += da * ((p.x - x) / dt - dx);
+        dy += da * ((p.y - y) / dt - dy);
+        const double cutoff = std::max(0.5, (1.0 - strength) * 8.0) + 0.04 * std::hypot(dx, dy);
+        const double a = alpha(cutoff);
+        x += a * (p.x - x); y += a * (p.y - y);
+        return {static_cast<float>(x), static_cast<float>(y)};
+    }
+};
+LaserSmoother g_laser_smoother;
+std::mutex g_laser_mutex;
+int g_laser_hotkey = -1;
+int g_last_gpu_hotkey = -1;
 
 constexpr int kMaxGpuBands = 16;
 
@@ -35,6 +63,9 @@ struct GpuDetectorState
     cudaStream_t stream = nullptr;
     GpuHsvBand* device_bands = nullptr;
     int* device_result = nullptr;
+    unsigned long long* device_key = nullptr;
+    unsigned char* device_mask = nullptr;
+    unsigned char* device_scratch = nullptr;
     int* host_result = nullptr;
     bool initialized = false;
 
@@ -46,6 +77,9 @@ struct GpuDetectorState
         if (cudaMalloc(reinterpret_cast<void**>(&device_bands),
                        sizeof(GpuHsvBand) * kMaxGpuBands) != cudaSuccess
             || cudaMalloc(reinterpret_cast<void**>(&device_result), sizeof(int) * 4) != cudaSuccess
+            || cudaMalloc(reinterpret_cast<void**>(&device_key), sizeof(unsigned long long)) != cudaSuccess
+            || cudaMalloc(reinterpret_cast<void**>(&device_mask), 512 * 512) != cudaSuccess
+            || cudaMalloc(reinterpret_cast<void**>(&device_scratch), 512 * 512) != cudaSuccess
             || cudaMallocHost(reinterpret_cast<void**>(&host_result), sizeof(int) * 4) != cudaSuccess)
             return false;
         initialized = true;
@@ -101,6 +135,13 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
     }
 
     const int active_idx = runtime::g_active_hotkey_index.load();
+    {
+        std::lock_guard<std::mutex> lock(g_laser_mutex);
+        if (g_laser_hotkey != active_idx) {
+            g_laser_smoother.reset();
+            g_laser_hotkey = active_idx;
+        }
+    }
     if (active_idx < 0)
     {
         publish(PivotSnapshot{});
@@ -111,21 +152,27 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
         if (detectionBuffer.boxes.empty())
         {
+            { std::lock_guard<std::mutex> lock(g_laser_mutex); g_laser_smoother.reset(); }
             publish(PivotSnapshot{});
             return;
         }
 
         if (detectionBuffer.staleLocked())
         {
+            { std::lock_guard<std::mutex> lock(g_laser_mutex); g_laser_smoother.reset(); }
             publish(PivotSnapshot{});
             return;
         }
     }
 
     bool cross_enabled = false;
+    bool laser_enabled = false;
     bool cross_has_color = false;
+    bool laser_has_color = false;
 
     crosshair::CrosshairDetectorSettings cross_settings;
+    crosshair::LaserDetectorSettings laser_settings;
+    float laser_smooth = 0.0f;
 
     {
         const auto snapshot = runtime_config::read();
@@ -137,15 +184,42 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         }
         const auto& hk = cfg.hotkeys[active_idx];
         cross_enabled = hk.crosshair_detect_enabled;
-        if (!cross_enabled)
+        laser_enabled = hk.laser_detect_enabled && !cross_enabled;
+        if (!cross_enabled && !laser_enabled)
         {
             publish(PivotSnapshot{});
             return;
         }
 
-        cross_settings.enabled         = true;
+        if (laser_enabled) {
+            laser_settings.enabled = true;
+            laser_settings.rect_w = cfg.laser_rect_w;
+            laser_settings.rect_h = cfg.laser_rect_h;
+            laser_settings.center_x = cfg.laser_center_x;
+            laser_settings.center_y = cfg.laser_center_y;
+            laser_settings.target_center_x = cfg.laser_target_center_x;
+            laser_settings.target_center_y = cfg.laser_target_center_y;
+            laser_settings.target_rect_w = cfg.laser_target_rect_w;
+            laser_settings.target_rect_h = cfg.laser_target_rect_h;
+            laser_settings.min_pixel_count = cfg.laser_min_pixel_count;
+            laser_settings.close_radius = cfg.laser_close_radius;
+            laser_settings.min_elongation = cfg.laser_min_elongation;
+            laser_smooth = cfg.laser_smooth;
+            for (const auto& c : cfg.laser_colors) {
+                crosshair::CrosshairColorBand b;
+                b.name = c.name; b.enabled = c.enabled;
+                b.h_low = c.h_low; b.h_high = c.h_high;
+                b.s_min = c.s_min; b.s_max = c.s_max;
+                b.v_min = c.v_min; b.v_max = c.v_max;
+                laser_has_color = laser_has_color || b.enabled;
+                laser_settings.colors.push_back(std::move(b));
+            }
+        }
+
+        cross_settings.enabled         = cross_enabled;
         cross_settings.rect_w          = cfg.crosshair_rect_w;
         cross_settings.rect_h          = cfg.crosshair_rect_h;
+        cross_settings.offset_y        = cfg.crosshair_offset_y;
         cross_settings.min_pixel_count = cfg.crosshair_min_pixel_count;
         cross_settings.close_radius    = cfg.crosshair_close_radius;
         cross_settings.colors.reserve(cfg.crosshair_colors.size());
@@ -164,34 +238,26 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
     std::optional<cv::Point2f> hit;
     if (cross_enabled && cross_has_color)
         hit = g_detector.detect(bgrFrame, cross_settings);
+    else if (laser_enabled && laser_has_color)
+        hit = g_laser_detector.detect(bgrFrame, laser_settings);
+
+    {
+        std::lock_guard<std::mutex> lock(g_laser_mutex);
+        if (laser_enabled && hit && laser_smooth > 0.001f) {
+            const double t = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            *hit = g_laser_smoother.filter(*hit, t, laser_smooth);
+        } else if (!laser_enabled || !hit) g_laser_smoother.reset();
+    }
 
     PivotSnapshot snap;
     snap.ts = captured_ns > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(captured_ns))
                               : std::chrono::steady_clock::now();
-    static int s_lost_frames = 0;
-    static cv::Point2f s_last_valid_hit(0, 0);
-
     if (hit)
     {
         snap.x = static_cast<double>(hit->x);
         snap.y = static_cast<double>(hit->y);
         snap.valid = true;
-        s_last_valid_hit = *hit;
-        s_lost_frames = 0;
-    }
-    else
-    {
-        if (s_lost_frames < 3 && s_last_valid_hit.x > 1.0f)
-        {
-            snap.x = static_cast<double>(s_last_valid_hit.x);
-            snap.y = static_cast<double>(s_last_valid_hit.y);
-            snap.valid = true;
-            s_lost_frames++;
-        }
-        else
-        {
-            snap.valid = false;
-        }
     }
     publish(snap);
 }
@@ -207,7 +273,12 @@ bool gpu_path_active()
 
 bool cpu_path_active()
 {
-    return false;
+    const int active_idx = runtime::g_active_hotkey_index.load();
+    if (active_idx < 0) return false;
+    const auto snapshot = runtime_config::read();
+    if (!snapshot || active_idx >= static_cast<int>(snapshot->hotkeys.size())) return false;
+    const auto& hk = snapshot->hotkeys[active_idx];
+    return hk.laser_detect_enabled && !hk.crosshair_detect_enabled;
 }
 
 void process_gpu_frame(const GpuImage& frame)
@@ -215,6 +286,7 @@ void process_gpu_frame(const GpuImage& frame)
     if (frame.empty() || frame.channels() != 3 || !gpu_path_active()
         || !target_gate_open())
     {
+        g_last_gpu_hotkey = -1;
         publish(PivotSnapshot{});
         return;
     }
@@ -246,7 +318,26 @@ void process_gpu_frame(const GpuImage& frame)
     const int roi_w = std::min(frame.cols(), std::max(4, snapshot->crosshair_rect_w));
     const int roi_h = std::min(frame.rows(), std::max(4, snapshot->crosshair_rect_h));
     const int roi_x = std::clamp(frame.cols() / 2 - roi_w / 2, 0, frame.cols() - roi_w);
-    const int roi_y = std::clamp(frame.rows() / 2 - roi_h + 10, 0, frame.rows() - roi_h);
+    const int roi_y = std::clamp(frame.rows() / 2 - roi_h + 10 + snapshot->crosshair_offset_y,
+                                 0, frame.rows() - roi_h);
+
+    int reference_x = frame.cols() / 2;
+    int reference_y = frame.rows() / 2;
+    const auto previous = read();
+    const auto frame_time = frame.captureNs() > 0
+        ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(frame.captureNs()))
+        : std::chrono::steady_clock::now();
+    const auto previous_age = frame_time - previous.ts;
+    if (g_last_gpu_hotkey == active_idx && previous.valid
+        && previous_age >= std::chrono::steady_clock::duration::zero()
+        && previous_age <= std::chrono::milliseconds(kFreshnessMs)
+        && previous.x >= roi_x && previous.x < roi_x + roi_w
+        && previous.y >= roi_y && previous.y < roi_y + roi_h)
+    {
+        reference_x = static_cast<int>(std::lround(previous.x));
+        reference_y = static_cast<int>(std::lround(previous.y));
+    }
+    g_last_gpu_hotkey = active_idx;
 
     auto& state = gpu_state();
     if (!state.ensure())
@@ -259,7 +350,8 @@ void process_gpu_frame(const GpuImage& frame)
     if (cudaMemcpyAsync(state.device_bands, bands.data(),
                         bands.size() * sizeof(GpuHsvBand), cudaMemcpyHostToDevice,
                         state.stream) != cudaSuccess
-        || cudaMemsetAsync(state.device_result, 0, sizeof(int) * 4, state.stream) != cudaSuccess)
+        || cudaMemsetAsync(state.device_result, 0, sizeof(int) * 4, state.stream) != cudaSuccess
+        || cudaMemsetAsync(state.device_key, 0, sizeof(unsigned long long), state.stream) != cudaSuccess)
     {
         publish(PivotSnapshot{});
         return;
@@ -269,7 +361,11 @@ void process_gpu_frame(const GpuImage& frame)
         frame.data(), frame.step(), frame.cols(), frame.rows(),
         roi_x, roi_y, roi_w, roi_h,
         state.device_bands, static_cast<int>(bands.size()),
-        state.device_result, state.stream);
+        state.device_result, state.device_key,
+        state.device_mask, state.device_scratch,
+        std::clamp(snapshot->crosshair_close_radius, 0, 7),
+        std::max(1, snapshot->crosshair_min_pixel_count),
+        reference_x, reference_y, state.stream);
     if (cudaGetLastError() != cudaSuccess
         || cudaMemcpyAsync(state.host_result, state.device_result, sizeof(int) * 4,
                            cudaMemcpyDeviceToHost, state.stream) != cudaSuccess
@@ -298,16 +394,6 @@ void process_gpu_frame(const GpuImage& frame)
             out.x = hit.x;
             out.y = hit.y;
             out.valid = true;
-        }
-    }
-    if (!out.valid)
-    {
-        const PivotSnapshot previous = read();
-        if (previous.valid
-            && out.ts - previous.ts <= std::chrono::milliseconds(kFreshnessMs))
-        {
-            publish(previous);
-            return;
         }
     }
     publish(out);

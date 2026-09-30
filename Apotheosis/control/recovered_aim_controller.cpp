@@ -1,0 +1,293 @@
+#include "recovered_aim_controller.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace control {
+namespace {
+
+double distanceToBox(const Vec2& point, const Box& box)
+{
+    const double dx = std::max({ box.x - point.x, 0.0, point.x - (box.x + box.w) });
+    const double dy = std::max({ box.y - point.y, 0.0, point.y - (box.y + box.h) });
+    return std::hypot(dx, dy);
+}
+
+size_t chooseFresh(const std::vector<RecoveredTrack>& tracks,
+                   const std::vector<size_t>& indices, const Vec2& cross)
+{
+    double minDistance = std::numeric_limits<double>::infinity();
+    double maxDistance = 0.0;
+    double minArea = std::numeric_limits<double>::infinity();
+    double maxArea = 0.0;
+    for (size_t index : indices)
+    {
+        const double d = distanceToBox(cross, tracks[index].box);
+        const double a = tracks[index].box.area();
+        minDistance = std::min(minDistance, d);
+        maxDistance = std::max(maxDistance, d);
+        minArea = std::min(minArea, a);
+        maxArea = std::max(maxArea, a);
+    }
+    auto better = [&](size_t a, size_t b) {
+        const double da = distanceToBox(cross, tracks[a].box);
+        const double db = distanceToBox(cross, tracks[b].box);
+        const double aa = tracks[a].box.area(), ab = tracks[b].box.area();
+        const double nearA = maxDistance - minDistance > 0.001
+            ? std::clamp(1.0 - (da - minDistance) / (maxDistance - minDistance), 0.0, 1.0) : 1.0;
+        const double nearB = maxDistance - minDistance > 0.001
+            ? std::clamp(1.0 - (db - minDistance) / (maxDistance - minDistance), 0.0, 1.0) : 1.0;
+        const double sizeA = maxArea - minArea > 0.001
+            ? std::clamp((aa - minArea) / (maxArea - minArea), 0.0, 1.0) : 1.0;
+        const double sizeB = maxArea - minArea > 0.001
+            ? std::clamp((ab - minArea) / (maxArea - minArea), 0.0, 1.0) : 1.0;
+        if (nearA + 0.02 < nearB) return true;
+        if (nearB + 0.02 < nearA) return false;
+        if (sizeA + 0.02 < sizeB) return true;
+        if (sizeB + 0.02 < sizeA) return false;
+        if (da > db + 1.0) return true;
+        if (db > da + 1.0) return false;
+        if (aa + 1.0 < ab) return true;
+        if (ab + 1.0 < aa) return false;
+        return tracks[b].id < tracks[a].id;
+    };
+    size_t chosen = indices.front();
+    for (size_t i = 1; i < indices.size(); ++i)
+        if (better(chosen, indices[i])) chosen = indices[i];
+    return chosen;
+}
+
+} // namespace
+
+void RecoveredAimController::setConfig(const ControllerConfig& config,
+                                       const RecoveredPidConfig& pid)
+{
+    config_ = config;
+    fov_.configure({double(config.fovWidth), double(config.fovHeight)},
+                   config.dynamicFovEnabled, config.dynamicFovSize,
+                   config.dynamicFovShrinkMs, config.dynamicFovExpandMs);
+    tracker_.setFrameSize(config.frameWidth, config.frameHeight);
+    pid_.setConfig(pid);
+}
+
+ControlOutput RecoveredAimController::update(const ControlInput& input)
+{
+    ControlOutput out;
+    out.cross = input.cross;
+    out.fovRadii = fov_.radii();
+    auto releaseFov = [&] {
+        if (input.dtSec > 0.0 && std::isfinite(input.dtSec)) fov_.release(input.dtSec);
+        else fov_.reset();
+        out.fovRadii = fov_.radii();
+    };
+    if (!(input.dtSec > 0.0) || !std::isfinite(input.dtSec))
+    {
+        compensator_.reset();
+        out.idleReason = ControlOutput::IdleReason::BadDt;
+        releaseFov();
+        return out;
+    }
+    // Tracking still advances on empty detections, while PID and direct-output
+    // carry are preserved across a plain no-target frame (105/106).
+    const auto tracks = tracker_.update(input.detectionFresh ? input.candidates
+                                                            : std::vector<Candidate>{},
+                                        input.dtSec,
+                                        input.motionEventSum);
+    if (config_.requireFreshDetection && !input.detectionFresh)
+    {
+        compensator_.reset();
+        out.idleReason = ControlOutput::IdleReason::StaleDetection;
+        releaseFov();
+        return out;
+    }
+    if (config_.requireFreshCrosshair && !input.crosshairFresh)
+    {
+        compensator_.reset();
+        out.idleReason = ControlOutput::IdleReason::StaleCrosshair;
+        releaseFov();
+        return out;
+    }
+
+    std::vector<size_t> eligible;
+    for (size_t index = 0; index < tracks.size(); ++index)
+    {
+        const auto& track = tracks[index];
+        if (config_.buckets.bucketOf(track.classId) != Bucket::Aim) continue;
+        if (track.confidence < config_.selector.minConfOf(track.classId)) continue;
+        if (!fov_.contains(track.box, input.cross, track.id == selectedId_)) continue;
+        if (config_.selector.maxDistancePx > 0.0 &&
+            distanceToBox(input.cross, track.box) > config_.selector.maxDistancePx) continue;
+        eligible.push_back(index);
+    }
+    if (eligible.empty())
+    {
+        releaseFov();
+        compensator_.reset();
+        if (++selectionMisses_ >= 3) { selectedId_ = -1; selectedClassId_ = -1; }
+        out.idleReason = ControlOutput::IdleReason::NoCandidates;
+        return out;
+    }
+
+    // The UI's class order is a selection priority, not merely display order.
+    // Compare distance/size and retain a previous lock only within the best
+    // currently visible class rank.
+    int bestRank = std::numeric_limits<int>::max();
+    for (size_t index : eligible) {
+        const int id = tracks[index].classId;
+        if (id >= 0 && static_cast<size_t>(id) < config_.classPriorityById.size()) {
+            const int rank = config_.classPriorityById[static_cast<size_t>(id)];
+            if (rank >= 0) bestRank = std::min(bestRank, rank);
+        }
+    }
+    if (bestRank != std::numeric_limits<int>::max()) {
+        eligible.erase(std::remove_if(eligible.begin(), eligible.end(), [&](size_t index) {
+            const int id = tracks[index].classId;
+            return id < 0 || static_cast<size_t>(id) >= config_.classPriorityById.size()
+                || config_.classPriorityById[static_cast<size_t>(id)] != bestRank;
+        }), eligible.end());
+    }
+
+    size_t chosen = eligible.front();
+    bool reacquired = false;
+    if (selectedId_ >= 0)
+        for (size_t index : eligible)
+            if (tracks[index].id == selectedId_)
+            {
+                const double oldArea = std::max(selectedBox_.area(), 1.0);
+                const double newArea = std::max(tracks[index].box.area(), 1.0);
+                const double ratio = std::max(oldArea, newArea) / std::min(oldArea, newArea);
+                const double radius = std::max(0.75 * selectedBox_.diagonal(), 40.0);
+                const double distance = (tracks[index].box.center() - selectedBox_.center()).norm();
+                if (ratio <= 3.52 && distance <= 2.0 * radius)
+                {
+                    chosen = index;
+                    reacquired = true;
+                }
+                break;
+            }
+    const auto rankOf = [&](int id) {
+        return id >= 0 && static_cast<size_t>(id) < config_.classPriorityById.size() &&
+            config_.classPriorityById[static_cast<size_t>(id)] >= 0
+            ? config_.classPriorityById[static_cast<size_t>(id)]
+            : std::numeric_limits<int>::max();
+    };
+    const bool higherPriorityAvailable = selectedId_ >= 0 && !eligible.empty() &&
+        rankOf(tracks[eligible.front()].classId) < rankOf(selectedClassId_);
+    if (selectedId_ >= 0 && !reacquired && !higherPriorityAvailable && ++selectionMisses_ < 3)
+    {
+        releaseFov();
+        compensator_.reset();
+        out.idleReason = ControlOutput::IdleReason::NoCandidates;
+        return out;
+    }
+    if (!reacquired)
+        chosen = chooseFresh(tracks, eligible, input.cross);
+    if (!reacquired)
+    {
+        compensator_.reset();
+        // A new lock keeps the current radius: resetting here bypasses the
+        // configured expansion time and abruptly admits distant candidates.
+    }
+    selectionMisses_ = 0;
+    const auto& target = tracks[chosen];
+    selectedId_ = target.id;
+    selectedClassId_ = target.classId;
+    selectedBox_ = target.box;
+    fov_.follow(target.box, input.cross, input.dtSec);
+    out.fovRadii = fov_.radii();
+
+    out.targetId = target.id;
+    out.targetClassId = target.classId;
+    out.targetBox = target.box;
+    out.trackedVelocity = target.velocity;
+    out.filteredCenter = target.box.center();
+    out.lockState = reacquired ? TrackLockState::Existing : TrackLockState::New;
+    out.hasTarget = true;
+
+    AimPointConfig point = config_.aimPoint;
+    for (const auto& classPoint : config_.classAimPoints)
+        if (classPoint.classId == target.classId)
+        {
+            point.xOffset = classPoint.xOffset;
+            point.xOffsetMax = classPoint.xOffsetMax;
+            point.yOffset = classPoint.yOffset;
+            point.yOffsetMax = classPoint.yOffsetMax;
+            break;
+        }
+    if (anchorTargetId_ != target.id)
+    {
+        anchorTargetId_ = target.id;
+        anchorSampleIndex_ = input.frameIndex;
+    }
+    // Freeze the sample, not the screen coordinate: the selected position
+    // continues to follow the target's current box as it moves or changes size.
+    const Vec2 sampledPoint = computeAnchor(out.filteredCenter, target.box,
+                                            point, anchorSampleIndex_);
+    const double maxX = static_cast<double>(std::max(config_.frameWidth - 1, 0));
+    const double maxY = static_cast<double>(std::max(config_.frameHeight - 1, 0));
+    const double cx = std::round(std::clamp(target.box.centerX(), 0.0, maxX));
+    const double cy = std::round(std::clamp(target.box.centerY(), 0.0, maxY));
+    const double width = std::max(1.0, std::round(target.box.w));
+    const double height = std::max(1.0, std::round(target.box.h));
+    const double xRatio = (sampledPoint.x - out.filteredCenter.x) / target.box.w;
+    const double yRatio = (sampledPoint.y - out.filteredCenter.y) / target.box.h;
+    // The source rounds X to nearest (half away), but truncates Y before
+    // clamping. Prediction displacement is added after this base point (21).
+    const double x = std::round(std::clamp(cx + xRatio * width, 0.0, maxX));
+    const double recoilY = std::isfinite(input.aimpointRecoilYpx)
+        ? std::max(0.0, input.aimpointRecoilYpx) : 0.0;
+    const double y = std::clamp(std::trunc(cy + yRatio * height) + recoilY, 0.0, maxY);
+    out.anchor = Vec2{ x, y };
+    out.controlAnchor = out.anchor;
+    out.error = out.anchor - input.cross;
+
+    RecoveredPidConfig pidConfig = pid_.config();
+    // Preserve the original auto-fire deadzone bypass.
+    pidConfig.skipDeadzone = input.autoFire &&
+        distanceToBox(input.cross, target.box) <= target.box.diagonal() * 0.25;
+    pid_.setConfig(pidConfig);
+    out.followStrength = {pidConfig.maskX ? 0.0 : pidConfig.followX,
+                          pidConfig.maskY ? 0.0 : pidConfig.followY};
+    const auto offset = compensator_.update(out.error,
+        {double(config_.frameWidth), double(config_.frameHeight)},
+        out.followStrength, input.observationTimeUs, input.dtSec,
+        FollowMotion{target.observedCenter, input.motionEventSum, input.detectionFresh});
+    out.followMotion = compensator_.motionEstimate();
+    out.followPreset = compensator_.presetAmount();
+    out.followStateX = compensator_.stateX();
+    out.followStateY = compensator_.stateY();
+    out.controlAnchor = out.anchor + offset;
+    // Compensation changes only the input point. The original PID handles its
+    // complete error (P/I/D, deadzone, FF, clipping, segmentation and carry).
+    const auto step = pid_.update(out.controlAnchor - input.cross,
+                                  target.velocity, input.dtSec);
+    out.counts = step.counts;
+    const Vec2 beforeLimit = step.afterDeadzone + Vec2{
+        !pidConfig.maskX && std::isfinite(target.velocity.x) ? pidConfig.feedforwardX * target.velocity.x : 0.0,
+        !pidConfig.maskY && std::isfinite(target.velocity.y) ? pidConfig.feedforwardY * target.velocity.y : 0.0};
+    auto saturated = [&](double value) {
+        return std::abs(value) >= pidConfig.smoothMaxPixel
+            ? (value > 0.0 ? 1.0 : value < 0.0 ? -1.0 : 0.0) : 0.0;
+    };
+    compensator_.setSaturation({saturated(beforeLimit.x), saturated(beforeLimit.y)});
+    out.derivativeRaw = step.derivativeRaw;
+    out.engaged = true;
+    return out;
+}
+
+void RecoveredAimController::reset()
+{
+    fov_.reset();
+    tracker_.reset();
+    pid_.reset();
+    compensator_.reset();
+    selectedId_ = -1;
+    selectedClassId_ = -1;
+    anchorTargetId_ = -1;
+    anchorSampleIndex_ = 0;
+    selectedBox_ = {};
+    selectionMisses_ = 0;
+}
+
+} // namespace control

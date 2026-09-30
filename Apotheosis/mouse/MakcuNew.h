@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -20,12 +21,18 @@ public:
     unsigned int baudRate() const { return baudRate_; }
     bool move(int x, int y);
     void click(int button);
-    void press(int button);
-    void release(int button);
+    bool press(int button);
+    bool release(int button);
     void wheel(int delta);
     bool tapKey(int hidKey, int holdMs, int mod = 0);
+    // Macro-owned injected keyboard state; merges with physical input in KBD firmware.
+    bool sendKeyboardReport(uint8_t modifiers, const std::array<uint8_t,6>& keys);
     void cancelMove();
     bool physicalButtonPressed(int button) const;
+    bool maskPhysicalButton(int button, bool enabled);
+    bool maskPhysicalAxis(int axis, bool enabled);
+    bool hotkeyLocksSupported() const { return asciiMouseProtocol_.load(); }
+    uint64_t sessionGeneration() const { return sessionGeneration_.load(); }
 
     // ---- 瞬时屏蔽真实输入 ----
     //
@@ -96,6 +103,11 @@ private:
     std::atomic<uint8_t> outputButtons_{0};
     std::atomic<uint8_t> realButtons_{0};
     std::atomic<uint8_t> injectedButtons_{0};
+    std::atomic<bool> asciiMouseProtocol_{false};
+    std::atomic<uint64_t> sessionGeneration_{0};
+    std::array<bool,6> ownedMasks_{};
+    std::array<bool,2> ownedAxisMasks_{};
+    std::mutex maskMutex_;
 
     // 按键回读保活: 最近一次成功发订阅的时刻 / 最近一次收到 0x84 或裸掩码的时刻。
     std::atomic<bool> buttonStreamReady_{false};

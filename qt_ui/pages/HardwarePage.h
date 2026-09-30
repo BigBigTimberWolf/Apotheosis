@@ -71,5 +71,14 @@ private:
     QLineEdit* m_kmboxNetIp{};
     QLineEdit* m_kmboxNetPort{};
     QLineEdit* m_kmboxNetUuid{};
+    QComboBox* m_ferrumPort{};
+    QComboBox* m_ferrumBaud{};
+    QLineEdit* m_catIp{};
+    QSpinBox* m_catPort{};
+    QLineEdit* m_catUuid{};
+    QSpinBox* m_catMonitorPort{};
+    QLineEdit* m_dhzboxIp{};
+    QSpinBox* m_dhzboxPort{};
+    QSpinBox* m_dhzboxKey{};
 
 };

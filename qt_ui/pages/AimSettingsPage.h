@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <memory>
 #include <vector>
 
 #include "widgets/CurveCanvas.h"
@@ -18,6 +19,10 @@ class QVBoxLayout;
 
 class CardWidget;
 class TargetPage;
+class TriggerWorkflowEditor;
+class TriggerTargetEditor;
+class HotkeyActivationWidget;
+struct HotkeyProfile;
 
 class AimSettingsPage : public QWidget
 {
@@ -40,6 +45,7 @@ private slots:
     void onAddProfile();
     void onDeleteProfile();
     void onCopyProfile();
+    void onPasteProfile();
     void onAddGroup();
     void onDeleteGroup();
     void onTargetClassesChanged();
@@ -56,6 +62,7 @@ private:
     void moveAimClass(int from, int to);
     void buildCrosshairCard();
     void buildControllerCard();
+      void buildRecoveredControllerCard();
     void showSensitivityCalibrateDialog(QDoubleSpinBox* spinK);
     void buildDynamicFovCard();
     void buildTriggerCard();
@@ -79,6 +86,8 @@ private:
     void rebuildGroupCombo();
     void rebuildProfileList();
     void restyleProfileItems();
+    void refreshActivation();
+    void moveProfileInGroup(int fromRow, int toRow);
     void reloadProfileToUi();
 
     int currentRuntimeIndex() const;
@@ -86,13 +95,16 @@ private:
     QVBoxLayout* m_rightLayout = nullptr;
     QComboBox*   m_groupCombo = nullptr;
     QListWidget* m_profileList = nullptr;
+    std::shared_ptr<HotkeyProfile> m_copiedProfile;
     QLabel*      m_leftTitle = nullptr;
     QStackedWidget* m_stack = nullptr;
     QLabel* m_emptyHint = nullptr;
 
     std::vector<QDoubleSpinBox*> m_ctlDoubles;
     std::vector<QSpinBox*>       m_ctlInts;
-    std::vector<QSpinBox*>       m_triggerInts;
+    TriggerWorkflowEditor* m_triggerWorkflow = nullptr;
+    TriggerTargetEditor* m_triggerTargetEditor = nullptr;
+    HotkeyActivationWidget* m_activationWidget = nullptr;
     std::vector<QSpinBox*>       m_pathInts;
     std::vector<QDoubleSpinBox*> m_pathDoubles;
 
@@ -105,7 +117,6 @@ private:
     QComboBox* m_scopeModeCombo = nullptr;   // 「自动开镜」卡里的跟随/独立开关
     QComboBox* m_scopeCopyCombo = nullptr;   // 一键复制的来源热键
     QLabel*    m_scopeCopyHint  = nullptr;   // 复制结果反馈
-    QLabel*    m_scopeOffHint   = nullptr;   // 「跟随热键」时显示的提示
     std::vector<QWidget*> m_scopeParamRows;  // 随开关显隐的行(含分段标题)
 
     // 轨迹卡片按模式显隐用的句柄（见 buildTrajectoryCard 的 applyMode）。

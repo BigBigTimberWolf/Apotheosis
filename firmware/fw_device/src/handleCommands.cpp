@@ -42,11 +42,16 @@ std::atomic<int> moveYInj(0);
 std::atomic<uint8_t> s_realBtnState(0);   // 右板转发的真实鼠标按键
 std::atomic<uint8_t> s_injBtnState(0);    // 上位机注入的按键
 std::atomic<uint8_t> s_mouseBtnState(0);  // = real | inj, 冗余但供 handleMove 读取
+std::atomic<uint8_t> s_blockedRealButtons(0);
+std::atomic<uint8_t> s_blockedRealAxes(0);
+static std::mutex buttonStateMutex, buttonReplyMutex;
 
-// 命令来源标记 —— serial0RX/serial1RX 处理命令前设置, 供 handleMouseButton 判断
-// 是"真实按键"还是"注入按键"。
-enum : uint8_t { SRC_INJECT = 0, SRC_REAL = 1 };
-std::atomic<uint8_t> g_cmd_source(SRC_INJECT);
+// 两个串口分别在固定任务中处理。来源必须从当前任务判定，不能用一个
+// 两任务共写的标志：注入命令可能在真实输入处理到一半时覆盖它。
+extern TaskHandle_t serial1TaskHandle;
+static bool commandFromRealDevice() {
+    return xTaskGetCurrentTaskHandle() == serial1TaskHandle;
+}
 
 // km.buttons(1) 使能后, 每次【真实按键】变化就推送一个单字节掩码 (0..31) 到 Serial0。
 // 上位机的 MakcuNew feedAsciiByte 里 <0x20 分支收下作为按键流。
@@ -145,9 +150,23 @@ CommandEntry debugCommandTable[] = {
 // 命令表: km.buttons 是官方 SDK 的按键监控开关。km.ms1/km.ms2 是 SDK 用的
 // 侧键命名 alias (跟 km.side1/km.side2 等价, 保留兼容)。
 void handleKmButtons(const char *command);
+static void handleKmButtonLock(const char *command);
+static void replyHotkeyCapability(const char*) {
+    std::lock_guard<std::mutex> lock(buttonReplyMutex);
+    Serial0.println("hotkeylocks=1");
+}
+static void replyVersion(const char* command) {
+    std::lock_guard<std::mutex> lock(buttonReplyMutex);
+    const char* tag=strchr(command,'#');
+    if(tag) Serial0.printf(">>> #%ld:",strtol(tag+1,nullptr,10));
+    Serial0.println("MAKCU-PASSTHROUGH CUSTOM_V1_1_HOTKEY");
+}
 
 // 前缀匹配, 十条按键命令 (km.left(0/1), km.right(0/1), ...) 统一走一个 handler
 CommandEntry normalCommandTable[] = {
+    {"km.lock_", handleKmButtonLock},
+    {"km.hotkeycaps", replyHotkeyCapability},
+    {"km.version", replyVersion},
     {"km.moveto",  handleKmMoveto},
     {"km.getpos",  handleKmGetpos},
     {"km.click",   handleKmClick},
@@ -216,7 +235,6 @@ void serial0RX() {
             commandBuffer[commandIndex] = '\0';
             trimCommand(commandBuffer);
 
-            g_cmd_source.store(SRC_INJECT);   // Serial0 = 上位机注入
             if (strncmp(commandBuffer, "km.move", 7) == 0) {
                 if (!kmMoveCom.exchange(true)) {
                     handleKmMoveCommand(commandBuffer);
@@ -251,7 +269,6 @@ void serial1RX() {
             commandBuffer[commandIndex] = '\0';
             trimCommand(commandBuffer);
 
-            g_cmd_source.store(SRC_REAL);   // Serial1 = 右板转发的真实鼠标
             if (strncmp(commandBuffer, "km.move", 7) == 0) {
                 // ★ 真鼠标位移【不】参与 kmMoveCom 互斥。
                 //
@@ -279,9 +296,13 @@ void handleKmMoveCommand(const char *command) {
     // 按来源决定累加还是覆盖 —— 见 moveXReal 处的说明。
     //   SRC_REAL   = 右板转发的真实鼠标 -> 累加(一个增量都不能丢)
     //   SRC_INJECT = 上位机注入         -> 覆盖(最新赢, 避免积压过冲)
-    const bool isReal = (g_cmd_source.load() == SRC_REAL);
+    const bool isReal = commandFromRealDevice();
 
     if (isReal) {
+        std::lock_guard<std::mutex> lock(commandMutex);
+        const auto blocked=s_blockedRealAxes.load();
+        if(blocked & 1) x=0;
+        if(blocked & 2) y=0;
         // ★ 累加值必须封顶, 否则会滚雪球。
         //
         // 端点抖动 / USB 主机一时不收报告时, mouseMoveTask 消费不过来, 而真鼠标
@@ -523,11 +544,12 @@ void mouseMoveTask(void *pvParameters) {
         // 真鼠标用 exchange(0) 取走并清零, 保证这期间新到的增量不会丢。
         int x, y;
         {
+            std::lock_guard<std::mutex> lock(commandMutex);
+            const auto blocked=s_blockedRealAxes.load();
             const int rx = moveXReal.exchange(0, std::memory_order_relaxed);
             const int ry = moveYReal.exchange(0, std::memory_order_relaxed);
-            std::lock_guard<std::mutex> lock(commandMutex);
-            x = rx + moveXInj.exchange(0, std::memory_order_relaxed);
-            y = ry + moveYInj.exchange(0, std::memory_order_relaxed);
+            x = ((blocked & 1) ? 0 : rx) + moveXInj.exchange(0, std::memory_order_relaxed);
+            y = ((blocked & 2) ? 0 : ry) + moveYInj.exchange(0, std::memory_order_relaxed);
         }
         if (x != 0 || y != 0) {
             handleMove(x, y);
@@ -643,10 +665,11 @@ void handleMoveto(int x, int y) {
 }
 
 void handleMouseButton(uint8_t bit, bool press) {
+    std::lock_guard<std::mutex> stateLock(buttonStateMutex);
     // 按来源分开: real (右板真实鼠标) / inj (上位机注入)。
     // 发到 HID 的是 merged; 上位机 physicalButtonPressed 通过 km.buttons 监控
     // 读到的是 real 变化 —— 单字节 <0x20 掩码, 见下方 g_buttonMonitoringEnabled 推送。
-    const bool isReal = (g_cmd_source.load() == SRC_REAL);
+    const bool isReal = commandFromRealDevice();
     if (isReal) {
         if (press) s_realBtnState.fetch_or(bit);
         else       s_realBtnState.fetch_and((uint8_t)~bit);
@@ -654,16 +677,64 @@ void handleMouseButton(uint8_t bit, bool press) {
         if (press) s_injBtnState.fetch_or(bit);
         else       s_injBtnState.fetch_and((uint8_t)~bit);
     }
-    uint8_t merged = (uint8_t)(s_realBtnState.load() | s_injBtnState.load());
+    uint8_t merged = (uint8_t)((s_realBtnState.load() & ~s_blockedRealButtons.load()) | s_injBtnState.load());
     s_mouseBtnState.store(merged);
     // 按键报文 —— 若发送失败, 下次任意移动/滚轮/按键事件都会带上最新 buttons,
     // 状态最终会同步 (与官方 Arduino Mouse 行为一致)。
     kbdUsbSendMouse(merged, 0, 0, 0);
 
     if (isReal && g_buttonMonitoringEnabled.load()) {
+        std::lock_guard<std::mutex> replyLock(buttonReplyMutex);
         // 单字节掩码 (< 0x20), 上位机 feedAsciiByte 的 <0x20 分支收下, 不会污染 ASCII 行解析。
         Serial0.write((uint8_t)(s_realBtnState.load() & 0x1F));
     }
+}
+
+static void handleKmButtonLock(const char* command) {
+    if(commandFromRealDevice()) return;
+    const char* paren=strchr(command,'(');
+    if(!paren) return;
+    if(strncmp(command,"km.lock_mx(",11)==0 || strncmp(command,"km.lock_my(",11)==0) {
+        const bool isX=command[9]=='x';
+        const uint8_t bit=isX ? 1 : 2;
+        std::lock_guard<std::mutex> stateLock(commandMutex);
+        if(paren[1]==')') {
+            std::lock_guard<std::mutex> replyLock(buttonReplyMutex);
+            const char* tag=strchr(paren,'#');
+            if(tag) Serial0.printf(">>> #%ld:",strtol(tag+1,nullptr,10));
+            else Serial0.printf("km.lock_m%c(",isX ? 'x' : 'y');
+            Serial0.print((s_blockedRealAxes.load()&bit) ? 1 : 0);
+            Serial0.println(tag ? "" : ")");
+        } else if((paren[1]=='0' || paren[1]=='1') && paren[2]==')') {
+            if(paren[1]=='1') s_blockedRealAxes.fetch_or(bit);
+            else s_blockedRealAxes.fetch_and(static_cast<uint8_t>(~bit));
+            (isX ? moveXReal : moveYReal).store(0); // No deferred jump on release.
+        }
+        return;
+    }
+    const char* names[]={"ml","mr","mm","ms1","ms2"};
+    int index=-1;
+    for(int i=0;i<5;++i)
+        if(static_cast<size_t>(paren-command-8)==strlen(names[i]) &&
+           strncmp(command+8,names[i],strlen(names[i]))==0) index=i;
+    if(index<0) return;
+    const uint8_t bit=static_cast<uint8_t>(1u<<index);
+    std::lock_guard<std::mutex> stateLock(buttonStateMutex);
+    if(paren[1]==')') {
+        std::lock_guard<std::mutex> replyLock(buttonReplyMutex);
+        const char* tag=strchr(paren,'#');
+        if(tag) Serial0.printf(">>> #%ld:",strtol(tag+1,nullptr,10));
+        else Serial0.printf("km.lock_%s(",names[index]);
+        Serial0.print((s_blockedRealButtons.load()&bit) ? 1 : 0);
+        Serial0.println(tag ? "" : ")");
+        return;
+    }
+    if((paren[1]!='0' && paren[1]!='1') || paren[2]!=')') return;
+    if(paren[1]=='1') s_blockedRealButtons.fetch_or(bit);
+    else s_blockedRealButtons.fetch_and(static_cast<uint8_t>(~bit));
+    const uint8_t merged=static_cast<uint8_t>((s_realBtnState.load() & ~s_blockedRealButtons.load()) | s_injBtnState.load());
+    s_mouseBtnState.store(merged);
+    kbdUsbSendMouse(merged,0,0,0);
 }
 
 // km.buttons(0/1) 使能/禁用真实按键推送; km.buttons() 查询当前状态。

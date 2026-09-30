@@ -22,16 +22,20 @@ public:
                                     double publishToAimMs, double endToEndMs);
     void setSessionState(bool running, const QString& model,
                          const QString& backend, const QString& uptime);
+    void setPerformanceMode(bool enabled);
 
 signals:
     void startStopRequested();
     void previewRequested();
+    void performanceModeRequested(bool enabled);
 
 private:
     QLabel* m_heroChip{};
     QLabel* m_heroTitle{};
     QLabel* m_heroSub{};
     QPushButton* m_startBtn{};
+    QPushButton* m_performanceBtn{};
+    bool m_performanceMode = false;
 
     MetricCard* m_mFps{};
     MetricCard* m_mInfer{};

@@ -28,6 +28,14 @@ std::vector<int> buildClassBuckets(const std::vector<int>& aimClassIds)
 control::ControllerConfig toControllerConfig(const FlatConfig& flat)
 {
     control::ControllerConfig cfg;
+    cfg.frameWidth = flat.detectionResolution;
+    cfg.frameHeight = flat.detectionResolution;
+    cfg.fovWidth = std::clamp(flat.fovX, 1, 4096);
+    cfg.fovHeight = std::clamp(flat.fovY, 1, 4096);
+    cfg.dynamicFovEnabled = flat.dynamicFovEnabled;
+    cfg.dynamicFovSize = flat.dynamicFovSize;
+    cfg.dynamicFovShrinkMs = flat.dynamicFovShrinkMs;
+    cfg.dynamicFovExpandMs = flat.dynamicFovExpandMs;
 
     {
         int maxId = -1;
@@ -47,7 +55,11 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
                     continue;
                 switch (cf.second)
                 {
-                case 2: cfg.buckets.byClassId[static_cast<size_t>(cf.first)] = control::Bucket::Aim;    break;
+                // "Aim" in the global class list makes a class available for
+                // aiming, but each hotkey's aim_classes is the actual target
+                // selection. Otherwise an empty hotkey inherits every global
+                // Aim class (and appears to use another hotkey's targets).
+                case 2: cfg.buckets.byClassId[static_cast<size_t>(cf.first)] = control::Bucket::Filter; break;
                 case 1: cfg.buckets.byClassId[static_cast<size_t>(cf.first)] = control::Bucket::Filter; break;
                 default: cfg.buckets.byClassId[static_cast<size_t>(cf.first)] = control::Bucket::Delete; break;
                 }
@@ -75,17 +87,22 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
             std::max(cfg.selector.minConfByClassId[static_cast<size_t>(id)], mc.second);
     }
 
-    cfg.stabilizer.matchCenterRatio = flat.matchCenterRatio;
-    cfg.stabilizer.areaRatioTol     = flat.areaRatioTol;
-    cfg.stabilizer.kSnapMult        = flat.kSnapMult;
-    cfg.stabilizer.minAspect        = flat.minAspect;
-    cfg.stabilizer.maxAspect        = flat.maxAspect;
-
     cfg.aimPoint.yOffset = flat.yOffset;
     cfg.aimPoint.yOffsetMax = flat.yOffsetMax;
+    cfg.aimPoint.xOffset = flat.xOffset;
+    cfg.aimPoint.xOffsetMax = flat.xOffsetMax;
     cfg.aimPoint.randomSeed = flat.randomSeed;
 
     cfg.classAimPoints.clear();
+    cfg.classPriorityById.clear();
+    for (size_t rank = 0; rank < flat.aimClassIds.size(); ++rank) {
+        const int id = flat.aimClassIds[rank];
+        if (id < 0) continue;
+        if (static_cast<size_t>(id) >= cfg.classPriorityById.size())
+            cfg.classPriorityById.resize(static_cast<size_t>(id) + 1, -1);
+        if (cfg.classPriorityById[static_cast<size_t>(id)] < 0)
+            cfg.classPriorityById[static_cast<size_t>(id)] = static_cast<int>(rank);
+    }
     cfg.classAimPoints.reserve(flat.classAimPoints.size());
     for (const auto& cap : flat.classAimPoints)
     {
@@ -93,36 +110,24 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
         p.classId = static_cast<int>(cap[0]);
         p.yOffset = cap[1];
         p.yOffsetMax = cap[2];
+        p.xOffset = cap[3];
+        p.xOffsetMax = cap[4];
         p.yOffset = std::clamp(p.yOffset, 0.0, 1.0);
         p.yOffsetMax = std::clamp(p.yOffsetMax, 0.0, 1.0);
         if (p.yOffsetMax < p.yOffset)
             std::swap(p.yOffset, p.yOffsetMax);
+        p.xOffset = std::clamp(p.xOffset, 0.0, 1.0);
+        p.xOffsetMax = std::clamp(p.xOffsetMax, 0.0, 1.0);
+        if (p.xOffsetMax < p.xOffset)
+            std::swap(p.xOffset, p.xOffsetMax);
         if (p.classId >= 0)
             cfg.classAimPoints.push_back(p);
     }
 
-    cfg.pid.kpX = flat.kpX;
-    cfg.pid.kpY = flat.kpY;
-    cfg.pid.kiX = flat.kiX;
-    cfg.pid.kiY = flat.kiY;
-    cfg.pid.kdX = flat.kdX;
-    cfg.pid.kdY = flat.kdY;
-    cfg.pid.tauUnwindSec = flat.tauUnwindSec;
-    cfg.pid.tauDerivSec = flat.tauDerivSec;
-    cfg.pid.iMax = flat.iMax;
-    cfg.pid.maxOutputCounts = flat.maxOutputCounts;
-    cfg.pid.pFullScalePx = flat.pFullScalePx;
-    cfg.pid.inflightBeta = flat.inflightBeta;
-    cfg.pid.deadTimeMs = flat.inflightDeadTimeMs;
-
-    cfg.predictor.leadMs = flat.predictLeadMs;
-    cfg.predictor.maxVelocityPxPerSec = flat.predictMaxVelocityPxPerSec;
-    cfg.predictor.maxLeadRatio = flat.predictMaxLeadRatio;
-
-    cfg.pxPerCount = flat.kPxPerCount;
-
     cfg.requireFreshDetection = true;
-    cfg.requireFreshCrosshair = true;
+    // resolveCrosshair already selects the screen center when color detection
+    // is missing or stale. That fallback must remain eligible for aiming.
+    cfg.requireFreshCrosshair = false;
 
     return cfg;
 }
@@ -133,6 +138,12 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
                           bool scopeEngaged)
 {
     FlatConfig flat;
+    flat.fovX = hk.fovX;
+    flat.fovY = hk.fovY;
+    flat.dynamicFovEnabled = hk.dynamic_fov_enabled;
+    flat.dynamicFovSize = hk.dynamic_fov_size;
+    flat.dynamicFovShrinkMs = hk.dynamic_fov_shrink_ms;
+    flat.dynamicFovExpandMs = hk.dynamic_fov_expand_ms;
 
     // ── 瞄准控制器参数组: 默认档 / 开镜档 ────────────────────────────────
     // ★ 自动开镜生效期间, 若该热键开了独立开镜参数, 就用开镜档【整组】取代
@@ -163,6 +174,8 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
 
     flat.yOffset = hk.ctl_y_offset;
     flat.yOffsetMax = hk.ctl_y_offset_max;
+    flat.xOffset = hk.ctl_x_offset;
+    flat.xOffsetMax = hk.ctl_x_offset_max;
 
     // 全局选靶与稳定器
     flat.hysteresisRatio = globalConfig.target_hysteresis_ratio;
@@ -185,7 +198,9 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     {
         flat.classAimPoints.push_back({ static_cast<double>(ac.class_id),
                                         static_cast<double>(ac.y_offset),
-                                        static_cast<double>(ac.y_offset_max) });
+                                        static_cast<double>(ac.y_offset_max),
+                                        static_cast<double>(ac.x_offset),
+                                        static_cast<double>(ac.x_offset_max) });
         flat.classMinConf.push_back({ ac.class_id, static_cast<double>(ac.min_conf) });
     }
 

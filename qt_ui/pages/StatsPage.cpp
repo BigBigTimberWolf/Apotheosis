@@ -154,7 +154,7 @@ StatsPage::StatsPage(QWidget* parent)
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"采集 FPS"), m_fpsValue),         0, 0);
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"产帧 FPS"), m_sourceFpsValue),   0, 1);
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"采集延迟"), m_captureLatency),   1, 0);
-    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"推理延迟"), m_inferenceLatency), 1, 1);
+    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"GPU 链路延迟"), m_inferenceLatency), 1, 1);
     metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"总延迟"),   m_totalLatency),     2, 0);
     metricGrid->setColumnStretch(0, 1);
     metricGrid->setColumnStretch(1, 1);
@@ -175,13 +175,44 @@ StatsPage::StatsPage(QWidget* parent)
         outLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         rxCard->contentLayout()->addWidget(FormKit::fieldRow(caption, outLabel));
     };
-    addRxRow(QString::fromUtf8(u8"设备帧龄 (驱动/MF)"), m_diagDeviceAge);
+    addRxRow(QString::fromUtf8(u8"设备帧龄 (需驱动时间戳)"), m_diagDeviceAge);
     addRxRow(QString::fromUtf8(u8"接收→取帧"),          m_diagCapToDetect);
     addRxRow(QString::fromUtf8(u8"推理 (含前后处理)"),  m_diagInfer);
     addRxRow(QString::fromUtf8(u8"发布→消费"),          m_diagPublishToAim);
     addRxRow(QString::fromUtf8(u8"全链路 (下界)"),      m_diagEndToEnd);
 
     layout->addWidget(rxCard);
+
+    auto* controlCard = new CardWidget(QString::fromUtf8(u8"控制时序（当前帧）"), QStringLiteral("activity"));
+    controlCard->setCollapsible(true);
+    auto addControlRow = [controlCard](const QString& caption, QLabel*& outLabel) {
+        outLabel = new QLabel(QStringLiteral("--"));
+        outLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        controlCard->contentLayout()->addWidget(FormKit::fieldRow(caption, outLabel));
+    };
+    addControlRow(QString::fromUtf8(u8"控制循环间隔"), m_controlDt);
+    addControlRow(QString::fromUtf8(u8"采集→控制帧龄"), m_controlCaptureAge);
+    addControlRow(QString::fromUtf8(u8"D 项原值 X / Y"), m_derivativeRaw);
+    layout->addWidget(controlCard);
+
+    auto* pipelineCard = new CardWidget(QString::fromUtf8(u8"推理链路分段"), QStringLiteral("activity"));
+    pipelineCard->setCollapsible(true);
+    auto* pipelineNote = new QLabel(QString::fromUtf8(u8"Graph 开启时显示总链路；分段项仅在普通模式可用。"));
+    pipelineNote->setProperty("class", "secondary");
+    pipelineCard->contentLayout()->addWidget(pipelineNote);
+    auto addPipelineRow = [pipelineCard](const QString& caption, QLabel*& outLabel) {
+        outLabel = new QLabel(QStringLiteral("--"));
+        outLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        pipelineCard->contentLayout()->addWidget(FormKit::fieldRow(caption, outLabel));
+    };
+    addPipelineRow(QString::fromUtf8(u8"GPU 总链路"), m_gpuPipeline);
+    addPipelineRow(QString::fromUtf8(u8"GPU 前处理"), m_gpuPreprocess);
+    addPipelineRow(QString::fromUtf8(u8"模型执行"), m_gpuEngine);
+    addPipelineRow(QString::fromUtf8(u8"输出回传"), m_gpuCopy);
+    addPipelineRow(QString::fromUtf8(u8"CPU 后处理"), m_cpuPostprocess);
+    addPipelineRow(QString::fromUtf8(u8"控制 Tick 平均"), m_aimTick);
+    addPipelineRow(QString::fromUtf8(u8"控制 Tick 峰值"), m_aimTickPeak);
+    layout->addWidget(pipelineCard);
 
     auto* mouseCard = new CardWidget(QString::fromUtf8(u8"鼠标发送队列"), QStringLiteral("activity"));
     mouseCard->setCollapsible(true);
@@ -198,6 +229,23 @@ StatsPage::StatsPage(QWidget* parent)
     auto* mouseTimer = new QTimer(this);
     mouseTimer->setInterval(250);
     connect(mouseTimer, &QTimer::timeout, this, [this] {
+        const auto controlState = runtime::readAimOverlay();
+        const double stateAgeMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - controlState.ts).count();
+        const bool fresh = controlState.seq > 0 && stateAgeMs >= 0.0 &&
+            stateAgeMs <= runtime::kAimOverlayStaleMs;
+        auto formatMs = [fresh](double value) {
+            return fresh && value >= 0.0
+                ? QStringLiteral("%1 ms").arg(value, 0, 'f', 2)
+                : QStringLiteral("--");
+        };
+        auto formatD = [fresh](double x, double y) {
+            return fresh ? QStringLiteral("%1 / %2").arg(x, 0, 'f', 2).arg(y, 0, 'f', 2)
+                         : QStringLiteral("--");
+        };
+        m_controlDt->setText(formatMs(controlState.control_dt_ms));
+        m_controlCaptureAge->setText(formatMs(controlState.capture_age_ms));
+        m_derivativeRaw->setText(formatD(controlState.derivative_raw_x, controlState.derivative_raw_y));
         m_mouseQueueLatency->setText(
             QString::number(g_mouse_queue_latency_ms.load(), 'f', 2) + QStringLiteral(" ms"));
         m_mouseQueueBacklog->setText(QString::number(g_mouse_queue_backlog.load()));
@@ -265,11 +313,30 @@ void StatsPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs
     };
     if (m_diagDeviceAge) {
         m_diagDeviceAge->setText(deviceAgeUs < 0
-            ? QStringLiteral("--")
+            ? QString::fromUtf8(u8"不可测")
             : QStringLiteral("%1 ms").arg(deviceAgeUs / 1000.0, 0, 'f', 2));
     }
     setMs(m_diagCapToDetect, capToDetectMs);
     setMs(m_diagInfer, inferMs);
-    setMs(m_diagPublishToAim, publishToAimMs);
-    setMs(m_diagEndToEnd, endToEndMs);
+    if (m_diagPublishToAim) m_diagPublishToAim->setText(publishToAimMs < 0.0
+        ? QString::fromUtf8(u8"等待控制") : fmtLatencyMs(publishToAimMs));
+    if (m_diagEndToEnd) m_diagEndToEnd->setText(endToEndMs < 0.0
+        ? QString::fromUtf8(u8"等待发送") : fmtLatencyMs(endToEndMs));
+}
+
+void StatsPage::setPipelineDiagnostics(double totalGpuMs, double preprocessMs, double engineMs, double copyMs,
+                                       double postprocessMs, double aimTickMs, double aimTickPeakMs,
+                                       bool graphMode) {
+    auto preciseMs = [](double ms) {
+        return ms < 0.0 ? QStringLiteral("--")
+                        : QStringLiteral("%1 ms").arg(ms, 0, 'f', 3);
+    };
+    m_gpuPipeline->setText(preciseMs(totalGpuMs));
+    const QString graphText = QString::fromUtf8(u8"Graph 内部");
+    m_gpuPreprocess->setText(graphMode ? graphText : preciseMs(preprocessMs));
+    m_gpuEngine->setText(graphMode ? graphText : preciseMs(engineMs));
+    m_gpuCopy->setText(graphMode ? graphText : preciseMs(copyMs));
+    m_cpuPostprocess->setText(preciseMs(postprocessMs));
+    m_aimTick->setText(preciseMs(aimTickMs));
+    m_aimTickPeak->setText(preciseMs(aimTickPeakMs));
 }

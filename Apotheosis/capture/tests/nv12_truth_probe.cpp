@@ -4,8 +4,8 @@
 //
 // 判据 (三条互相独立, 必须同时成立才算真 240):
 //   1. device timestamp 间隔分布: 真 240 -> 集中在 ~4.17ms; 复制 -> 大量 0 或双峰
-//   2. 相邻帧内容差异: 逐像素 MAD。复制帧 -> MAD==0 计数接近一半
-//   3. 唯一帧率: 对 sample 内容做哈希去重后的 unique fps
+//   2. 相邻帧内容差异: 稀疏采样 MAD。静止画面不能用来判定复制帧
+//   3. 抽样内容指纹: 仅在输入画面持续运动时可估计独立画面帧率
 //
 // 用法: nv12_truth_probe [设备序号=0] [宽=1920] [高=1080] [fps=240] [秒=6]
 
@@ -45,7 +45,9 @@ struct SampleSlot
     // 只靠 ready 标志会漏帧 —— 回调在消费者还没取走时覆盖 ready=true,
     // 消费者于是反复拷贝同一份内容, 表现得像"帧内容从不改变"。
     long long seq = 0;
-    std::vector<uint8_t> bytes;
+    uint64_t hash = 0;
+    double mad = -1.0;
+    DWORD length = 0;
     LONGLONG deviceTs = 0;
     LONGLONG qpc100ns = 0;
     double arrivalMs = 0.0;
@@ -57,18 +59,6 @@ double NowMs()
     using clock = std::chrono::steady_clock;
     static const clock::time_point start = clock::now();
     return std::chrono::duration<double, std::milli>(clock::now() - start).count();
-}
-
-// 简单的 64 位 FNV-1a, 用来对整帧内容去重 (只做等价性判断, 不需要抗碰撞)
-uint64_t Fnv1a(const uint8_t* data, size_t n)
-{
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; ++i)
-    {
-        h ^= data[i];
-        h *= 1099511628211ull;
-    }
-    return h;
 }
 
 class Callback : public IMFSourceReaderCallback
@@ -149,11 +139,32 @@ public:
         LONGLONG qpc = 0;
         sample->GetSampleTime(&qpc);
 
+        // Sampling in the callback avoids a 3 MB copy and full-frame hash on
+        // every sample; those costs throttled the probe itself at 1080p240.
+        constexpr size_t kPoints = 4096;
+        const size_t step = std::max<size_t>(1, currentLen / kPoints);
+        const size_t count = std::min<size_t>(kPoints, currentLen);
+        if (previous_.size() != count) previous_.assign(count, 0);
+        uint64_t hash = 1469598103934665603ull;
+        double delta = 0.0;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const uint8_t value = data[i * step];
+            hash = (hash ^ value) * 1099511628211ull;
+            if (have_previous_)
+                delta += std::abs(static_cast<int>(value) - static_cast<int>(previous_[i]));
+            previous_[i] = value;
+        }
+        const double mad = have_previous_ && count ? delta / count : -1.0;
+        have_previous_ = true;
+
         {
             std::lock_guard<std::mutex> lock(slot_.mutex);
             // 始终用最新的 sample 覆盖: 我们要量的是"卡吐帧的节奏", 不是消费者的
             // 消费速度。丢掉积压只会让测量偏向最新帧, 不影响重复帧判定。
-            slot_.bytes.assign(data, data + currentLen);
+            slot_.hash = hash;
+            slot_.mad = mad;
+            slot_.length = currentLen;
             slot_.deviceTs = ts;
             slot_.qpc100ns = qpc;
             slot_.arrivalMs = NowMs();
@@ -185,6 +196,8 @@ private:
     std::atomic<bool> stop_{ false };
     std::atomic<long long> calls_{ 0 };
     std::atomic<ULONG> ref_{ 1 };
+    std::vector<uint8_t> previous_;
+    bool have_previous_ = false;
 };
 
 std::string WideToUtf8(const wchar_t* text)
@@ -192,8 +205,10 @@ std::string WideToUtf8(const wchar_t* text)
     if (!text || !*text) return std::string();
     const int n = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
     if (n <= 1) return std::string();
-    std::string out(static_cast<size_t>(n - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), n, nullptr, nullptr);
+    std::string out(static_cast<size_t>(n), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), n, nullptr, nullptr) == 0)
+        return {};
+    out.resize(static_cast<size_t>(n - 1));
     return out;
 }
 
@@ -224,6 +239,24 @@ int main(int argc, char** argv)
     {
         printf("枚举采集设备失败\n");
         return 1;
+    }
+    if (devIndex < 0 || static_cast<UINT32>(devIndex) >= count)
+    {
+        printf("[FAIL] 设备序号 %d 越界 (共 %u 个设备)\n", devIndex, count);
+        return 1;
+    }
+    printf("MF 设备列表:\n");
+    for (UINT32 i = 0; i < count; ++i)
+    {
+        WCHAR* name = nullptr;
+        UINT32 length = 0;
+        if (SUCCEEDED(devices[i]->GetAllocatedString(
+                MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length)))
+        {
+            printf("  [%u] %s%s\n", i, WideToUtf8(name).c_str(),
+                   static_cast<int>(i) == devIndex ? "  <selected>" : "");
+            CoTaskMemFree(name);
+        }
     }
 
     ComPtr<IMFMediaSource> source;
@@ -313,8 +346,6 @@ int main(int argc, char** argv)
     std::vector<double>   arrivalList;
     std::vector<uint64_t> hashList;
     std::vector<double>   madList;      // 与前一帧的逐像素平均绝对差
-    std::vector<uint8_t>  prev;
-    std::vector<uint8_t>  first;
     bool sawTypeChange = false;
     int  bytesSeen = 0;
 
@@ -323,7 +354,10 @@ int main(int argc, char** argv)
     hashList.reserve(4096);
     madList.reserve(4096);
 
-    const double tEnd = NowMs() + SECONDS * 1000.0;
+    const double tStart = NowMs();
+    const double tEnd = tStart + SECONDS * 1000.0;
+    double lastReportMs = tStart;
+    long long lastDelivered = 0;
 
     long long lastSeq = 0;
 
@@ -331,7 +365,24 @@ int main(int argc, char** argv)
 
     while (NowMs() < tEnd)
     {
-        std::vector<uint8_t> bytes;
+        const double reportNow = NowMs();
+        if (reportNow - lastReportMs >= 1000.0)
+        {
+            long long delivered = 0;
+            {
+                std::lock_guard<std::mutex> lock(slot->mutex);
+                delivered = slot->delivered;
+            }
+            printf("[实时] %.1fs: MF 回调 %.1f fps (%lld 帧)\n",
+                   (reportNow - tStart) / 1000.0,
+                   (delivered - lastDelivered) * 1000.0 / (reportNow - lastReportMs),
+                   delivered - lastDelivered);
+            lastDelivered = delivered;
+            lastReportMs = reportNow;
+        }
+        uint64_t hash = 0;
+        double mad = -1.0;
+        DWORD length = 0;
         LONGLONG ts = 0, qpc = 0;
         double arr = 0.0;
         {
@@ -342,52 +393,32 @@ int main(int argc, char** argv)
                                    [&] { return slot->seq != lastSeq; }))
                 continue;
             lastSeq = slot->seq;
-            // 拷贝而不是 move: move 会把 slot->bytes 掏空, 之后回调写入的是新
-            // 缓冲区, 而消费者拿到的 size 与实际内容不一致 —— 哈希会全部相同。
-            bytes = slot->bytes;
+            hash = slot->hash;
+            mad = slot->mad;
+            length = slot->length;
             ts = slot->deviceTs;
             qpc = slot->qpc100ns;
             arr = slot->arrivalMs;
         }
 
-        DWORD flags = 0, actualLen = 0;
-        reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actual);
-        (void)flags;
-
-        if (static_cast<int>(bytes.size()) != static_cast<int>(frameBytes))
-            bytesSeen = static_cast<int>(bytes.size());
+        bytesSeen = static_cast<int>(length);
 
         tsList.push_back(ts);
         arrivalList.push_back(arr);
-        hashList.push_back(Fnv1a(bytes.data(), bytes.size()));
-
-        if (!prev.empty() && prev.size() == bytes.size())
-        {
-            double sum = 0.0;
-            // 步长取质数 97: 与 1920 行宽互质, 保证采样点均匀铺满 Y+UV 整个帧,
-            // 不会每帧都反复落在同一列上。
-            constexpr int kStep = 97;
-            size_t n = 0;
-            for (size_t k = 0; k < bytes.size(); k += kStep)
-            {
-                sum += std::abs(static_cast<int>(bytes[k]) - static_cast<int>(prev[k]));
-                ++n;
-            }
-            madList.push_back(n ? sum / static_cast<double>(n) : -1.0);
-        }
-        else
-        {
-            madList.push_back(-1.0);
-        }
-
-        if (first.empty()) first = bytes;
-        prev = std::move(bytes);
+        hashList.push_back(hash);
+        madList.push_back(mad);
     }
 
     cb->Stop();
 
     const size_t total = tsList.size();
-    printf("采集 %zu 个 sample (%.1f 秒)\n", total, static_cast<double>(SECONDS));
+    long long callbackTotal = 0;
+    {
+        std::lock_guard<std::mutex> lock(slot->mutex);
+        callbackTotal = slot->delivered;
+    }
+    printf("MF 回调 %lld 帧，分析 %zu 个 sample (%.1f 秒)\n",
+           callbackTotal, total, static_cast<double>(SECONDS));
     printf("sample 字节数: %d   期望 NV12 %dx%d (4:2:0) = %zu 字节\n\n",
            bytesSeen, W, H, frameBytes);
 
@@ -405,7 +436,7 @@ int main(int argc, char** argv)
             printf("    #%02zu  ts=%9.3f  arr=%8.3f  hash=%016llx%s\n",
                    i, tsMs, arMs,
                    static_cast<unsigned long long>(hashList[i]),
-                   (hashList[i] == h0 && i > 0) ? "   <-- 与首帧字节完全相同" : "");
+                   (hashList[i] == h0 && i > 0) ? "   <-- 抽样内容与首帧相同" : "");
         }
     }
     printf("\n");
@@ -436,7 +467,7 @@ int main(int argc, char** argv)
         madSum += m;
     }
     const double identPct = compared ? 100.0 * identical / compared : 0.0;
-    printf("[2] 相邻帧内容差异 (整帧稀疏采样, 步长 97)\n");
+    printf("[2] 相邻帧内容差异 (均匀抽样 4096 字节)\n");
     printf("    比较 %zu 对, 完全相同的帧对: %zu (%.1f%%)\n", compared, identical, identPct);
     printf("    平均逐像素差 (MAD): %.3f  (真画面应 > 0)\n\n",
            compared ? madSum / compared : 0.0);
@@ -451,7 +482,7 @@ int main(int argc, char** argv)
         dupFrames += (c - 1);
     }
     const double uniqueFps = wallMs > 0.0 ? uniqueFrames * 1000.0 / wallMs : 0.0;
-    printf("[3] 内容去重 (FNV-1a 整帧哈希)\n");
+    printf("[3] 内容去重 (FNV-1a 抽样指纹; 静止画面不可判定独立帧率)\n");
     printf("    唯一帧 %zu, 重复帧 %zu  -> 唯一帧率 %.1f fps\n\n", uniqueFrames, dupFrames, uniqueFps);
 
     // ── 4. 设备时间戳间隔 ───────────────────────────────────────────────────
@@ -483,18 +514,19 @@ int main(int argc, char** argv)
 
     // ── 判读 ────────────────────────────────────────────────────────────────
     printf("=== 判读 ===\n");
-    const bool contentReal = (identPct < 5.0) && (uniqueFps > 0.75 * FPS);
-    const bool arrivalReal = arrivalFps > 0.75 * FPS;
-
-    if (contentReal && arrivalReal)
-        printf(">>> 真 %d fps: 帧内容逐帧变化, 没有复制帧, 到达率也到位。\n", FPS);
-    else if (!contentReal && arrivalReal)
-        printf(">>> 你的怀疑成立: sample 按 %d/s 到达, 但只有 ~%.0f 个【内容不同】的帧 ——\n"
-               "    驱动/MF 在复制同一批帧。真实采集只有约 %.0f fps。\n",
-               FPS, uniqueFps, uniqueFps);
+    const bool arrivalReal = arrivalFps >= 0.9 * FPS;
+    const bool contentMoving = uniqueFps >= 0.5 * arrivalFps;
+    if (!arrivalReal)
+        printf(">>> 虽然协商为 %d fps, 此次实际只收到 %.1f sample/s。\n"
+               "    请比较 %d fps 模式; 当前链路没有按目标帧率投递。\n",
+               FPS, arrivalFps, FPS / 2);
+    else if (!contentMoving)
+        printf(">>> sample 到达率达到目标, 但画面几乎静止或变化区域未被抽样。\n"
+               "    请播放持续运动的测试画面后重测, 才能判定是否复制帧。\n");
+    else if (identPct < 5.0 && uniqueFps > 0.75 * FPS)
+        printf(">>> 此次输入画面持续变化, 收到的独立画面接近 %d fps。\n", FPS);
     else
-        printf(">>> 采集没跑起来: 到达率只有 %.1f fps, 唯一帧率 %.1f fps。\n"
-               "    这个模式在本机实际达不到 %d fps。\n", arrivalFps, uniqueFps, FPS);
+        printf(">>> sample 到达率达到目标, 但抽样内容有较多重复; 请核查输入源帧率。\n");
 
     (void)sawTypeChange;
     cb->Release();

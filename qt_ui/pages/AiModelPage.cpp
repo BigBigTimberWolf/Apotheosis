@@ -93,7 +93,7 @@ AiModelPage::AiModelPage(QWidget* parent)
            "FP16: 现状, 稳。\n"
            "INT8: Turing 的 INT8 tensor core 吞吐约为 FP16 的 2 倍, 但需要校准图集\n"
            "      (读取 calib/ 目录), 且量化误差对小目标最敏感 —— 必须实测漏检率。\n"
-           "改完必须删掉 models/engines/ 下对应的旧 .engine 才会重新导出。\n"
+           "切换精度后会使用对应的引擎缓存；首次构建可能需要较长时间。\n"
            "FP8 不提供: 需要 Ada/Hopper, 本机显卡不支持。"));
     {
         const int idx = m_precisionCombo->findData(cfg.enginePrecision());
@@ -102,19 +102,15 @@ AiModelPage::AiModelPage(QWidget* parent)
     modelCard->contentLayout()->addWidget(
         FormKit::fieldRow(QStringLiteral("引擎精度"), m_precisionCombo));
 
-    m_calibHintLabel = new QLabel;
-    m_calibHintLabel->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
-    m_calibHintLabel->setWordWrap(true);
-    modelCard->contentLayout()->addWidget(m_calibHintLabel);
-
-    auto updateCalibHint = [this, &cfg]() {
+    const QString precisionHelp = m_precisionCombo->toolTip();
+    auto updateCalibHint = [this, &cfg, precisionHelp]() {
         const bool int8 = cfg.enginePrecision() == QLatin1String("int8");
-        m_calibHintLabel->setText(int8
+        const QString calibHelp = int8
             ? tr("INT8 已选: 校准图会从 %1/ 读取 (jpg/png/bmp, 建议 100~200 张真实游戏画面)。\n"
                  "没有校准图时导出会直接失败并报错, 不会悄悄退回 FP16。")
                   .arg(cfg.int8CalibDir())
-            : QString());
-        m_calibHintLabel->setVisible(int8);
+            : QString();
+        m_precisionCombo->setToolTip(precisionHelp + (calibHelp.isEmpty() ? QString() : QStringLiteral("\n\n") + calibHelp));
     };
     updateCalibHint();
 
@@ -143,8 +139,7 @@ AiModelPage::AiModelPage(QWidget* parent)
     browseBtn->setToolTip(
         tr("从文件系统选择一个模型文件,自动拷贝到 models/ 目录下。"));
     browseRow->addWidget(browseBtn);
-    auto* importLabel = new QLabel(QStringLiteral("<span style='color:#888;'>(导入到 models/)</span>"));
-    browseRow->addWidget(importLabel);
+    browseBtn->setToolTip(browseBtn->toolTip() + QStringLiteral(" 导入到 models/ 目录。"));
     modelCard->contentLayout()->addWidget(browseWidget);
 
     layout->addWidget(modelCard);
@@ -362,6 +357,21 @@ void AiModelPage::updateModelInfo() {
     if (info.suffix().compare(QStringLiteral("onnx"), Qt::CaseInsensitive) == 0) {
         const QByteArray utf8Path = QDir::toNativeSeparators(info.absoluteFilePath()).toUtf8();
         const auto metadata = detector::inspect_onnx_model(std::string(utf8Path.constData()), false);
+        const auto outputKind = detector::classify_model_output(metadata.output_shape);
+        if (outputKind == detector::ModelOutputKind::RawChannelsFirst
+            || outputKind == detector::ModelOutputKind::RawRowsFirst) {
+            QStringList dims;
+            for (const auto dim : metadata.output_shape) dims << QString::number(dim);
+            m_fixedInputLabel->setText(
+                QStringLiteral("输入：%1 × %2 · 输出 [%3]：原始 YOLO，软件负责解码与 NMS。")
+                    .arg(metadata.input_width).arg(metadata.input_height)
+                    .arg(dims.join(QStringLiteral(","))));
+            return;
+        }
+        if (!metadata.output_shape.empty() && outputKind == detector::ModelOutputKind::Unknown) {
+            m_fixedInputLabel->setText(QStringLiteral("当前模型输出格式不受支持"));
+            return;
+        }
         if (metadata.fixed_input_size_known) {
             m_fixedInputLabel->setText(metadata.fixed_input_size
                 ? QStringLiteral("输入尺寸：固定 · 类别数：%1").arg(metadata.class_count)
@@ -380,7 +390,7 @@ void AiModelPage::updateBackendStatus() {
     m_backendStatusLabel->setText(QStringLiteral(
         "TensorRT 引擎 I/O 固定为 FP16；计算精度可选 FP16 或 INT8(校准量化)。\n"
         "%1\n"
-        "只支持 end2end 形态的模型(输出 [1,N,6]，即 NMS/解码已烘进图内)。")
+        "支持 end2end [1,N,6] 和原始 YOLO [1,4+C,N] 输出；后者由软件完成 NMS。")
         .arg(int8
             ? QStringLiteral("当前: INT8 —— 首次导出会对 calib/ 里的图做熵校准, 需要几分钟。")
             : QStringLiteral("当前: FP16。")));

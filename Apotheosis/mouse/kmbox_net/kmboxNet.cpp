@@ -1,4 +1,9 @@
 #include <time.h>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+#include <atomic>
+#include <mutex>
 
 #include "kmbox_net/kmboxNet.h"
 #include "kmbox_net/HidTable.h"
@@ -12,9 +17,14 @@ client_tx rx;
 SOCKADDR_IN addrSrv;
 soft_mouse_t    softmouse;
 soft_keyboard_t softkeyboard;
-static int monitor_run = 0;
+static std::atomic<int> monitor_run{0};
+static HANDLE monitor_thread_handle = nullptr;
+static std::mutex monitor_state_mutex;
+static bool monitor_has_report = false;
+static void stopMonitor();
 static int mask_keyboard_mouse_flag = 0;
-static short monitor_port = 0;
+static bool client_winsock_started = false;
+static int last_socket_error = 0;
 
 #pragma pack(1)
 typedef struct {
@@ -73,36 +83,97 @@ int NetRxReturnHandle(client_tx* rx, client_tx* tx)
 
 int kmNet_init(char* ip, char* port, char* mac)
 {
-	WORD wVersionRequested; WSADATA wsaData; int err;
-	wVersionRequested = MAKEWORD(1, 1);
-	err = WSAStartup(wVersionRequested, &wsaData);
-	if (err != 0)        return err_creat_socket;
+	last_socket_error = 0;
+	// The packet header contains four UUID bytes. The old parser read eight
+	// characters unconditionally, including beyond the string for a short value.
+	if (!ip || !port || !mac || std::strlen(mac) != 8)
+		return err_net_invalid_config;
+	for (int i = 0; i < 8; ++i)
+		if (!std::isxdigit(static_cast<unsigned char>(mac[i])))
+			return err_net_invalid_config;
+	char* port_end = nullptr;
+	const long parsed_port = std::strtol(port, &port_end, 10);
+	if (port_end == port || *port_end != '\0' || parsed_port <= 0 || parsed_port > 65535)
+		return err_net_invalid_config;
+
+	WSADATA wsaData{};
+	int err = WSAStartup(MAKEWORD(1, 1), &wsaData);
+	if (err != 0) { last_socket_error = err; return err_creat_socket; }
+	client_winsock_started = true;
+	if (inet_addr(ip) == INADDR_NONE) {
+		kmNet_close();
+		return err_net_invalid_config;
+	}
 	if (LOBYTE(wsaData.wVersion) != 1 || HIBYTE(wsaData.wVersion) != 1) {
-		WSACleanup(); sockClientfd = -1;
+		kmNet_close();
 		return err_net_version;
 	}
 	srand((unsigned)time(NULL));
 	sockClientfd = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sockClientfd <= 0)
+	if (sockClientfd == INVALID_SOCKET) {
+		last_socket_error = WSAGetLastError();
+		kmNet_close();
 		return err_creat_socket;
-	DWORD timeout_ms = 200;
+	}
+	// The official client allows a longer handshake. 200 ms per attempt can
+	// exhaust all retries before a slow device or LAN path returns its first reply.
+	DWORD timeout_ms = 1000;
 	setsockopt(sockClientfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
 	addrSrv.sin_addr.S_un.S_addr = inet_addr(ip);
 	addrSrv.sin_family = AF_INET;
-	addrSrv.sin_port = htons(atoi(port));
+	addrSrv.sin_port = htons(static_cast<unsigned short>(parsed_port));
 	tx.head.mac = StrToHex(mac, 4);
 	tx.head.rand = rand();
 	tx.head.indexpts = 0;
 	tx.head.cmd = cmd_connect;
 	memset(&softmouse, 0, sizeof(softmouse));
 	memset(&softkeyboard, 0, sizeof(softkeyboard));
-	err = sendto(sockClientfd, (const char*)&tx, sizeof(cmd_head_t), 0, (struct sockaddr*)&addrSrv, sizeof(addrSrv));
-	Sleep(20);
-	int clen = sizeof(addrSrv);
-	err = recvfrom(sockClientfd, (char*)&rx, 1024, 0, (struct sockaddr*)&addrSrv, &clen);
-	if (err < 0)
-		return err_net_rx_timeout;
-	return NetRxReturnHandle(&rx, &tx);
+	int result = err_net_rx_timeout;
+	last_socket_error = 0;
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		err = sendto(sockClientfd, (const char*)&tx, sizeof(cmd_head_t), 0,
+			(struct sockaddr*)&addrSrv, sizeof(addrSrv));
+		if (err == SOCKET_ERROR) {
+			last_socket_error = WSAGetLastError();
+			result = err_net_tx;
+			continue;
+		}
+		if (attempt == 0) Sleep(20);
+		SOCKADDR_IN responder{};
+		int clen = sizeof(responder);
+		err = recvfrom(sockClientfd, (char*)&rx, sizeof(rx), 0,
+			(struct sockaddr*)&responder, &clen);
+		if (err == SOCKET_ERROR) {
+			last_socket_error = WSAGetLastError();
+			result = err_net_rx_timeout;
+			continue;
+		}
+		if (err < static_cast<int>(sizeof(cmd_head_t))) {
+			result = err_net_cmd;
+			continue;
+		}
+		result = NetRxReturnHandle(&rx, &tx);
+		if (result == 0) return 0;
+	}
+	kmNet_close();
+	return result;
+}
+
+void kmNet_close()
+{
+	stopMonitor();
+	if (sockClientfd != 0 && sockClientfd != INVALID_SOCKET)
+		closesocket(sockClientfd);
+	sockClientfd = 0;
+	if (client_winsock_started) {
+		WSACleanup();
+		client_winsock_started = false;
+	}
+}
+
+int kmNet_last_socket_error()
+{
+	return last_socket_error;
 }
 
 int kmNet_mouse_move(short x, short y)
@@ -395,131 +466,120 @@ int kmNet_reboot(void)
 
 }
 
-DWORD WINAPI ThreadListenProcess(LPVOID lpParameter)
+static void stopMonitor()
 {
-	WSADATA wsaData; int ret;
-	WSAStartup(MAKEWORD(1, 1), &wsaData);
-	sockMonitorfd = socket(AF_INET, SOCK_DGRAM, 0);
-	DWORD timeout_ms = 200;
-	setsockopt(sockMonitorfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-	sockaddr_in servAddr;
-	memset(&servAddr, 0, sizeof(servAddr));
-	servAddr.sin_family = PF_INET;
-	servAddr.sin_addr.s_addr = INADDR_ANY;
-	servAddr.sin_port = htons(monitor_port);
-	ret = bind(sockMonitorfd, (SOCKADDR*)&servAddr, sizeof(SOCKADDR));
-	SOCKADDR cliAddr;
-	int nSize = sizeof(SOCKADDR);
-	char buff[1024];
-	monitor_run = monitor_ok;
-	while (monitor_run != monitor_exit) {
-		int ret = recvfrom(sockMonitorfd, buff, 1024, 0, &cliAddr, &nSize);
-		if (ret > 0)
-		{
-			memcpy(&hw_mouse, buff, sizeof(hw_mouse));
-			memcpy(&hw_keyboard, &buff[sizeof(hw_mouse)], sizeof(hw_keyboard));
-		}
-		else if (WSAGetLastError() != WSAETIMEDOUT)
-		{
-			break;
-		}
-	}
-	monitor_run = 0;
-	sockMonitorfd = 0;
-	return 0;
+    monitor_run.store(monitor_exit);
+    if (monitor_thread_handle) {
+        // recvfrom has a 200 ms timeout; wait before reusing the socket/state.
+        WaitForSingleObject(monitor_thread_handle, INFINITE);
+        CloseHandle(monitor_thread_handle);
+        monitor_thread_handle = nullptr;
+    }
+    if (sockMonitorfd != 0 && sockMonitorfd != INVALID_SOCKET) closesocket(sockMonitorfd);
+    sockMonitorfd = 0;
+    std::lock_guard<std::mutex> lock(monitor_state_mutex);
+    hw_mouse = {};
+    hw_keyboard = {};
+    monitor_has_report = false;
+}
+
+DWORD WINAPI ThreadListenProcess(LPVOID)
+{
+    const SOCKET socket = sockMonitorfd;
+    while (monitor_run.load() == monitor_ok) {
+        sockaddr_in peer{};
+        int peerSize = sizeof(peer);
+        char buffer[1024];
+        const int count = recvfrom(socket, buffer, sizeof(buffer), 0,
+            reinterpret_cast<sockaddr*>(&peer), &peerSize);
+        if (count >= static_cast<int>(sizeof(hw_mouse) + sizeof(hw_keyboard)) &&
+            peer.sin_addr.s_addr == addrSrv.sin_addr.s_addr) {
+            std::lock_guard<std::mutex> lock(monitor_state_mutex);
+            memcpy(&hw_mouse, buffer, sizeof(hw_mouse));
+            memcpy(&hw_keyboard, buffer + sizeof(hw_mouse), sizeof(hw_keyboard));
+            monitor_has_report = true;
+        } else if (count == SOCKET_ERROR && WSAGetLastError() != WSAETIMEDOUT) {
+            break;
+        }
+    }
+    monitor_run.store(monitor_exit);
+    return 0;
 }
 
 int kmNet_monitor(short port)
 {
-	int err;
-	if (sockClientfd <= 0)       return err_creat_socket;
-	tx.head.indexpts++;
-	tx.head.cmd = cmd_monitor;
-	if (port) {
-		monitor_port = port;
-		tx.head.rand = port | 0xaa55 << 16;
-	}
-	else
-		tx.head.rand = 0;
-	int length = sizeof(cmd_head_t);
-	sendto(sockClientfd, (const char*)&tx, length, 0, (struct sockaddr*)&addrSrv, sizeof(addrSrv));
-	SOCKADDR_IN sclient;
-	int clen = sizeof(sclient);
-	err = recvfrom(sockClientfd, (char*)&rx, 1024, 0, (struct sockaddr*)&sclient, &clen);
-	if (sockMonitorfd > 0)
-	{
-		closesocket(sockMonitorfd);
-		sockMonitorfd = 0;
-	}
-	if (port)
-	{
-		CreateThread(NULL, 0, ThreadListenProcess, NULL, 0, NULL);
-	}
-	Sleep(10);
-	if (err < 0)
-		return err_net_rx_timeout;
-	return NetRxReturnHandle(&rx, &tx);
+    if (sockClientfd == 0 || sockClientfd == INVALID_SOCKET) return err_creat_socket;
+    stopMonitor();
+    const auto unsignedPort = static_cast<unsigned short>(port);
+    if (unsignedPort != 0) {
+        sockMonitorfd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sockMonitorfd == INVALID_SOCKET) {
+            last_socket_error = WSAGetLastError();
+            sockMonitorfd = 0;
+            return err_creat_socket;
+        }
+        DWORD timeout = 200;
+        BOOL exclusive = TRUE;
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = INADDR_ANY;
+        local.sin_port = htons(unsignedPort);
+        if (setsockopt(sockMonitorfd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                       reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) != 0 ||
+            setsockopt(sockMonitorfd, SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&timeout), sizeof(timeout)) != 0 ||
+            bind(sockMonitorfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
+            last_socket_error = WSAGetLastError();
+            stopMonitor();
+            return err_net_monitor_bind;
+        }
+    }
+    tx.head.indexpts++;
+    tx.head.cmd = cmd_monitor;
+    tx.head.rand = unsignedPort ? static_cast<unsigned int>(unsignedPort) | 0xaa550000u : 0;
+    if (sendto(sockClientfd, reinterpret_cast<const char*>(&tx), sizeof(cmd_head_t), 0,
+               reinterpret_cast<sockaddr*>(&addrSrv), sizeof(addrSrv)) != sizeof(cmd_head_t)) {
+        last_socket_error = WSAGetLastError();
+        stopMonitor();
+        return err_net_tx;
+    }
+    sockaddr_in peer{};
+    int peerSize = sizeof(peer);
+    const int count = recvfrom(sockClientfd, reinterpret_cast<char*>(&rx), sizeof(rx), 0,
+        reinterpret_cast<sockaddr*>(&peer), &peerSize);
+    const int result = count < 0 ? err_net_rx_timeout :
+        count < static_cast<int>(sizeof(cmd_head_t)) ? err_net_cmd : NetRxReturnHandle(&rx, &tx);
+    if (result != 0) { stopMonitor(); return result; }
+    if (unsignedPort != 0) {
+        monitor_run.store(monitor_ok);
+        monitor_thread_handle = CreateThread(nullptr, 0, ThreadListenProcess, nullptr, 0, nullptr);
+        if (!monitor_thread_handle) { stopMonitor(); return err_creat_socket; }
+    }
+    return 0;
 }
 
-int kmNet_monitor_mouse_left()
+static int monitorMouse(unsigned char mask)
 {
-	if (monitor_run != monitor_ok) return -1;
-	return (hw_mouse.buttons & 0x01) ? 1 : 0;
+    std::lock_guard<std::mutex> lock(monitor_state_mutex);
+    if (monitor_run.load() != monitor_ok || !monitor_has_report) return -1;
+    return (hw_mouse.buttons & mask) ? 1 : 0;
 }
+int kmNet_monitor_mouse_left() { return monitorMouse(0x01); }
+int kmNet_monitor_mouse_middle() { return monitorMouse(0x04); }
+int kmNet_monitor_mouse_right() { return monitorMouse(0x02); }
+int kmNet_monitor_mouse_side1() { return monitorMouse(0x08); }
+int kmNet_monitor_mouse_side2() { return monitorMouse(0x10); }
 
-int kmNet_monitor_mouse_middle()
+int kmNet_monitor_keyboard(short vkey)
 {
-	if (monitor_run != monitor_ok) return -1;
-	return (hw_mouse.buttons & 0x04) ? 1 : 0;
-}
-
-int kmNet_monitor_mouse_right()
-{
-	if (monitor_run != monitor_ok) return -1;
-	return (hw_mouse.buttons & 0x02) ? 1 : 0;
-}
-
-int kmNet_monitor_mouse_side1()
-{
-	if (monitor_run != monitor_ok) return -1;
-	return (hw_mouse.buttons & 0x08) ? 1 : 0;
-}
-
-int kmNet_monitor_mouse_side2()
-{
-	if (monitor_run != monitor_ok) return -1;
-	return (hw_mouse.buttons & 0x10) ? 1 : 0;
-}
-
-int kmNet_monitor_keyboard(short  vkey)
-{
-	unsigned char vk_key = vkey & 0xff;
-	if (monitor_run != monitor_ok) return -1;
-	if (vk_key >= KEY_LEFTCONTROL && vk_key <= KEY_RIGHT_GUI)
-	{
-		switch (vk_key)
-		{
-		case KEY_LEFTCONTROL: return  hw_keyboard.buttons & BIT0 ? 1 : 0;
-		case KEY_LEFTSHIFT:   return  hw_keyboard.buttons & BIT1 ? 1 : 0;
-		case KEY_LEFTALT:     return  hw_keyboard.buttons & BIT2 ? 1 : 0;
-		case KEY_LEFT_GUI:    return  hw_keyboard.buttons & BIT3 ? 1 : 0;
-		case KEY_RIGHTCONTROL:return  hw_keyboard.buttons & BIT4 ? 1 : 0;
-		case KEY_RIGHTSHIFT:  return  hw_keyboard.buttons & BIT5 ? 1 : 0;
-		case KEY_RIGHTALT:    return  hw_keyboard.buttons & BIT6 ? 1 : 0;
-		case KEY_RIGHT_GUI:   return  hw_keyboard.buttons & BIT7 ? 1 : 0;
-		}
-	}
-	else
-	{
-		for (int i = 0; i < 10; i++)
-		{
-			if (hw_keyboard.data[i] == vk_key)
-			{
-				return 1;
-			}
-		}
-	}
-	return 0;
+    std::lock_guard<std::mutex> lock(monitor_state_mutex);
+    if (monitor_run.load() != monitor_ok || !monitor_has_report) return -1;
+    const unsigned char key = static_cast<unsigned char>(vkey);
+    if (key == 0) return 0;
+    if (key >= KEY_LEFTCONTROL && key <= KEY_RIGHT_GUI)
+        return (hw_keyboard.buttons & (1u << (key - KEY_LEFTCONTROL))) ? 1 : 0;
+    for (const auto down : hw_keyboard.data) if (down == key) return 1;
+    return 0;
 }
 
 int kmNet_debug(short port, char enable)

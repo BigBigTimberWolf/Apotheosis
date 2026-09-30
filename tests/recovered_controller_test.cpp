@@ -1,0 +1,417 @@
+#include "control/recovered_pid.h"
+#include "control/recovered_tracker.h"
+#include "control/recovered_aim_controller.h"
+#include "runtime/aim_loop.h"
+#include "runtime/aimpoint_recoil.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
+namespace {
+int failures = 0;
+void check(bool okay, const char* message)
+{
+    if (!okay) { std::printf("FAIL: %s\n", message); ++failures; }
+}
+}
+
+int main()
+{
+    using namespace control;
+
+    runtime::AimpointRecoilGate recoil;
+    check(recoil.update(true, false, 1000, 30.0, 60.0) == 0.0,
+          "aim hotkey alone does not start aimpoint recoil");
+    check(recoil.update(true, true, 1100, 30.0, 60.0) == 0.0 &&
+          std::abs(recoil.update(true, true, 1300, 30.0, 60.0) - 6.0) < 1e-6,
+          "recoil starts when fire joins the held aim hotkey");
+    check(recoil.update(true, false, 1400, 30.0, 60.0) == 0.0 &&
+          recoil.update(true, true, 1500, 30.0, 60.0) == 0.0,
+          "fire release resets recoil for the next shot");
+    check(recoil.update(true, true, 5000, 30.0, 60.0) == 60.0 &&
+          recoil.update(false, true, 5100, 30.0, 60.0) == 0.0,
+          "recoil is capped and aim-hotkey release resets it");
+    // Automatic trigger presses are supplied as fireHeld only after the
+    // driver accepts left-down; their release follows the same reset path.
+    check(recoil.update(true, true, 6000, 30.0, 60.0) == 0.0 &&
+          std::abs(recoil.update(true, true, 6100, 30.0, 60.0) - 3.0) < 1e-6 &&
+          recoil.update(true, false, 6200, 30.0, 60.0) == 0.0,
+          "automatic trigger hold and release use the same recoil gate");
+
+    // FOV interpolation and target-switch regressions.
+    {
+        DynamicFov fov;
+        fov.configure({100,100}, true, 10, 200, 120);
+        const Box distant{30,-5,10,10};
+        for (int n=0; n<100; ++n) fov.follow(distant, {}, .01);
+        check(fov.radii().x>45 && fov.contains(distant, {}, true),
+              "slow pursuit retains room instead of shrinking through the locked target");
+        for (int n=0; n<100; ++n) fov.follow({-5,-5,10,10}, {}, .01);
+        check(fov.radii().x<5.1 && fov.radii().y<5.1,
+              "FOV smoothly contracts once the crosshair catches up");
+        fov.follow(distant, {}, .01);
+        check(fov.radii().x>5.1 && fov.radii().x<50 &&
+              fov.contains(distant, {}, true) && !fov.contains(distant, {}, false),
+              "expansion is smooth and the established lock survives the contracted gate");
+        check(!fov.contains({100,100,10,10}, {}, true),
+              "lock protection does not bypass the original FOV boundary");
+        const double beforeRelease=fov.radii().x;
+        fov.release(.01);
+        check(fov.radii().x>beforeRelease && fov.radii().x<50,
+              "target loss uses configured expansion time instead of snapping to full FOV");
+        fov.configure({100,100}, true, 10, 200, 0);
+        fov.release(.01);
+        check(fov.radii().x==50, "zero expansion time restores FOV immediately");
+        fov.reset();
+        check(fov.radii().x==50 && fov.radii().y==50, "FOV reset restores original dimensions");
+
+        RecoveredPid masked;
+        RecoveredPidConfig p;
+        p.kdX=p.kdY=0;
+        p.feedforwardX=p.feedforwardY=1;
+        p.maskX=true;
+        masked.setConfig(p);
+        for (int n=0; n<30; ++n) {
+            const auto step=masked.update({30,30},{10,10},.01);
+            check(step.counts.x==0 && step.integral.x==0 && step.carry.x==0 && step.counts.y>0,
+                  "masking X suppresses PID, FF and carry without disabling Y");
+        }
+        p.maskY=true;
+        masked.setConfig(p);
+        const auto both=masked.update({30,30},{10,10},.01);
+        check(both.counts.x==0 && both.counts.y==0 && both.integral.y==0 && both.carry.y==0,
+              "masking both axes suppresses both outputs and clears stored accumulation");
+    }
+
+    {
+        int previousAcquireMs = 0;
+        for (int expandMs : {0, 500, 1000}) {
+            ControllerConfig cfg;
+            cfg.frameWidth = cfg.frameHeight = 320;
+            cfg.fovWidth = cfg.fovHeight = 200;
+            cfg.dynamicFovEnabled = true;
+            cfg.dynamicFovSize = 20;
+            cfg.dynamicFovShrinkMs = 200;
+            cfg.dynamicFovExpandMs = expandMs;
+            cfg.buckets.byClassId = {Bucket::Aim, Bucket::Aim};
+            RecoveredAimController controller;
+            controller.setConfig(cfg, {});
+            ControlInput in;
+            in.cross = {160, 160}; in.dtSec = .01;
+            in.candidates = {Candidate{{155,155,10,10},0,.9}};
+            ControlOutput out;
+            for (int i=0; i<150; ++i) out = controller.update(in);
+            check(out.fovRadii.x < 10.01, "initial lock contracts the FOV");
+            in.candidates = {Candidate{{200,155,10,10},1,.9}};
+            int acquiredMs = 0;
+            for (int i=1; i<=200; ++i) {
+                const auto before = out.fovRadii;
+                out = controller.update(in);
+                if (!out.engaged) continue;
+                acquiredMs = i * 10;
+                check(out.targetClassId == 1, "the newly acquired target is selected");
+                if (expandMs > 0) {
+                    check(out.fovRadii.x < before.x + 6 && out.fovRadii.y <= before.y,
+                          "new target preserves FOV instead of snapping to full size");
+                    std::printf("FOV %d ms: acquire %d ms, radius %.2f -> %.2f\n",
+                                expandMs, acquiredMs, before.x, out.fovRadii.x);
+                }
+                break;
+            }
+            check(acquiredMs > previousAcquireMs, "longer expansion delays entry of an outside target");
+            previousAcquireMs = acquiredMs;
+            controller.reset();
+            in.candidates.clear();
+            out = controller.update(in);
+            check(out.fovRadii.x == 100, "explicit stop/reset still restores the full FOV");
+        }
+    }
+
+    RecoveredPid pid;
+    RecoveredPidConfig config;
+    config.kpX = config.kpY = 0.5f;
+    config.kiX = config.kiY = 0.5f;
+    config.kdX = config.kdY = 0.0f;
+    config.deadzoneX = 10.0f;
+    config.deadzoneY = 0.0f;
+    config.smoothMaxPixel = 3.0f;
+    config.segmentEnabled = true;
+    config.segment = 2.0f;
+    pid.setConfig(config);
+    const Counts expected[] = { { 2, -1 }, { 1, -1 }, { 2, -1 } };
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        const auto step = pid.update({ 8, -4 }, {}, 0.0625);
+        check(step.counts.x == expected[frame].x &&
+              step.counts.y == expected[frame].y,
+              "recovered direct PID sequence (77)");
+    }
+
+    pid.reset();
+    config.smoothMaxPixel = 10.0f;
+    config.feedforwardX = config.feedforwardY = 1.0f;
+    pid.setConfig(config);
+    const auto withFeedforward = pid.update({ 8, -4 }, { 2, -2 }, 0.0625);
+    check(withFeedforward.counts.x == 3 && withFeedforward.counts.y == -2,
+          "feedforward joins after PID deadzone (77)");
+    config.segment = 1.0f;
+    pid.setConfig(config);
+    const auto changed = pid.update({ 8, -4 }, {}, 0.0625);
+    check(changed.counts.x == 0 && changed.counts.y == 0,
+          "segment change skips the current send (92)");
+    const auto stable = pid.update({ 8, -4 }, {}, 0.0625);
+    check(stable.counts.x != 0, "stable segment resumes sending");
+
+    RecoveredPid directD;
+    RecoveredPidConfig directDConfig;
+    directDConfig.kpX = directDConfig.kpY = 0.0f;
+    directDConfig.kiX = directDConfig.kiY = 0.0f;
+    directDConfig.kdX = directDConfig.kdY = 1.0f;
+    directD.setConfig(directDConfig);
+    directD.update({ 0, 0 }, {}, 0.01);
+    const auto directStep = directD.update({ 10, 0 }, {}, 0.01);
+    check(std::abs(directStep.derivativeRaw.x - 1000.0) < 0.1 &&
+          std::abs(directStep.pid.x - 1000.0) < 0.1,
+          "D term directly uses the current error difference");
+
+    RecoveredTracker tracker;
+    const auto first = tracker.update({ Candidate{ { 126, 114, 20, 20 }, 0, 0.9 } }, 0.01);
+    const auto second = tracker.update({ Candidate{ { 134, 114, 20, 20 }, 0, 0.9 } }, 0.01);
+    check(first.size() == 1 && second.size() == 1 && first[0].id == second[0].id,
+          "track keeps identity across a matched frame");
+    check(second.size() == 1 && std::abs(second[0].box.centerX() - 138.6668) < 0.01,
+          "recovered default position smoothing (90)");
+    check(second.size() == 1 && std::abs(second[0].velocity.x - 152.39) < 0.2,
+          "no-event two-frame velocity (90)");
+    tracker.update({}, 0.01);
+    const auto reacquired = tracker.update({ Candidate{ { 134, 114, 20, 20 }, 0, 0.9 } }, 0.01);
+    check(reacquired.size() == 1 && reacquired[0].id == first[0].id,
+          "track survives a one-frame miss (31)");
+
+    const Candidate row0{ { 130.485947, 113.547417, 14.514389, 18.778999 }, 0,
+                          0.544530 };
+    const Candidate row1{ { 130.616486, 113.466026, 13.957153, 17.991509 }, 0,
+                          0.322401 };
+    Candidate moved0 = row0, moved1 = row1;
+    moved0.box.x += 1.0;
+    moved1.box.x += 1.0;
+    RecoveredDualTracker dual;
+    dual.setFrameSize(256, 256);
+    const auto dualFirst = dual.update({ row0, row1 }, 0.01);
+    const auto dualSecond = dual.update({ moved0, moved1 }, 0.01);
+    check(dualFirst.size() == 1 && dualSecond.size() == 1 &&
+          dualSecond[0].id == dualFirst[0].id,
+          "0x168 merges same-frame overlap while E8 keeps both tracks (181/183)");
+    check(dualSecond.size() == 1 &&
+          std::abs(dualSecond[0].velocity.x - 23.2624) < 0.12,
+          "dual join exposes E8 velocity from selected state row (183)");
+    RecoveredDualTracker withEvent;
+    withEvent.setFrameSize(256, 256);
+    withEvent.update({ row0, row1 }, 0.01);
+    const auto eventSecond = withEvent.update({ moved0, moved1 }, 0.01, { 5, -1 });
+    check(eventSecond.size() == 1 &&
+          std::abs(eventSecond[0].velocity.x - 129.1065) < 0.2 &&
+          std::abs(eventSecond[0].velocity.y + 21.1688) < 0.2,
+          "successful-move event changes both feedforward axes (186)");
+    RecoveredDualTracker reversedOrder;
+    reversedOrder.setFrameSize(256, 256);
+    const auto reversedFirst = reversedOrder.update({ row1, row0 }, 0.01);
+    Candidate rising0 = row0, falling1 = row1;
+    rising0.box.y += 0.24;
+    falling1.box.y -= 0.24;
+    const auto reversedSecond = reversedOrder.update({ falling1, rising0 }, 0.01);
+    check(reversedFirst.size() == 1 && reversedSecond.size() == 1 &&
+          reversedSecond[0].velocity.y < -2.5,
+          "common input order can change joined E8 velocity sign (182)");
+
+    // The motion tracker sees both overlapping rows, while the box tracker
+    // merges them. Their next IDs then differ, even for a spatially matched
+    // moving target. An unrelated motion row with the same numeric ID must
+    // not prevent attaching the moving target's velocity.
+    RecoveredDualTracker offsetIds;
+    offsetIds.setFrameSize(256, 256);
+    const Candidate other{ { 180, 113, 16, 20 }, 0, 0.9 };
+    offsetIds.update({ row0, row1, other }, 0.01);
+    Candidate otherMoved = other;
+    otherMoved.box.x += 2.0;
+    const auto offsetIdTracks = offsetIds.update({ row0, row1, otherMoved }, 0.01);
+    bool movingVelocityFound = false;
+    for (const auto& track : offsetIdTracks)
+        if (track.box.centerX() > 160.0)
+            movingVelocityFound = track.velocity.x > 1.0;
+    check(movingVelocityFound,
+          "merged overlap cannot hide a separate moving target velocity");
+
+    RecoveredAimController eventController;
+    ControllerConfig eventConfig;
+    eventConfig.frameWidth = eventConfig.frameHeight = 256;
+    eventConfig.buckets.byClassId = { Bucket::Aim };
+    eventController.setConfig(eventConfig, RecoveredPidConfig{});
+    ControlInput eventInput;
+    eventInput.candidates = { row0, row1 };
+    eventInput.cross = { 128, 128 };
+    eventInput.dtSec = 0.01;
+    eventController.update(eventInput);
+    eventInput.candidates = { moved0, moved1 };
+    eventInput.motionEventSum = { 5, -1 };
+    const auto eventSelected = eventController.update(eventInput);
+    check(eventSelected.engaged &&
+          std::abs(eventSelected.trackedVelocity.x - 129.1065) < 0.2 &&
+          std::abs(eventSelected.trackedVelocity.y + 21.1688) < 0.2,
+          "successful movement feedback reaches selected feedforward (91/186)");
+
+    RecoveredAimController switching;
+    ControllerConfig switchConfig = eventConfig;
+    RecoveredPidConfig switchPid;
+    switching.setConfig(switchConfig, switchPid);
+    ControlInput switchInput;
+    switchInput.dtSec = 0.01;
+    switchInput.cross = { 128, 128 };
+    switchInput.candidates = { Candidate{ { 70, 110, 20, 20 }, 0, 0.9 } };
+    const auto oldTarget = switching.update(switchInput);
+    switchInput.candidates = { Candidate{ { 170, 110, 20, 20 }, 0, 0.9 } };
+    switching.update(switchInput);
+    switching.update(switchInput);
+    const auto newTarget = switching.update(switchInput);
+    check(oldTarget.engaged && newTarget.engaged &&
+          oldTarget.targetId != newTarget.targetId &&
+          std::abs(newTarget.derivativeRaw.x) > 0.01,
+          "target switch retains the PID derivative state");
+
+    RecoveredAimController controller;
+    ControllerConfig controllerConfig;
+    controllerConfig.buckets.byClassId = { Bucket::Aim };
+    controllerConfig.aimPoint.xOffset = controllerConfig.aimPoint.xOffsetMax = 0.5;
+    controllerConfig.aimPoint.yOffset = controllerConfig.aimPoint.yOffsetMax = 0.5;
+    controller.setConfig(controllerConfig, config);
+    ControlInput input;
+    input.dtSec = 0.05;
+    input.cross = { 128, 128 };
+    input.candidates = { Candidate{ { 126, 114, 20, 20 }, 0, 0.9 } };
+    const auto selected = controller.update(input);
+    check(selected.engaged && selected.hasTarget, "new runtime controller selects a track");
+    input.candidates.clear();
+    input.detectionFresh = false;
+    const auto missing = controller.update(input);
+    check(!missing.engaged, "missing frame produces no PID movement");
+    input.candidates = { Candidate{ { 126, 114, 20, 20 }, 0, 0.9 } };
+    input.detectionFresh = true;
+    const auto selectedAgain = controller.update(input);
+    check(selectedAgain.engaged && selectedAgain.targetId == selected.targetId,
+          "one-frame loss keeps target identity");
+
+    RecoveredAimController geometry;
+    controllerConfig.frameWidth = controllerConfig.frameHeight = 256;
+    controllerConfig.aimPoint.xOffset = controllerConfig.aimPoint.xOffsetMax = 0.875;
+    controllerConfig.aimPoint.yOffset = controllerConfig.aimPoint.yOffsetMax = 0.475;
+    geometry.setConfig(controllerConfig, config);
+    const auto point = geometry.update(input);
+    check(point.anchor.x == 144.0 && point.anchor.y == 124.0,
+          "source X rounding and Y truncation differ at half pixel (21)");
+
+    runtime::aim_loop::FlatConfig flat;
+    flat.detectionResolution = 256;
+    flat.aimClassIds = { 0 };
+    flat.classAimPoints = { { 0, 0.4, 0.4, 0.8, 0.8 } };
+    const auto wired = runtime::aim_loop::toControllerConfig(flat);
+    check(wired.frameWidth == 256 && wired.buckets.bucketOf(0) == Bucket::Aim &&
+          wired.classAimPoints.size() == 1 && wired.classAimPoints[0].xOffset == 0.8,
+          "runtime config reaches recovered geometry and class mapping");
+    RecoveredAimController crosshairFallback;
+    crosshairFallback.setConfig(wired, config);
+    ControlInput fallbackInput;
+    fallbackInput.dtSec = 0.05;
+    fallbackInput.cross = { 128, 128 };
+    fallbackInput.crosshairFresh = false;
+    fallbackInput.candidates = { Candidate{ { 126, 114, 20, 20 }, 0, 0.9 } };
+    const auto fallback = crosshairFallback.update(fallbackInput);
+    check(!wired.requireFreshCrosshair && fallback.engaged && fallback.hasTarget &&
+          fallback.cross.x == 128 && fallback.cross.y == 128,
+          "missing crosshair color keeps screen-center aiming active");
+
+    // The global class list is shared by all hotkeys. Only aimClassIds may
+    // select a target for the currently active hotkey.
+    runtime::aim_loop::FlatConfig perHotkey;
+    perHotkey.detectionResolution = 256;
+    perHotkey.classFilters = { { 0, 2 }, { 1, 2 } };
+    ControlInput hotkeyInput;
+    hotkeyInput.dtSec = 0.05;
+    hotkeyInput.cross = { 128, 128 };
+    hotkeyInput.candidates = {
+        Candidate{ { 126, 114, 20, 20 }, 0, 0.9 },
+        Candidate{ { 146, 114, 20, 20 }, 1, 0.9 }
+    };
+
+    RecoveredAimController emptyHotkey;
+    emptyHotkey.setConfig(runtime::aim_loop::toControllerConfig(perHotkey), config);
+    check(!emptyHotkey.update(hotkeyInput).hasTarget,
+          "hotkey without aim classes cannot inherit global aim targets");
+
+    perHotkey.aimClassIds = { 0 };
+    RecoveredAimController rightHotkey;
+    rightHotkey.setConfig(runtime::aim_loop::toControllerConfig(perHotkey), config);
+    const auto rightTarget = rightHotkey.update(hotkeyInput);
+    check(rightTarget.hasTarget && rightTarget.targetClassId == 0,
+          "right hotkey selects only its configured class");
+
+    perHotkey.aimClassIds = { 1 };
+    RecoveredAimController x2Hotkey;
+    x2Hotkey.setConfig(runtime::aim_loop::toControllerConfig(perHotkey), config);
+    const auto x2Target = x2Hotkey.update(hotkeyInput);
+    check(x2Target.hasTarget && x2Target.targetClassId == 1,
+          "X2 hotkey selects its own class instead of right hotkey targets");
+
+    // Both profiles can aim at the same class while keeping distinct Y points.
+    perHotkey.aimClassIds = { 0 };
+    perHotkey.classAimPoints = { { 0, 0.25, 0.25, 0.5, 0.5 } };
+    RecoveredAimController lowAim;
+    lowAim.setConfig(runtime::aim_loop::toControllerConfig(perHotkey), config);
+    const auto lowPoint = lowAim.update(hotkeyInput);
+
+    perHotkey.classAimPoints = { { 0, 1.0, 1.0, 0.5, 0.5 } };
+    RecoveredAimController highAim;
+    highAim.setConfig(runtime::aim_loop::toControllerConfig(perHotkey), config);
+    const auto highPoint = highAim.update(hotkeyInput);
+    check(lowPoint.hasTarget && highPoint.hasTarget &&
+          highPoint.anchor.y < lowPoint.anchor.y,
+          "X2 class Y offset changes the calculated aim point");
+
+    // A zero seed uses the built-in deterministic seed. It must not replace a
+    // nonzero class Y range with zero while the same target moves.
+    perHotkey.classAimPoints = { { 0, 0.8, 0.9, 0.5, 0.5 } };
+    RecoveredAimController randomY;
+    randomY.setConfig(runtime::aim_loop::toControllerConfig(perHotkey), config);
+    bool randomYStayedInRange = true;
+    for (int frame = 0; frame < 12; ++frame)
+    {
+        hotkeyInput.frameIndex = frame + 1;
+        hotkeyInput.candidates[0].box.x = 126 + frame;
+        const auto moving = randomY.update(hotkeyInput);
+        const double top = moving.targetBox.y;
+        const double height = moving.targetBox.h;
+        const double ratioFromTop = (moving.anchor.y - top) / height;
+        randomYStayedInRange &= moving.hasTarget &&
+            ratioFromTop >= 0.08 && ratioFromTop <= 0.22;
+    }
+    check(randomYStayedInRange,
+          "zero random seed preserves a nonzero class Y range while moving");
+
+    // The hotkey-held recoil mode moves the aim point on the same locked
+    // track; it does not need to rebuild or reset the controller each frame.
+    hotkeyInput.aimpointRecoilYpx = 8.0;
+    const auto shiftedPoint = lowAim.update(hotkeyInput);
+    hotkeyInput.aimpointRecoilYpx = 16.0;
+    const auto shiftedAgain = lowAim.update(hotkeyInput);
+    hotkeyInput.aimpointRecoilYpx = 0.0;
+    const auto restoredPoint = lowAim.update(hotkeyInput);
+    check(shiftedPoint.targetId == lowPoint.targetId &&
+          shiftedAgain.targetId == lowPoint.targetId &&
+          shiftedPoint.anchor.y == lowPoint.anchor.y + 8.0 &&
+          shiftedAgain.anchor.y == lowPoint.anchor.y + 16.0 &&
+          restoredPoint.anchor.y == lowPoint.anchor.y,
+          "held recoil offset grows and resets without switching target");
+
+    return failures ? 1 : 0;
+}

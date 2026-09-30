@@ -26,6 +26,7 @@ private slots:
     void onOpenDir();
 
 private:
+    void refreshConfigHint();
     void buildSwitchCard();
     void buildThresholdCard();
     void buildForceKeyCard();
@@ -33,6 +34,7 @@ private:
     void buildStatusCard();
 
     ToggleSwitch* m_enabled{};
+    QLabel* m_configHint{};
 
     ToggleSwitch*   m_useHigh{};
     QDoubleSpinBox* m_highConf{};

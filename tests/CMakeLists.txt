@@ -39,6 +39,23 @@ endfunction()
 
 add_logic_test(latency_probe_test "${APP_SOURCE_ROOT}/runtime/tests/latency_probe_test.cpp")
 add_logic_test(capture_card_caps_test "${APP_SOURCE_ROOT}/capture/tests/capture_card_caps_test.cpp")
+if(WIN32 AND OPENCV_LIB AND CUDAToolkit_FOUND)
+    add_executable(network_capture_test
+        "${CMAKE_CURRENT_LIST_DIR}/network_capture_test.cpp"
+        "${APP_SOURCE_ROOT}/capture/stream_capture.cpp")
+    target_include_directories(network_capture_test PRIVATE
+        "${APP_SOURCE_ROOT}" "${OPENCV_INCLUDE_DIR}")
+    target_link_libraries(network_capture_test PRIVATE
+        "${OPENCV_LIB}" CUDA::cudart ws2_32)
+    target_compile_features(network_capture_test PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(network_capture_test PRIVATE /utf-8 /Zc:char8_t-)
+    endif()
+    copy_runtime(network_capture_test "${OPENCV_DLL}")
+    copy_runtime(network_capture_test "${OPENCV_VC_DIR}/bin/opencv_videoio_ffmpeg4130_64.dll")
+    add_test(NAME network_capture_test COMMAND network_capture_test)
+    set_tests_properties(network_capture_test PROPERTIES TIMEOUT 25)
+endif()
 add_logic_test(device_frame_age_test "${CMAKE_CURRENT_LIST_DIR}/device_frame_age_test.cpp")
 add_logic_test(interruptible_slot_test "${CMAKE_CURRENT_LIST_DIR}/interruptible_slot_test.cpp")
 add_logic_test(gpu_ready_event_test "${CMAKE_CURRENT_LIST_DIR}/gpu_ready_event_test.cpp")
@@ -47,7 +64,19 @@ target_include_directories(gpu_ready_event_test BEFORE PRIVATE "${CMAKE_CURRENT_
 add_logic_test(raw_frame_layout_test "${CMAKE_CURRENT_LIST_DIR}/raw_frame_layout_test.cpp")
 add_logic_test(sensitivity_calibrator_test "${CMAKE_CURRENT_LIST_DIR}/sensitivity_calibrator_test.cpp")
 add_logic_test(weapon_switch31_test "${CMAKE_CURRENT_LIST_DIR}/weapon_switch31_test.cpp")
+add_logic_test(switch31_shot_gate_test "${CMAKE_CURRENT_LIST_DIR}/switch31_shot_gate_test.cpp")
+if(WIN32)
+    add_logic_test(dhzbox_driver_test "${CMAKE_CURRENT_LIST_DIR}/dhzbox_driver_test.cpp"
+        "${APP_SOURCE_ROOT}/mouse/dhzbox_driver.cpp")
+    target_link_libraries(dhzbox_driver_test PRIVATE ws2_32)
+endif()
 add_logic_test(neural_curve_test "${CMAKE_CURRENT_LIST_DIR}/neural_curve_test.cpp")
+add_logic_test(model_output_contract_test "${CMAKE_CURRENT_LIST_DIR}/model_output_contract_test.cpp")
+
+if(TENSORRT_ROOT AND EXISTS "${TENSORRT_ROOT}/include/NvInfer.h")
+    add_logic_test(trt_build_monitor_test "${CMAKE_CURRENT_LIST_DIR}/trt_build_monitor_test.cpp")
+    target_include_directories(trt_build_monitor_test PRIVATE "${TENSORRT_ROOT}/include")
+endif()
 
 if(Qt6Widgets_FOUND)
     add_executable(neural_curve_ui_smoke
@@ -67,59 +96,136 @@ if(Qt6Widgets_FOUND)
         target_compile_options(neural_curve_ui_smoke PRIVATE -fno-char8_t)
     endif()
     add_test(NAME neural_curve_ui_smoke COMMAND neural_curve_ui_smoke)
-    set_tests_properties(neural_curve_ui_smoke PROPERTIES
-        TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    # ★ 测试 exe 旁边没有 Qt6*.dll。Qt 运行时不在 DLL 搜索路径上时, 进程会在
+    #   main() 之前以 STATUS_DLL_NOT_FOUND (0xC0000135) 退出; ctest 只会看到
+    #   "超时 20s", 看起来像测试逻辑挂了 —— 实际是根本没跑起来。
+    #   所以把 Qt 的 bin 目录前置进测试进程的 PATH。
+    set(_neural_qt_core "")
+    foreach(_qt_loc_prop IMPORTED_LOCATION_RELEASE IMPORTED_LOCATION_NOCONFIG IMPORTED_LOCATION)
+        if(NOT _neural_qt_core)
+            get_target_property(_qt_try Qt6::Core ${_qt_loc_prop})
+            if(_qt_try AND NOT _qt_try MATCHES "-NOTFOUND$")
+                set(_neural_qt_core "${_qt_try}")
+            endif()
+        endif()
+    endforeach()
+    if(_neural_qt_core)
+        get_filename_component(_neural_qt_bin "${_neural_qt_core}" DIRECTORY)
+        set_tests_properties(neural_curve_ui_smoke PROPERTIES
+            TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_neural_qt_bin}")
+    else()
+        set_tests_properties(neural_curve_ui_smoke PROPERTIES
+            TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
+    add_executable(input_method_config_test
+        "${CMAKE_CURRENT_LIST_DIR}/input_method_config_test.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/config/ConfigManager.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/config/ConfigManager.h")
+    target_include_directories(input_method_config_test PRIVATE
+        "${APP_SOURCE_ROOT}" "${APP_SOURCE_ROOT}/config" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_compile_features(input_method_config_test PRIVATE cxx_std_20)
+    target_link_libraries(input_method_config_test PRIVATE Qt6::Core)
+    set_target_properties(input_method_config_test PROPERTIES AUTOMOC ON)
+    if(MSVC)
+        target_compile_options(input_method_config_test PRIVATE /utf-8 /Zc:char8_t-)
+    endif()
+    add_test(NAME input_method_config_test COMMAND input_method_config_test)
+    if(_neural_qt_core)
+        set_tests_properties(input_method_config_test PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_neural_qt_bin}")
+    endif()
+
+    add_executable(trigger_workflow_ui_test
+        "${CMAKE_CURRENT_LIST_DIR}/trigger_workflow_ui_test.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/TriggerWorkflowEditor.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/TriggerTargetEditor.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/FormKit.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.h")
+    target_include_directories(trigger_workflow_ui_test PRIVATE
+        "${APP_SOURCE_ROOT}" "${APP_SOURCE_ROOT}/config" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(trigger_workflow_ui_test PRIVATE Qt6::Widgets)
+    target_compile_features(trigger_workflow_ui_test PRIVATE cxx_std_20)
+    set_target_properties(trigger_workflow_ui_test PROPERTIES AUTOMOC ON)
+    if(MSVC)
+        target_compile_options(trigger_workflow_ui_test PRIVATE /utf-8 /Zc:char8_t-)
+    endif()
+    add_test(NAME trigger_workflow_ui_test COMMAND trigger_workflow_ui_test)
+    if(_neural_qt_core)
+        set_tests_properties(trigger_workflow_ui_test PROPERTIES TIMEOUT 20
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_neural_qt_bin}")
+    else()
+        set_tests_properties(trigger_workflow_ui_test PROPERTIES TIMEOUT 20
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
+    add_executable(overview_performance_button_test
+        "${CMAKE_CURRENT_LIST_DIR}/overview_performance_button_test.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/pages/OverviewPage.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MetricCard.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/TelemetryChart.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/IconFont.cpp")
+    target_include_directories(overview_performance_button_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(overview_performance_button_test PRIVATE Qt6::Widgets)
+    target_compile_features(overview_performance_button_test PRIVATE cxx_std_20)
+    set_target_properties(overview_performance_button_test PROPERTIES AUTOMOC ON)
+    if(MSVC)
+        target_compile_options(overview_performance_button_test PRIVATE /utf-8 /Zc:char8_t-)
+    endif()
+    add_test(NAME overview_performance_button_test COMMAND overview_performance_button_test)
+    if(_neural_qt_core)
+        set_tests_properties(overview_performance_button_test PROPERTIES TIMEOUT 20
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_neural_qt_bin}")
+    else()
+        set_tests_properties(overview_performance_button_test PROPERTIES TIMEOUT 20
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
 endif()
 
-# ── 控制器层回归 (2026-09-17 重建) ────────────────────────────────────────────
-#
-# ★★ 这一组钉的是【通用控制器层】—— ①选靶 ②稳定器 ③α-β滤波 ④瞄点 ⑤⑥PID+量化。
-#    它是控制链删除后第一批重建的回归。
-#
-# ★ 关键设计: 控制层【零依赖】(不引 OpenCV / Windows / Qt), 所以任何平台都能编。
-#   这正是它被单独拆出来的理由 —— 主程序 ai 目标在非 Windows 上根本编不了。
-#
-# ★★ 每条断言都必须能反向验证(改一行代码就变红)。见 tests/control_layer_test.cpp。
-# ★ 接线回归: "配置 → 控制器" 的映射。漏映射 = 静默失效(界面能改、跑起来没变),
-#   不报错不留痕, 所以它必须可测 —— 这就是把纯映射拆成 aim_loop_config.cpp 的原因。
-add_logic_test(control_wiring_test "${CMAKE_CURRENT_LIST_DIR}/control_wiring_test.cpp"
+# ── 移植控制器的数值与状态回归 ────────────────────────────────────────────────
+add_logic_test(recovered_controller_test "${CMAKE_CURRENT_LIST_DIR}/recovered_controller_test.cpp"
     "${APP_SOURCE_ROOT}/runtime/aim_loop_config.cpp"
     "${APP_SOURCE_ROOT}/control/types.cpp"
-    "${APP_SOURCE_ROOT}/control/selector.cpp"
-    "${APP_SOURCE_ROOT}/control/stabilizer.cpp"
-    "${APP_SOURCE_ROOT}/control/alpha_beta_filter.cpp"
     "${APP_SOURCE_ROOT}/control/anchor.cpp"
-    "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
-    "${APP_SOURCE_ROOT}/control/predictor.cpp"
-    "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
-
-add_logic_test(control_layer_test "${CMAKE_CURRENT_LIST_DIR}/control_layer_test.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_pid.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_tracker.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_aim_controller.cpp")
+add_logic_test(trigger_snap_return_test "${CMAKE_CURRENT_LIST_DIR}/trigger_snap_return_test.cpp"
+    "${APP_SOURCE_ROOT}/control/types.cpp")
+add_logic_test(motion_feedback_window_test "${CMAKE_CURRENT_LIST_DIR}/motion_feedback_window_test.cpp")
+add_logic_test(aimpoint_prediction_test "${CMAKE_CURRENT_LIST_DIR}/aimpoint_prediction_test.cpp"
     "${APP_SOURCE_ROOT}/control/types.cpp"
-    "${APP_SOURCE_ROOT}/control/selector.cpp"
-    "${APP_SOURCE_ROOT}/control/stabilizer.cpp"
-    "${APP_SOURCE_ROOT}/control/alpha_beta_filter.cpp"
     "${APP_SOURCE_ROOT}/control/anchor.cpp"
-    "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
-    "${APP_SOURCE_ROOT}/control/predictor.cpp"
-    "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
+    "${APP_SOURCE_ROOT}/control/recovered_pid.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_tracker.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_aim_controller.cpp")
 
-# ── 在途补偿(预测提前量)回归 ─────────────────────────────────────────────────
-#
-# ★ 2026-09-17 那轮删掉的 inflight_comp_test 钉的是【已被删除】的提前量模块。
-#   这一轮按现架构重建: 预测独立成 control/predictor.cpp, 挂在滤波之后、
-#   瞄点之前, 三个参数(提前时间/速度上限/距离上限)全部走配置。
-#
-# ★★ 最重要的一条不变量: lead_ms = 0 时逐帧输出必须与【未加该功能】完全一致。
-#    这是"能一键退回"的保证 —— 用户不填就一点变化都没有。
-add_logic_test(predictor_test "${CMAKE_CURRENT_LIST_DIR}/predictor_test.cpp"
-    "${APP_SOURCE_ROOT}/control/types.cpp"
-    "${APP_SOURCE_ROOT}/control/selector.cpp"
-    "${APP_SOURCE_ROOT}/control/stabilizer.cpp"
-    "${APP_SOURCE_ROOT}/control/alpha_beta_filter.cpp"
-    "${APP_SOURCE_ROOT}/control/anchor.cpp"
-    "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
-    "${APP_SOURCE_ROOT}/control/predictor.cpp"
-    "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
+add_logic_test(hotkey_selection_test "${CMAKE_CURRENT_LIST_DIR}/hotkey_selection_test.cpp")
+if(WIN32)
+    add_logic_test(kmbox_net_monitor_test "${CMAKE_CURRENT_LIST_DIR}/kmbox_net_monitor_test.cpp"
+        "${APP_SOURCE_ROOT}/mouse/kmbox_net/kmboxNet.cpp")
+    target_include_directories(kmbox_net_monitor_test PRIVATE "${APP_SOURCE_ROOT}/mouse")
+    target_compile_definitions(kmbox_net_monitor_test PRIVATE NOMINMAX)
+    target_link_libraries(kmbox_net_monitor_test PRIVATE ws2_32)
+endif()
+if(Qt6Widgets_FOUND)
+    add_logic_test(hotkey_activation_ui_test "${CMAKE_CURRENT_LIST_DIR}/hotkey_activation_ui_test.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/HotkeyActivationWidget.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/HotkeyActivationWidget.h")
+    target_include_directories(hotkey_activation_ui_test PRIVATE "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(hotkey_activation_ui_test PRIVATE Qt6::Widgets)
+    set_target_properties(hotkey_activation_ui_test PROPERTIES AUTOMOC ON)
+    set_tests_properties(hotkey_activation_ui_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    if(_neural_qt_bin)
+        set_tests_properties(hotkey_activation_ui_test PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_neural_qt_bin}")
+    endif()
+endif()
 
 # ── ★★ 自动扳机 + 轨迹曲线回归 (2026-09-17 恢复) ─────────────────────────────
 #
@@ -137,6 +243,9 @@ add_logic_test(predictor_test "${CMAKE_CURRENT_LIST_DIR}/predictor_test.cpp"
 #   轨迹侧 —— 直线模式逐位透传、【四种模式只旋转不缩放】、WindMouse 门控旁路、
 #             同一 target_id 轨迹可复现、reset 后等价于全新驱动器。
 add_logic_test(trigger_path_test "${CMAKE_CURRENT_LIST_DIR}/trigger_path_test.cpp")
+add_logic_test(trigger_target_test "${CMAKE_CURRENT_LIST_DIR}/trigger_target_test.cpp"
+    "${APP_SOURCE_ROOT}/control/types.cpp")
+add_logic_test(auto_stop_timing_test "${CMAKE_CURRENT_LIST_DIR}/auto_stop_timing_test.cpp")
 
 # ── 配置解析 (2026-09-14) ─────────────────────────────────────────────────────
 # 需要 config.cpp (解析/夹取) 与 SimpleIni。
@@ -164,6 +273,10 @@ endif()
 if(WIN32)
 add_executable(mouse_driver_test "${CMAKE_CURRENT_LIST_DIR}/mouse_driver_test.cpp"
     "${APP_SOURCE_ROOT}/mouse/mouse_driver.cpp"
+    "${APP_SOURCE_ROOT}/mouse/dhzbox_driver.cpp"
+    "${APP_SOURCE_ROOT}/mouse/ferrum_driver.cpp"
+    "${APP_SOURCE_ROOT}/mouse/cat_driver.cpp"
+    "${APP_SOURCE_ROOT}/mouse/windows_driver.cpp"
     "${APP_SOURCE_ROOT}/mouse/Makcu.cpp"
     "${APP_SOURCE_ROOT}/mouse/MakcuNew.cpp"
     "${APP_SOURCE_ROOT}/mouse/kmboxNetConnection.cpp"
@@ -183,10 +296,24 @@ target_include_directories(mouse_driver_test PRIVATE
     "${APP_SOURCE_ROOT}/modules/serial/include")
 target_compile_features(mouse_driver_test PRIVATE cxx_std_20)
 target_compile_definitions(mouse_driver_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(mouse_driver_test PRIVATE ws2_32 setupapi)
+target_link_libraries(mouse_driver_test PRIVATE ws2_32 setupapi bcrypt)
 if(MSVC)
     target_compile_options(mouse_driver_test PRIVATE /utf-8 /Zc:char8_t-)
 endif()
 add_test(NAME mouse_driver_test COMMAND mouse_driver_test)
 set_tests_properties(mouse_driver_test PROPERTIES TIMEOUT 10)
+
+add_executable(kmbox_net_loopback_test
+    "${CMAKE_CURRENT_LIST_DIR}/kmbox_net_loopback_test.cpp"
+    "${APP_SOURCE_ROOT}/mouse/kmbox_net/kmboxNet.cpp")
+target_include_directories(kmbox_net_loopback_test PRIVATE
+    "${APP_SOURCE_ROOT}" "${APP_SOURCE_ROOT}/mouse")
+target_compile_features(kmbox_net_loopback_test PRIVATE cxx_std_20)
+target_compile_definitions(kmbox_net_loopback_test PRIVATE NOMINMAX)
+target_link_libraries(kmbox_net_loopback_test PRIVATE ws2_32)
+if(MSVC)
+    target_compile_options(kmbox_net_loopback_test PRIVATE /utf-8)
+endif()
+add_test(NAME kmbox_net_loopback_test COMMAND kmbox_net_loopback_test)
+set_tests_properties(kmbox_net_loopback_test PROPERTIES TIMEOUT 10)
 endif()

@@ -3,7 +3,6 @@
 #include <numeric>
 #include <chrono>
 #include <limits>
-#include <unordered_set>
 
 #include "postProcess.h"
 #include "Apotheosis.h"
@@ -15,22 +14,18 @@ void applyDeleteBucketFilter(std::vector<Detection>& detections)
     if (detections.empty())
         return;
 
-    std::unordered_set<int> deleted;
-    {
-        const auto snapshot = runtime_config::read();
-        for (const auto& cf : snapshot->class_filters)
-        {
-            if (cf.bucket == ClassBucket::Delete)
-                deleted.insert(cf.class_id);
-        }
-    }
-
-    if (deleted.empty())
-        return;
+    const auto snapshot = runtime_config::read();
+    const auto& filters = snapshot->class_filters;
 
     detections.erase(
         std::remove_if(detections.begin(), detections.end(),
-            [&deleted](const Detection& d) { return deleted.count(d.classId) > 0; }),
+            [&filters](const Detection& d) {
+                return std::any_of(filters.begin(), filters.end(),
+                    [&d](const auto& filter) {
+                        return filter.bucket == ClassBucket::Delete
+                            && filter.class_id == d.classId;
+                    });
+            }),
         detections.end());
 }
 
@@ -39,6 +34,18 @@ DetectorRuntimeSettings detectorRuntimeSettings()
     DetectorRuntimeSettings out;
     const auto snapshot = runtime_config::read();
     out.confidenceThreshold = snapshot->confidence_threshold;
+    if (snapshot->auto_capture_enabled)
+    {
+        // The capture thresholds must be able to see detections that the aim
+        // threshold would otherwise discard. The aim loop applies its own
+        // original threshold before selecting a target.
+        if (snapshot->auto_capture_use_high)
+            out.confidenceThreshold = std::min(out.confidenceThreshold,
+                std::nextafter(snapshot->auto_capture_high_conf, 0.0f));
+        if (snapshot->auto_capture_use_low && snapshot->auto_capture_low_conf > 0.0f)
+            out.confidenceThreshold = std::min(out.confidenceThreshold,
+                std::nextafter(snapshot->auto_capture_low_conf, 0.0f));
+    }
     out.nmsThreshold = snapshot->nms_threshold;
     out.maxDetections = kFixedMaxDetections;
     out.detectionResolution = snapshot->detection_resolution;
@@ -54,7 +61,7 @@ SmallTargetDecode computeSmallTargetDecode()
     int resolution = 320;
     float area_frac = 0.0025f;
     const auto snapshot = runtime_config::read();
-    base = snapshot->confidence_threshold;
+    base = detectorRuntimeSettings().confidenceThreshold;
     enabled = snapshot->small_target_enabled;
     small_conf = snapshot->small_target_confidence;
     resolution = snapshot->detection_resolution;

@@ -20,11 +20,14 @@
 #include "nvinf.h"
 #include "Apotheosis.h"
 #include "trt_monitor.h"
+#include "engine_cache_key.h"
 
 Logger gLogger;
 
 void Logger::log(nvinfer1::ILogger::Severity severity, const char* msg) noexcept
 {
+    if (severity <= nvinfer1::ILogger::Severity::kERROR && msg)
+        TrtBuildSetError(msg);
     if (severity <= nvinfer1::ILogger::Severity::kWARNING)
     {
         std::string devMsg = msg;
@@ -278,11 +281,14 @@ bool gpuSupportsInt8TensorCore(std::string& why)
 
 std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkDefinition* network,
                                                             nvinfer1::IBuilder* builder,
-                                                            nvinfer1::IBuilderConfig* cfg)
+                                                            nvinfer1::IBuilderConfig* cfg,
+                                                            const std::string& modelFingerprint)
 {
+    TrtBuildSetStage(TrtBuildStage::Configuring);
     nvinfer1::ITensor* inputTensor = network->getInput(0);
     if (!inputTensor)
     {
+        TrtBuildSetError("ONNX 模型没有输入张量");
         std::cerr << "[TensorRT] ERROR: ONNX model has no input tensor" << std::endl;
         return nullptr;
     }
@@ -356,8 +362,15 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
         }
         std::cout << "[TensorRT] INT8 build: 判据 GPU = " << why << std::endl;
 
-        // 校准表的缓存名带上输入边长, 换分辨率不会复用错的表。
-        const std::string cachePath = "int8_calib_" + std::to_string(H > 0 ? H : 0) + ".cache";
+        const std::string datasetFingerprint = calibrationDatasetFingerprint(config);
+        if (modelFingerprint.empty() || datasetFingerprint.empty())
+        {
+            std::cerr << "[TensorRT] ERROR: Cannot fingerprint INT8 model or calibration images" << std::endl;
+            return nullptr;
+        }
+        // Calibration ranges depend on the model, input size and selected images.
+        const std::string cachePath = "int8_calib_" + std::to_string(H > 0 ? H : 0)
+            + "_" + modelFingerprint + "_" + datasetFingerprint + ".cache";
         calibrator = std::make_unique<Int8EntropyCalibrator>(
             (H > 0 ? H : 320), config.int8_calib_dir, config.int8_calib_images, cachePath);
 
@@ -394,41 +407,20 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
     std::cout << "[TensorRT] Builder optimization level: 5" << std::endl;
 #endif
 
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
     std::cout << "[TensorRT] Building engine (this may take several minutes)..." << std::endl;
 
+    TrtBuildSetStage(TrtBuildStage::Optimizing);
     auto plan = builder->buildSerializedNetwork(*network, *cfg);
     if (!plan)
     {
+        TrtBuildSetError("TensorRT 无法构建此 ONNX 的引擎，请查看日志中的首条 TensorRT ERROR");
         std::cerr << "[TensorRT] ERROR: Could not build the engine" << std::endl;
         return nullptr;
     }
 
-    cudaStreamSynchronize(stream);
-    cudaStreamDestroy(stream);
-
     return std::unique_ptr<nvinfer1::IHostMemory>(plan);
 }
 
-struct ScopedExportState
-{
-    ScopedExportState()
-    {
-        TrtExportResetState();
-        gIsTrtExporting = true;
-    }
-
-    ~ScopedExportState()
-    {
-        std::lock_guard<std::mutex> lock(gProgressMutex);
-        gProgressPhases.clear();
-        gIsTrtExporting = false;
-        gTrtExportCancelRequested = false;
-        gTrtExportLastUpdateMs = TrtNowMs();
-    }
-};
 }
 
 std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const void* data, size_t size, nvinfer1::ILogger& logger)
@@ -452,6 +444,7 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const
 
     if (!builder || !network || !cfg || !parser)
     {
+        TrtBuildSetError("无法创建 TensorRT 构建器或 ONNX 解析器");
         std::cerr << "[TensorRT] ERROR: Could not create TensorRT builder objects" << std::endl;
         delete parser;
         delete network;
@@ -462,10 +455,11 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const
 
     TrtProgressMonitor progressMonitor;
     cfg->setProgressMonitor(&progressMonitor);
-    ScopedExportState exportState;
 
+    TrtBuildSetStage(TrtBuildStage::Parsing);
     if (!parser->parse(data, static_cast<size_t>(size)))
     {
+        TrtBuildSetError("ONNX 模型解析失败，请查看日志中的首条 TensorRT ERROR");
         std::cerr << "[TensorRT] ERROR: Error parsing ONNX model from memory" << std::endl;
         delete parser;
         delete network;
@@ -474,7 +468,8 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const
         return nullptr;
     }
 
-    auto plan = buildSerializedEngine(network, builder, cfg);
+    auto plan = buildSerializedEngine(network, builder, cfg,
+                                      modelContentFingerprint(data, size));
 
     delete parser;
     delete network;
@@ -484,31 +479,13 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const
     return plan;
 }
 
-nvinfer1::ICudaEngine* buildEngineFromOnnxMemory(const void* data, size_t size, nvinfer1::ILogger& logger)
+std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxFile(const std::string& onnxFile, nvinfer1::ILogger& logger)
 {
-    auto plan = buildSerializedEngineFromOnnxMemory(data, size, logger);
-    if (!plan)
-        return nullptr;
-
-    nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(logger);
-    nvinfer1::ICudaEngine* engine = runtime ? runtime->deserializeCudaEngine(plan->data(), plan->size()) : nullptr;
-    if (!engine)
-    {
-        std::cerr << "[TensorRT] ERROR: Could not create engine" << std::endl;
-        delete runtime;
-        return nullptr;
-    }
-
-    delete runtime;
-    std::cout << "[TensorRT] The FP16 engine was built successfully." << std::endl;
-    return engine;
-}
-
-nvinfer1::ICudaEngine* buildEngineFromOnnx(const std::string& onnxFile, nvinfer1::ILogger& logger)
-{
+    TrtBuildSetStage(TrtBuildStage::Reading);
     std::ifstream file(std::filesystem::u8path(onnxFile), std::ios::binary);
     if (!file.good())
     {
+        TrtBuildSetError("无法打开 ONNX 文件");
         std::cerr << "[TensorRT] ERROR: Error opening the ONNX file: " << onnxFile << std::endl;
         return nullptr;
     }
@@ -520,8 +497,9 @@ nvinfer1::ICudaEngine* buildEngineFromOnnx(const std::string& onnxFile, nvinfer1
         file.read(reinterpret_cast<char*>(onnxData.data()), static_cast<std::streamsize>(onnxData.size()));
     if (!file && !onnxData.empty())
     {
+        TrtBuildSetError("无法读取 ONNX 文件");
         std::cerr << "[TensorRT] ERROR: Error reading the ONNX file: " << onnxFile << std::endl;
         return nullptr;
     }
-    return buildEngineFromOnnxMemory(onnxData.data(), onnxData.size(), logger);
+    return buildSerializedEngineFromOnnxMemory(onnxData.data(), onnxData.size(), logger);
 }

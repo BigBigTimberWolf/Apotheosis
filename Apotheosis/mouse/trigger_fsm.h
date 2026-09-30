@@ -16,12 +16,14 @@ public:
     struct Input
     {
         bool   in_zone = false;
+        bool   prerequisite_ready = true;
         int    track_id = -1;
         int64_t now_ms = 0;
     };
 
     struct Action
     {
+        bool prepare_fire = false;
         bool press_left = false;
         bool release_left = false;
         bool fired = false;
@@ -29,12 +31,32 @@ public:
 
     Action tick(const Input& in, bool hold_mode,
                 int fire_delay, int duration, int interval, int switch_cd,
-                int delay_jitter, int duration_jitter, int interval_jitter)
+                int delay_jitter, int duration_jitter, int interval_jitter,
+                int pre_fire_ms = 0)
     {
         Action act;
+        target_loss_since_ms_ = -1;
+        const bool eligible = in.in_zone && in.prerequisite_ready;
 
-        if (in.track_id != last_fire_track_id_ &&
-            last_fire_track_id_ != -1 &&
+        const bool changedTarget = in.track_id >= 0 &&
+            last_fire_track_id_ >= 0 && in.track_id != last_fire_track_id_;
+        if (changedTarget)
+        {
+            first_shot_pending_ = true;
+            // Restart once for a real target change, then keep the pending
+            // shot's timer. Repeated tracker-ID changes must not starve it.
+            if (phase_ == TriggerPhase::Delay &&
+                (!in.in_zone || !delay_retargeted_))
+            {
+                phase_ = TriggerPhase::Idle;
+                in_zone_since_ms_ = -1;
+                prefire_sent_ = false;
+                delay_retargeted_ = in.in_zone;
+            }
+        }
+
+        if (changedTarget &&
+            shot_since_switch_ &&
             switch_cd > 0 &&
             phase_ != TriggerPhase::SwitchCooldown &&
             !in.in_zone)
@@ -45,56 +67,41 @@ public:
             phase_time_ms_ = in.now_ms;
             phase_target_ms_ = jitter(switch_cd, delay_jitter);
             in_zone_since_ms_ = -1;
+            prefire_sent_ = false;
+            shot_since_switch_ = false;
         }
-        last_fire_track_id_ = in.track_id;
+        if (in.track_id >= 0) last_fire_track_id_ = in.track_id;
 
         switch (phase_)
         {
         case TriggerPhase::Idle:
-            if (in.in_zone)
-            {
-                const int target_delay = jitter(fire_delay, delay_jitter);
-                if (target_delay <= 0)
-                {
-                    beginFire(act, in.now_ms, hold_mode, duration, duration_jitter);
-                }
-                else
-                {
-                    if (in_zone_since_ms_ < 0)
-                    {
-                        in_zone_since_ms_ = in.now_ms;
-                        phase_target_ms_ = target_delay;
-                    }
-                    if (in.now_ms - in_zone_since_ms_ >= phase_target_ms_)
-                        beginFire(act, in.now_ms, hold_mode, duration, duration_jitter);
-                    else
-                    {
-                        phase_ = TriggerPhase::Delay;
-                        phase_time_ms_ = in_zone_since_ms_;
-                    }
-                }
-            }
+            if (eligible)
+                startShot(act, in.now_ms, hold_mode, fire_delay, duration,
+                          delay_jitter, duration_jitter, pre_fire_ms);
             else
             {
                 in_zone_since_ms_ = -1;
+                prefire_sent_ = false;
             }
             break;
 
         case TriggerPhase::Delay:
-            if (!in.in_zone)
+            if (!eligible)
             {
                 phase_ = TriggerPhase::Idle;
                 in_zone_since_ms_ = -1;
+                prefire_sent_ = false;
+                delay_retargeted_ = false;
                 break;
             }
-            if (in.now_ms - phase_time_ms_ >= phase_target_ms_)
-                beginFire(act, in.now_ms, hold_mode, duration, duration_jitter);
+            advanceDelay(act, in.now_ms, hold_mode, duration,
+                         duration_jitter, pre_fire_ms);
             break;
 
         case TriggerPhase::Pressed:
             if (hold_mode)
             {
-                if (!in.in_zone)
+                if (!eligible)
                 {
                     act.release_left = true;
                     phase_ = TriggerPhase::Cooldown;
@@ -107,7 +114,8 @@ public:
             {
                 act.release_left = true;
                 phase_ = TriggerPhase::Cooldown;
-                phase_time_ms_ = in.now_ms;
+                // Lua's interval is measured from last_trigger_time (shot
+                // start), not from the end of the mouse click.
                 phase_target_ms_ = jitter(interval, interval_jitter);
             }
             break;
@@ -117,8 +125,10 @@ public:
             {
                 phase_ = TriggerPhase::Idle;
                 in_zone_since_ms_ = -1;
-                if (in.in_zone && fire_delay <= 0)
-                    beginFire(act, in.now_ms, hold_mode, duration, duration_jitter);
+                delay_retargeted_ = false;
+                if (eligible)
+                    startShot(act, in.now_ms, hold_mode, fire_delay, duration,
+                              delay_jitter, duration_jitter, pre_fire_ms);
             }
             break;
 
@@ -134,6 +144,15 @@ public:
         return act;
     }
 
+    // Only extend an existing sustained press. Repeated missing frames share
+    // one deadline; normal target processing or reset clears it.
+    bool keepHoldingOnTargetLoss(int64_t now_ms, int grace_ms)
+    {
+        if (!pressed() || !pressed_hold_ || grace_ms <= 0) return false;
+        if (target_loss_since_ms_ < 0) target_loss_since_ms_ = now_ms;
+        return now_ms - target_loss_since_ms_ < std::clamp(grace_ms, 0, 2000);
+    }
+
     bool reset()
     {
         const bool was_pressed = (phase_ == TriggerPhase::Pressed);
@@ -141,7 +160,13 @@ public:
         phase_time_ms_ = 0;
         phase_target_ms_ = 0;
         in_zone_since_ms_ = -1;
+        prefire_sent_ = false;
         last_fire_track_id_ = -1;
+        first_shot_pending_ = true;
+        shot_since_switch_ = false;
+        delay_retargeted_ = false;
+        target_loss_since_ms_ = -1;
+        pressed_hold_ = false;
         return was_pressed;
     }
 
@@ -165,14 +190,56 @@ public:
     }
 
 private:
+    void startShot(Action& act, int64_t now_ms, bool hold_mode,
+                   int fire_delay, int duration, int delay_jitter,
+                   int duration_jitter, int pre_fire_ms)
+    {
+        const int target_delay = first_shot_pending_
+            ? jitter(fire_delay, delay_jitter) : 0;
+        if (target_delay <= 0 && pre_fire_ms <= 0)
+        {
+            beginFire(act, now_ms, hold_mode, duration, duration_jitter);
+            return;
+        }
+        in_zone_since_ms_ = now_ms;
+        phase_ = TriggerPhase::Delay;
+        phase_time_ms_ = now_ms;
+        phase_target_ms_ = std::max(target_delay, pre_fire_ms);
+        prefire_sent_ = false;
+        advanceDelay(act, now_ms, hold_mode, duration,
+                     duration_jitter, pre_fire_ms);
+    }
+
+    void advanceDelay(Action& act, int64_t now_ms, bool hold_mode,
+                      int duration, int duration_jitter, int pre_fire_ms)
+    {
+        const int64_t due_ms = phase_time_ms_ + phase_target_ms_;
+        if (pre_fire_ms > 0 && !prefire_sent_ && now_ms >= due_ms - pre_fire_ms)
+        {
+            act.prepare_fire = true;
+            prefire_sent_ = true;
+            // A coarse frame may reach the preparation window late. Give the
+            // keyboard mask the full requested lead time before pressing left.
+            phase_target_ms_ = static_cast<int>(
+                std::max<int64_t>(due_ms, now_ms + pre_fire_ms) - phase_time_ms_);
+        }
+        if (now_ms - phase_time_ms_ >= phase_target_ms_)
+            beginFire(act, now_ms, hold_mode, duration, duration_jitter);
+    }
+
     void beginFire(Action& act, int64_t now_ms, bool hold_mode,
                    int duration, int duration_jitter)
     {
         act.press_left = true;
         act.fired = true;
         phase_ = TriggerPhase::Pressed;
+        pressed_hold_ = hold_mode;
+        first_shot_pending_ = false;
+        shot_since_switch_ = true;
+        delay_retargeted_ = false;
         phase_time_ms_ = now_ms;
         in_zone_since_ms_ = -1;
+        prefire_sent_ = false;
         phase_target_ms_ = hold_mode ? 0 : jitter(duration, duration_jitter);
     }
 
@@ -189,6 +256,12 @@ private:
     int64_t in_zone_since_ms_ = -1;
     int last_fire_track_id_ = -1;
     int phase_target_ms_ = 0;
+    bool prefire_sent_ = false;
+    bool first_shot_pending_ = true;
+    bool shot_since_switch_ = false;
+    bool delay_retargeted_ = false;
+    bool pressed_hold_ = false;
+    int64_t target_loss_since_ms_ = -1;
 };
 
 }

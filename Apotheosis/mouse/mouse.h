@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -29,8 +30,16 @@ class MouseThread
 public:
     struct MovementFeedback
     {
+        struct Event
+        {
+            int dx = 0;
+            int dy = 0;
+            int64_t timestamp_us = 0;
+            int source = 0;
+        };
         int dx = 0;
         int dy = 0;
+        std::vector<Event> events;
         double latency_ms = 0.0;
         size_t backlog = 0;
         unsigned long long failed = 0;
@@ -41,7 +50,8 @@ public:
         MakcuConnection* makcuConnection = nullptr,
         MakcuNewConnection* makcuNewConnection = nullptr,
         KmboxNetConnection* kmboxNetConnection = nullptr,
-        MakcuNewConnection* makcuNewConnectionKbd = nullptr);
+        MakcuNewConnection* makcuNewConnectionKbd = nullptr,
+        std::shared_ptr<mouse_driver::IDriver> extraDriver = {});
     ~MouseThread();
 
     MouseThread(const MouseThread&) = delete;
@@ -50,27 +60,26 @@ public:
     void updateParams(const MouseRuntimeParams& params);
 
     void clearQueuedMoves();
+    void suspendAutomaticMoves(bool suspend);
     MovementFeedback consumeMovementFeedback();
 
     std::recursive_mutex input_method_mutex;
 
     void sendRawMove(int dx, int dy, int64_t capture_ns = 0, int64_t aim_ns = 0);
-    void pressLeftButton();
-    void releaseLeftButton();
-    void pressRightButton();
-    void releaseRightButton();
+    bool pressLeftButton();
+    bool releaseLeftButton();
+    bool pressRightButton();
+    bool releaseRightButton();
 
     bool tapKey(int hid_key, int hold_ms);
-    bool requestWeaponSwitch31(int after_shot_delay_ms, int step_ms);
+    bool requestWeaponSwitch31(int after_shot_delay_ms);
     bool weaponSwitch31Busy() const;
 
-    // 瞬时屏蔽【真实键盘输入】 duration_ms 毫秒(不注入任何键)。
-    //
-    // 自动急停用: 触发时把玩家按住的方向键"冻住", 让角色停住, 而不是注入
-    // 一个反向键去刹车。命令从【键盘那台 MAKCUNEW 硬件】发出 —— 真实键盘
-    // 插在它上面, 只有它的屏蔽窗口才有意义。
-    // 返回 false 表示当前后端不支持(非 MAKCUNEW)或写串口失败。
+    // 自动急停用：屏蔽接在所选硬件上的真实键盘输入，不注入反向键。
+    // MAKCUNEW 使用固件时长；KMBoxNet 仅屏蔽 W/A/S/D，直到显式解除。
+    // 返回 false 表示当前后端不支持或设备命令失败。
     bool maskRealKeyboard(int duration_ms);
+    bool keyboardMaskExpires() const;
 
     bool supports(uint32_t capability) const;
     uint32_t driverCapabilities() const;
@@ -83,19 +92,22 @@ public:
     void setKmboxNetConnection(KmboxNetConnection* kmboxNet);
 
 private:
+    std::shared_ptr<mouse_driver::IDriver> extra_driver_;
     void moveWorkerLoop();
     void queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns);
     bool sendMovementToDriver(int dx, int dy);
 
-    void sendLeftDownToDriver();
-    void sendLeftUpToDriver();
-    void sendRightDownToDriver();
-    void sendRightUpToDriver();
+    bool sendLeftDownToDriver();
+    bool sendLeftUpToDriver();
+    bool sendRightDownToDriver();
+    bool sendRightUpToDriver();
 
     void refreshDriver();
 
     MouseRuntimeParams params_{};
     std::mutex outputMtx_;
+    std::mutex moveDispatchMutex_;
+    bool automaticMovesSuspended_ = false; // guarded by moveDispatchMutex_
 
     mouse_async::LatestMoveSlot moveSlot_;
     std::mutex queueMtx_;
@@ -106,6 +118,7 @@ private:
     std::mutex feedbackMtx_;
     long long appliedDx_ = 0;
     long long appliedDy_ = 0;
+    std::deque<MovementFeedback::Event> appliedEvents_;
     std::atomic<long long> lastLatencyUs_{ 0 };
     std::atomic<unsigned long long> failedMoves_{ 0 };
 
