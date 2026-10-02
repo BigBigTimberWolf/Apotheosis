@@ -65,6 +65,7 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
             continue;
         }
         const int keyboardHid = keyboardHidUsage(key_name);
+        if(keyboardHid>=0x10000){if(mouse_driver::windowsPhysicalKeyPressed(KeyCodes::getKeyCode(key_name)))return true;continue;}
         if (keyboardHid > 0)
         {
             int state = -1;

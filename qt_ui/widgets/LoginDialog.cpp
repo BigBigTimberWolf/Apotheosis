@@ -23,19 +23,19 @@ LoginDialog::LoginDialog(QWidget* parent)
     if (IconFont::available()) {
         auto* icon = new QLabel(QString(IconFont::glyph("user-circle")));
         icon->setAlignment(Qt::AlignCenter);
-        icon->setStyleSheet("font-family:\"tabler-icons\"; font-size:40px; color:#5E6AD2;");
+        icon->setStyleSheet("font-family:\"tabler-icons\"; font-size:40px; color:#D5B56B;");
         lay->addWidget(icon);
         lay->addSpacing(14);
     }
 
     m_title = new QLabel(QStringLiteral("Apotheosis"));
     m_title->setAlignment(Qt::AlignCenter);
-    m_title->setStyleSheet("font-size:20px; font-weight:500; color:#1A1A1F;");
+    m_title->setStyleSheet("font-size:20px; font-weight:500; color:#F0EDE6;");
     lay->addWidget(m_title);
 
     m_subtitle = new QLabel(QStringLiteral("\xe7\x99\xbb\xe5\xbd\x95\xe4\xbb\xa5\xe7\xbb\xa7\xe7\xbb\xad"));
     m_subtitle->setAlignment(Qt::AlignCenter);
-    m_subtitle->setStyleSheet("color:#71717A; font-size:13px;");
+    m_subtitle->setStyleSheet("color:#ABA697; font-size:13px;");
     lay->addWidget(m_subtitle);
 
     lay->addSpacing(26);
@@ -92,8 +92,8 @@ LoginDialog::LoginDialog(QWidget* parent)
     m_toggleBtn = new QPushButton(QStringLiteral("\xe6\xb2\xa1\xe6\x9c\x89\xe8\xb4\xa6\xe5\x8f\xb7\xef\xbc\x9f\xe6\xb3\xa8\xe5\x86\x8c"));
     m_toggleBtn->setCursor(Qt::PointingHandCursor);
     m_toggleBtn->setStyleSheet(
-        "QPushButton{border:none; background:transparent; color:#5E6AD2; font-size:13px;}"
-        "QPushButton:hover{color:#4A55C8;}");
+        "QPushButton{border:none; background:transparent; color:#D5B56B; font-size:13px;}"
+        "QPushButton:hover{color:#E9CD8A;}");
     lay->addWidget(m_toggleBtn, 0, Qt::AlignCenter);
 
     connect(m_primaryBtn, &QPushButton::clicked, this, &LoginDialog::onPrimary);
@@ -133,7 +133,7 @@ void LoginDialog::showError(const QString& msg) {
 }
 
 void LoginDialog::showSuccess(const QString& msg) {
-    m_status->setStyleSheet("color:#1D9E75; font-size:12px;");
+    m_status->setStyleSheet("color:#53C583; font-size:12px;");
     m_status->setText(msg);
 }
 

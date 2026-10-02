@@ -33,6 +33,7 @@
 #include "capture_card_probe.h"
 #include "dshow_capture.h"
 #include "stream_capture.h"
+#include "ndi_capture.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
 #include "runtime/config_snapshot.h"
@@ -73,6 +74,7 @@ struct CaptureThreadConfig
     std::string capture_device;
     std::string capture_source;
     std::string capture_stream_url;
+    std::string capture_ndi_source;
     std::string capture_format;
     int  capture_width  = 0;
     int  capture_height = 0;
@@ -96,6 +98,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.capture_device = config.capture_device;
     snapshot.capture_source = config.capture_source;
     snapshot.capture_stream_url = config.capture_stream_url;
+    snapshot.capture_ndi_source = config.capture_ndi_source;
     snapshot.capture_format = config.capture_format;
     snapshot.capture_width  = config.capture_width;
     snapshot.capture_height = config.capture_height;
@@ -371,60 +374,7 @@ private:
     std::thread thread_;
 };
 
-class GpuCrosshairWorker
-{
-public:
-    GpuCrosshairWorker() : thread_([this]() { Run(); }) {}
-    ~GpuCrosshairWorker() { Stop(); }
 
-    void Submit(GpuImage gpu)
-    {
-        if (gpu.empty()) return;
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            if (stop_) return;
-            pending_ = std::move(gpu);
-            hasPending_ = true;
-        }
-        cv_.notify_one();
-    }
-
-private:
-    void Stop()
-    {
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            stop_ = true;
-        }
-        cv_.notify_one();
-        if (thread_.joinable()) thread_.join();
-    }
-
-    void Run()
-    {
-        while (true)
-        {
-            GpuImage gpu;
-            {
-                std::unique_lock<std::mutex> lk(mutex_);
-                cv_.wait(lk, [this]() { return stop_ || hasPending_; });
-                if (stop_ && !hasPending_) break;
-                gpu = std::move(pending_);
-                pending_.release();
-                hasPending_ = false;
-            }
-            if (!gpu.empty())
-                crosshair_runtime::process_gpu_frame(gpu);
-        }
-    }
-
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    GpuImage pending_;
-    bool hasPending_{ false };
-    bool stop_{ false };
-    std::thread thread_;
-};
 }
 
 std::vector<cv::Mat> getBatchFromQueue(int batch_size)
@@ -468,6 +418,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             {
                 const bool crop_enabled = true;
                 const int  out_side = std::max(1, cfg.detection_resolution);
+
+                if (cfg.capture_source == "ndi")
+                    return ndi_capture::Create(cfg.capture_ndi_source, out_side);
 
                 if (stream_capture::IsNetworkSource(cfg.capture_source))
                     return stream_capture::Create(cfg.capture_source,
@@ -683,7 +636,6 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         CaptureCudaGuard captureCuda;
 
         HostCopyWorker hostCopyWorker;
-        GpuCrosshairWorker gpuCrosshairWorker;
 
         while (!shouldExit && !session_stop_requested.load())
         {
@@ -797,7 +749,6 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 || g_detector->backend() != DetectorBackend::TensorRT;
             const bool needCpuStrict = screenshotRequested
                 || detectorNeedsCpu;
-            const bool gpuCrosshairActive = crosshair_runtime::gpu_path_active();
             const bool cpuColourActive = crosshair_runtime::cpu_path_active();
             const bool needCpuAsync = currentCfg.show_window
                 || cpuColourActive;
@@ -808,8 +759,6 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     AutoCapture::submit_frame(screenshotGpu,
                         {runtime::latency::loadCaptureSeq(), capturer->GetLastFrameCaptureNs(),
                          screenshotGpu.cols(), screenshotGpu.rows()});
-                if (gpuCrosshairActive)
-                    gpuCrosshairWorker.Submit(screenshotGpu);
 
                 if (needCpuStrict)
                 {
@@ -853,7 +802,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             if (currentCfg.circle_mask && !gpuMaskApplied && !screenshotCpu.empty())
                 screenshotCpu = apply_circle_mask(screenshotCpu);
 
-            if (screenshotGpu.empty() && (gpuCrosshairActive || cpuColourActive)
+            if (screenshotGpu.empty() && cpuColourActive
                 && !screenshotCpu.empty())
                 crosshair_runtime::process_frame(screenshotCpu, capturer->GetLastFrameCaptureNs());
 

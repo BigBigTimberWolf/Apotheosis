@@ -64,7 +64,7 @@ AutoFlashPage::AutoFlashPage(QWidget* parent) : QWidget(parent) {
     card->contentLayout()->addWidget(FormKit::fieldRow(QStringLiteral("点按按键"), key_));
 
     currentArea_ = new QLabel;
-    currentArea_->setStyleSheet(QStringLiteral("color:#5E6AD2;font-size:13px;font-weight:600;"));
+    currentArea_->setStyleSheet(QStringLiteral("color:#D5B56B;font-size:13px;font-weight:600;"));
     card->contentLayout()->addWidget(currentArea_);
     layout->addWidget(card);
     layout->addStretch();

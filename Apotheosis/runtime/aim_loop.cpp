@@ -3,11 +3,11 @@
 
 #include "control/recovered_aim_controller.h"
 #include "control/head_body_fusion.h"
-#include "control/sensitivity_calibrator.h"
 
 #include "mouse/aim_path.h"
 #include "mouse/auto_stop.h"
-#include "mouse/trigger_fsm.h"
+#include "mouse/am_trigger.h"
+#include "mouse/trigger_prearm.h"
 #include "mouse/trigger_target.h"
 #include "mouse/trigger_flash_post.h"
 #include "mouse/trigger_release.h"
@@ -20,7 +20,6 @@
 #include "mouse/mouse.h"
 #include "mouse/windows_driver.h"
 #include "runtime/active_hotkey.h"
-#include "runtime/motion_feedback_window.h"
 #include "runtime/aimpoint_recoil.h"
 #include "keyboard/keyboard_listener.h"
 #include "mouse/switch31_shot_gate.h"
@@ -54,7 +53,6 @@ namespace
 
 std::mutex g_mtx;
 std::unique_ptr<control::RecoveredAimController> g_controller;
-runtime::MotionFeedbackWindow g_motionFeedbackWindow;
 runtime::AimpointRecoilGate g_aimpointRecoilGate;
 std::shared_ptr<const Config> g_appliedConfigSnapshot;
 int g_appliedConfigHotkey = -1;
@@ -85,15 +83,14 @@ void configureController(const std::shared_ptr<const Config>& snapshot,
     if (g_appliedConfigHotkey != hotkeyIndex || g_appliedConfigScope != scopeActive ||
         g_appliedConfigSecondary != secondaryActive)
         g_controller->resetCompensation();
-    auto pid = scopeActive ? hk.recovered_scope_pid
-                          : secondaryActive ? hk.recovered_secondary_pid : hk.recovered_pid;
+    auto pid = pidForProfile(hk, scopeActive, secondaryActive);
     pid.maskX = hk.unlock_x;
     pid.maskY = unlockYActive;
     if (g_appliedConfigUnlockY != unlockYActive)
         g_controller->resetPidAxes(false, true);
     g_controller->setConfig(
         toControllerConfig(flattenProfile(
-            hk, cfg.detection_resolution, cfg.class_filters, cfg, scopeActive)),
+            hk, cfg.detection_resolution, cfg.class_filters, cfg)),
         pid);
     g_appliedConfigSnapshot = snapshot;
     g_appliedConfigHotkey = hotkeyIndex;
@@ -170,13 +167,14 @@ int g_aim_delay_setting_ms = 0;
 
 boss::AimPathDriver      g_path;
 bool g_pathMaskX = false, g_pathMaskY = false;
-boss::TriggerFsm         g_trigger;
+boss::AmTriggerFsm         g_trigger;
+boss::TriggerPrearm      g_prearm;
 boss::TriggerFlashPostController g_flashPost;
 int g_lastTriggerMode = 0;
 int64_t g_flashLastFrameNs = 0;
 int64_t g_flashRequireCaptureNs = 0;
 boss::TriggerTargetSelector g_triggerTargetSelector;
-boss::ScopeController    g_scope;
+boss::ScopeController    g_scope{true};
 boss::AutoStopController g_autoStop;
 
 // 上一拍是否在用【开镜档】—— 只为"切档时打一行日志", 不参与控制。
@@ -244,6 +242,7 @@ void releaseHeldButtons()
 {
     std::lock_guard<std::mutex> lk(g_mtx);
     const bool releaseLeft = g_trigger.reset();
+    g_prearm.reset();
     g_flashPost.reset();
     g_flashLastFrameNs = g_flashRequireCaptureNs = 0;
     const auto act = g_scope.forceRelease();
@@ -267,14 +266,17 @@ void releaseHeldButtons()
 void releaseTargetButtons(int scopeMode, const TriggerParams& trigger, bool allowGrace)
 {
     std::lock_guard<std::mutex> lk(g_mtx);
-    const int graceMs = allowGrace && trigger.trigger_enabled &&
-        trigger.trigger_fire_duration <= 0 && !trigger.trigger_weapon_switch31 &&
-        !g_pendingSwitch31.armed ? trigger.trigger_loss_delay_ms : 0;
-    const bool finishTimedPress = allowGrace && trigger.trigger_enabled &&
-        trigger.trigger_fire_duration > 0 && !trigger.trigger_weapon_switch31 &&
-        !g_pendingSwitch31.armed;
-    const auto release = boss::releaseOnTargetLoss(
-        g_trigger, g_scope, scopeMode, nowMs(), graceMs, finishTimedPress);
+    g_prearm.reset();
+    const bool retain = allowGrace && trigger.trigger_enabled &&
+        !trigger.trigger_weapon_switch31 && !g_pendingSwitch31.armed;
+    boss::TargetLossRelease release;
+    if (retain) {
+        release = boss::releaseOnTargetLoss(g_trigger, g_scope, scopeMode,
+            nowMs(), trigger.trigger_loss_delay_ms, false);
+    } else {
+        release.left = g_trigger.reset();
+        release.right = g_scope.forceRelease().release_right;
+    }
     if (MouseThread* mouse = ensureMouse())
     {
         if (release.right && !mouse->releaseRightButton())
@@ -306,16 +308,30 @@ namespace
 // W/A/S/D —— 那是"注入反向键刹车"方案才需要的输入(要判断该反哪个方向)。
 // 现在急停改成"整段屏蔽真实键盘", 与按了哪个方向无关, 该函数已无调用者, 删除。
 
-control::Vec2 resolveCrosshair(const Config& cfg, const HotkeyProfile& hk, bool& fresh)
+runtime::CrosshairFrameHold g_crosshairHold;
+
+control::Vec2 resolveCrosshair(const Config& cfg, const HotkeyProfile& hk, bool& fresh,
+                              const runtime::FrameContext& frame,
+                              const runtime::FrameCrosshair& pivot, int activeIdx, int batchVersion)
 {
     const double center = static_cast<double>(cfg.detection_resolution) * 0.5;
 
     if (!hk.crosshair_detect_enabled && !hk.laser_detect_enabled)
     {
+        g_crosshairHold.reset();
         fresh = true;
         return control::Vec2{ center, center };
     }
 
+    if (hk.crosshair_detect_enabled)
+    {
+        const auto resolved = g_crosshairHold.resolve(frame,pivot,activeIdx,
+            cfg.detection_resolution,cfg.crosshair_algorithm,batchVersion);
+        fresh = resolved.source == runtime::CrosshairFrameHold::Source::CurrentFrame;
+        return {resolved.x,resolved.y};
+    }
+    g_crosshairHold.reset();
+    // Laser retains its existing asynchronous freshness policy.
     const auto snap = crosshair_runtime::read();
     const auto now = std::chrono::steady_clock::now();
     const bool usable =
@@ -336,7 +352,7 @@ control::Vec2 resolveCrosshair(const Config& cfg, const HotkeyProfile& hk, bool&
 
 }
 
-bool tick()
+bool tick(int* consumedVersion)
 {
     std::lock_guard<std::recursive_mutex> outputLock(macros::outputMutex());
     if (macros::ownsOutput()) { g_target_aim_hotkey = -1; resetAutoFlash(); return false; }
@@ -360,6 +376,7 @@ bool tick()
     const Config& cfg = *snapshot;
 
     auto deactivateHotkey = [] {
+        g_crosshairHold.reset();
         g_target_aim_hotkey = -1;
         resetAutoFlash();
         g_aim_delay_target_id = -1;
@@ -451,8 +468,20 @@ bool tick()
     bool detectionFrameFresh = false;
     int64_t captureNs = 0;
     int64_t publishNs = 0;
+    int detectedVersion = 0;
+    runtime::FrameContext detectedFrame;
+    runtime::FrameCrosshair detectedCrosshair;
+    control::BackgroundMotion detectedBackground;
     {
         std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
+        if (consumedVersion) {
+            if (*consumedVersion == detectionBuffer.version) return false;
+            *consumedVersion = detectionBuffer.version;
+        }
+        detectedFrame = detectionBuffer.frame_context;
+        detectedVersion = detectionBuffer.version;
+        detectedCrosshair = detectionBuffer.frame_crosshair;
+        detectedBackground = detectionBuffer.background_motion;
         captureNs = detectionBuffer.frame_context.captured_ns > 0
             ? detectionBuffer.frame_context.captured_ns : detectionBuffer.frame_stamp_ns;
         publishNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -487,12 +516,13 @@ bool tick()
     // intentionally remove a head box from the aim path, but the trigger's
     // independently configured head class must remain available.
     std::vector<control::Candidate> triggerCandidates;
-    if (!hk.trigger_classes.empty()) triggerCandidates = candidates;
+    triggerCandidates = candidates;
     if (cfg.head_body_fusion_enabled)
         control::fuseHeadBody(candidates, cfg.head_body_head_class_id,
                               cfg.head_body_body_class_id);
     bool crossFresh = false;
-    const control::Vec2 cross = resolveCrosshair(cfg, hk, crossFresh);
+    const control::Vec2 cross = resolveCrosshair(cfg, hk, crossFresh,
+                                               detectedFrame, detectedCrosshair, activeIdx, detectedVersion);
     const bool flashTurning = triggerMode == 2 &&
         g_flashPost.phase() == boss::TriggerFlashPostController::Phase::Turn;
     if (flashTurning) {
@@ -554,7 +584,7 @@ bool tick()
             else list = {list[best]};
         };
         keepCurrentTarget(candidates);
-        if (!hk.trigger_classes.empty()) keepCurrentTarget(triggerCandidates);
+        keepCurrentTarget(triggerCandidates);
         detectionFresh = detectionFrameFresh && !candidates.empty();
     }
 
@@ -566,11 +596,6 @@ bool tick()
     double dtSec = 0.0;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
-        for (const auto& event : movementFeedback.events)
-        {
-            g_motionFeedbackWindow.add({ event.dx, event.dy,
-                                         event.timestamp_us, event.source });
-        }
         if (g_first_tick)
         {
             g_last_tick = now;
@@ -579,9 +604,11 @@ bool tick()
                                 unlockYBeforeUpdate);
             g_controller->reset();
             g_target_aim_hotkey = -1;
-            return false;
+            // Seed controller dt, but evaluate the trigger on this first
+            // observation too. Trigger deadlines use the monotonic clock.
+            dtSec = 1.0 / std::max(60, cfg.capture_fps);
         }
-        dtSec = std::chrono::duration<double>(now - g_last_tick).count();
+        else dtSec = std::chrono::duration<double>(now - g_last_tick).count();
     }
     if (!dtIsUsable(dtSec))
     {
@@ -651,6 +678,7 @@ bool tick()
                             unlockYBeforeUpdate);
 
         control::ControlInput in;
+        in.macro=macros::readDirective();
         in.candidates = std::move(candidates);
         in.cross = cross;
         in.dtSec = dtSec;
@@ -658,7 +686,7 @@ bool tick()
             : std::chrono::duration_cast<std::chrono::microseconds>(
                 now.time_since_epoch()).count();
         in.observationTimeUs = frameUs;
-        in.motionEventSum = g_motionFeedbackWindow.sample(frameUs);
+        in.backgroundMotion = detectedBackground;
         in.frameIndex = ++g_frame_index;
         in.detectionFresh = detectionFresh;
         in.crosshairFresh = crossFresh;
@@ -669,21 +697,27 @@ bool tick()
             nowMs(), cfg.aimpoint_recoil_speed_px_s, cfg.aimpoint_recoil_max_px);
 
         out = g_controller->update(in);
-        if (!hk.trigger_classes.empty())
-            triggerTarget = g_triggerTargetSelector.select(
-                triggerCandidates, hk.trigger_classes, cross, hk.fovX, hk.fovY,
-                cfg.confidence_threshold, detectionFresh);
+        const auto fireMode = trigger.trigger_weapon_switch31
+            ? boss::AmFireMode::SmartClick
+            : boss::amFireMode(trigger.trigger_fire_mode, trigger.trigger_fire_duration);
+        if (g_trigger.configure(fireMode, trigger.trigger_loss_delay_ms))
+            if (auto* device = ensureMouse()) completeShot(device);
+        auto rules = hk.trigger_classes;
+        if (rules.empty()) {
+            for (const auto& candidate : triggerCandidates) {
+                if (!hk.aim_classes.empty() && std::none_of(hk.aim_classes.begin(), hk.aim_classes.end(),
+                    [&](const auto& rule) { return rule.class_id == candidate.classId; })) continue;
+                if (std::any_of(rules.begin(), rules.end(), [&](const auto& rule) {
+                    return rule.class_id == candidate.classId; })) continue;
+                rules.push_back({candidate.classId, 0.5f, 0.5f,
+                    trigger.trigger_y_percent, trigger.trigger_y_percent});
+            }
+        }
+        triggerTarget = g_triggerTargetSelector.select(
+            triggerCandidates, rules, cross, hk.fovX, hk.fovY,
+            cfg.confidence_threshold, detectionFresh);
         if (recordReplay)
             replayCandidates = std::move(in.candidates);
-    }
-    if (hk.trigger_classes.empty() && out.hasTarget) {
-        triggerTarget.valid = true;
-        triggerTarget.trackId = out.targetId;
-        triggerTarget.classId = out.targetClassId;
-        triggerTarget.box = out.targetBox;
-        triggerTarget.point = out.targetBox.center();
-        triggerTarget.halfWidth = out.targetBox.w * trigger.trigger_y_percent / 200.0;
-        triggerTarget.halfHeight = out.targetBox.h * trigger.trigger_y_percent / 200.0;
     }
 
     // Start only when both conditions overlap. A lost or changed target starts
@@ -956,7 +990,13 @@ bool tick()
     }
 
     const bool aimReady = hk.ctl_enabled && out.engaged && !waitingForAim;
-    const bool triggerReady = trigger.trigger_enabled && triggerTarget.valid;
+    bool continuousTriggerActive = false;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        continuousTriggerActive = g_trigger.continuousActive();
+    }
+    const bool triggerReady = trigger.trigger_enabled &&
+        (triggerTarget.valid || continuousTriggerActive);
     if (!aimReady && !triggerReady)
     {
         releaseTargetButtons(scopeMode, trigger, !triggerTarget.valid);
@@ -1006,7 +1046,6 @@ bool tick()
             [](const std::string& k) { return k == "RightMouseButton"; });
         const bool scopeAllowed = !rightHotkey;
         // scopeMode 已在上面(切档判定)算过, 这里复用同一个值。
-        const int configuredScopeDelay = std::max(0, trigger.trigger_scope_delay_ms);
 
         {
             const bool switchCapable = trigger.trigger_weapon_switch31 &&
@@ -1022,18 +1061,26 @@ bool tick()
                 g_warnedSwitch31Unavailable = false;
 
             const bool switchBusy = mouse->weaponSwitch31Busy();
-            const bool shotZone = inZone && !switchBusy;
-            if (switchBusy && inZone)
-                s.trigger_reason = runtime::TriggerOverlayReason::SwitchBusy;
-            // 点按档的右键由 ScopeController 保证至少按住 20ms；
-            // 用户配置的更长开镜等待仍然优先。
-            const int scopeDelay = switchCapable && scopeMode == 1
-                ? std::max(configuredScopeDelay, 20) : configuredScopeDelay;
+            const bool switchPulse = switchCapable || g_pendingSwitch31.armed;
+            const bool holdMode = g_trigger.holding() && !switchPulse;
+            const bool effectiveInZone = g_trigger.holdZoneOnBriefMiss(
+                inZone, triggerTarget.trackId, ms,
+                trigger.trigger_enabled && holdMode && !switchBusy
+                    ? trigger.trigger_loss_delay_ms : 0);
+            const bool shotZone = effectiveInZone && !switchBusy;
+            g_prearm.reset();
+            const bool scopeZone = shotZone;
+            // AM tap opening uses press duration (minimum 30 ms); holding
+            // right has no extra delay before the left press.
+            const int scopeDelay = scopeMode == 1 ? trigger.trigger_fire_duration : 0;
             const int previousScopeMode = g_scope.mode();
-            const auto scopeAct = g_scope.tick(shotZone,
-                                               scopeAllowed, scopeMode, scopeDelay, ms);
-            if (previousScopeMode != scopeMode && g_trigger.reset())
-                completeShot(mouse);
+            const auto scopeAct = g_scope.tick(scopeZone,
+                                               scopeAllowed && trigger.trigger_enabled, scopeMode,
+                                               scopeDelay, ms, trigger.trigger_delay_jitter_ms);
+            if (previousScopeMode != scopeMode) {
+                g_prearm.reset();
+                if (g_trigger.reset()) completeShot(mouse);
+            }
             if (scopeAct.release_right && !mouse->releaseRightButton())
                 g_scope.retryTapRelease(ms);
             if (scopeAct.press_right)
@@ -1050,21 +1097,12 @@ bool tick()
                 }
             }
 
-            const int physicalScopeWaitMs = rightHotkey
-                ? boss::physicalScopeRemainingDelayMs(
-                    scopeDelay, g_hotkey_activated_ms, ms) : 0;
-            const int scopeWaitMs = std::max(
-                g_scope.remainingDelayMs(scopeAllowed, scopeMode, scopeDelay, ms),
-                physicalScopeWaitMs);
-            const bool scopeReady = g_scope.ready(scopeAllowed, scopeMode, scopeDelay, ms)
-                && physicalScopeWaitMs == 0;
+            const bool scopeReady = g_scope.ready(scopeAllowed, scopeMode, scopeDelay, ms);
             if (inZone && !switchBusy && !scopeReady)
                 s.trigger_reason = runtime::TriggerOverlayReason::ScopeWait;
 
             // 开火后即使用户临时关掉切枪或键盘断开，本次已按下的左键仍按短按
             // 语义完成，不能中途退回「长按直到离区」。
-            const bool switchPulse = switchCapable || g_pendingSwitch31.armed;
-            const bool holdMode = (trigger.trigger_fire_duration <= 0) && !switchPulse;
             const int fireDuration = switchPulse
                 ? std::max(trigger.trigger_fire_duration, 20)
                 : trigger.trigger_fire_duration;
@@ -1099,22 +1137,23 @@ bool tick()
             const int stopAfterMs = timedStopEnabled
                 ? std::clamp(trigger.trigger_stop_after_ms, 0, 1000) : 0;
 
-            boss::TriggerFsm::Input tin;
-            tin.in_zone  = shotZone;
+            boss::AmTriggerFsm::Input tin;
+            tin.in_zone  = inZone && !switchBusy; // Keep the raw hit so grace has one fixed deadline.
             tin.prerequisite_ready = scopeReady;
             tin.track_id = triggerTarget.trackId;
             tin.now_ms   = ms;
 
-            boss::TriggerFsm::Action tAct;
+            boss::AmTriggerFsm::Action tAct;
             if (trigger.trigger_enabled)
             {
                 tAct = g_trigger.tick(tin, holdMode,
-                    std::max(trigger.trigger_fire_delay, scopeWaitMs), fireDuration,
+                    trigger.trigger_fire_delay, fireDuration,
                     trigger.trigger_fire_interval,
                     trigger.trigger_switch_cooldown_ms,
                     trigger.trigger_delay_jitter_ms,
                     switchPulse ? 0 : trigger.trigger_duration_jitter_ms,
-                    trigger.trigger_interval_jitter_ms, stopBeforeMs);
+                    trigger.trigger_interval_jitter_ms, stopBeforeMs,
+                    0);
             }
             else if (g_trigger.reset())
                 completeShot(mouse);
@@ -1208,13 +1247,6 @@ bool tick()
         s.trigger_reason = runtime::TriggerOverlayReason::NoDriver;
     runtime::publishAimOverlay(s);
 
-    // 标定器使用已确认发送的计数和本拍观测位置，不把尚未发送的 PID 输出当作实测。
-    if (control::globalSensitivityCalibrator().isRunning() && out.hasTarget)
-    {
-        control::globalSensitivityCalibrator().feed(
-            out.filteredCenter.x, movementFeedback.dx, dtSec);
-    }
-
     if (MouseThread* mouse = ensureMouse(); mouse && mouse->weaponSwitch31Busy())
     {
         g_target_aim_hotkey = -1;
@@ -1238,6 +1270,7 @@ void reset()
 {
     macros::DevicePause macroPause;
     std::lock_guard<std::recursive_mutex> outputLock(macros::outputMutex());
+    g_crosshairHold.reset();
     g_target_aim_hotkey = -1;
     g_aim_delay_target_id = -1;
     g_aim_delay_started_ms = 0;
@@ -1247,7 +1280,6 @@ void reset()
         std::lock_guard<std::mutex> lk(g_mtx);
         if (g_controller)
             g_controller->reset();
-        g_motionFeedbackWindow.reset();
         g_aimpointRecoilGate.reset();
         g_appliedConfigSnapshot.reset();
         g_appliedConfigHotkey = -1;
@@ -1256,6 +1288,7 @@ void reset()
         g_path.reset();
         g_triggerTargetSelector.reset();
         g_trigger.reset();
+        g_prearm.reset();
         g_flashPost.reset();
         g_lastTriggerMode = 0;
         g_flashLastFrameNs = g_flashRequireCaptureNs = 0;
@@ -1282,7 +1315,6 @@ void resetMouse()
 {
     std::lock_guard<std::recursive_mutex> outputLock(macros::outputMutex());
     std::lock_guard<std::mutex> stateLock(g_mtx);
-    g_motionFeedbackWindow.reset();
     g_aimpointRecoilGate.reset();
     g_flashPost.reset();
     g_flashLastFrameNs = g_flashRequireCaptureNs = 0;
@@ -1325,6 +1357,7 @@ bool prepareForMacro()
     auto* mouse = ensureMouse();
     if (mouse && mouse->weaponSwitch31Busy()) return false;
     const bool left = g_trigger.reset();
+    g_prearm.reset();
     g_flashPost.reset();
     g_flashLastFrameNs = g_flashRequireCaptureNs = 0;
     const auto scope = g_scope.forceRelease();
@@ -1352,7 +1385,6 @@ void finishMacroControl(bool moved)
         if (moved) g_controller->reset();
         else g_controller->seedPidDerivativeAfterPause();
     }
-    g_motionFeedbackWindow.reset();
     if (moved) g_first_tick = true;
     g_last_tick = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> mouseLock(g_mouse_mtx);

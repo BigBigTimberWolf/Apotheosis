@@ -32,9 +32,9 @@ void FpsGraphWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    const QColor kAccent(QStringLiteral("#5E6AD2"));
-    const QColor kGrid(0, 0, 0, 12);
-    const QColor kAxisText(QStringLiteral("#A1A1AA"));
+    const QColor kAccent(QStringLiteral("#D5B56B"));
+    const QColor kGrid(213, 181, 107, 28);
+    const QColor kAxisText(QStringLiteral("#A49E90"));
 
     const int w = width();
     const int h = height();

@@ -46,93 +46,10 @@ struct TriggerAimClass
     int range_y_percent = 100;
 };
 
-// ── 瞄准控制器参数组 ────────────────────────────────────────────────────────
-//
-// 同一套参数在配置里存在【两份】:
-//   · 默认档 HotkeyProfile::ctl_*      —— 平时(未开镜)生效
-//   · 开镜档 HotkeyProfile::ctl_scope  —— 自动开镜生效期间整组取代默认档
-//
-// ★ 为什么要有开镜档: 开镜后游戏内灵敏度被【倍率】放大, 镜前调好的一套增益
-//   与灵敏度折算填进镜内可能过冲。镜内使用独立增益。
-//   所以镜内单独一套参数; 跟随热键(默认)时逐拍与没有这个功能时完全一致。
-//
-// ★ 这里只装【「瞄准控制器」卡里那 18 个旋钮】。选靶/稳定器/滞回/瞄点 Y 等
-//   参数不属于"控制器增益", 仍然只有热键一份, 不随开镜切档。
-//
-// ★ clamp() 是这两档【唯一】的夹取实现(默认档也走它), 规则只有一份 —— 见
-//   Config::loadConfig 里对 ctl_* 的处理。
-struct AimCtlParams
-{
-    double kp_x = 35.0;
-    double kp_y = 35.0;
-    double ki_x = 0.0;
-    double ki_y = 0.0;
-    double kd_x = 0.0;
-    double kd_y = 0.0;
-
-    double tau_unwind_sec = 0.030;
-    double tau_deriv_sec = 0.020;
-    double i_max = 0.0;
-    int    max_output_counts = 200;
-    double p_full_scale_px = 0.0;
-
-
-    // 在途补偿 (预测提前量)。lead_ms == 0 时预测整体不生效。
-    double predict_lead_ms = 0.0;
-    double predict_max_velocity_px_s = 0.0;
-    double predict_max_lead_ratio = 0.0;
-
-    // ── 灵敏度折算系数 k (像素/计数) ────────────────────────────────────────
-    // 画面上观测到的目标速度会被自己的追踪动作污染：准星每追近一截，画面里
-    // 目标的相对位移就被抵消一截，导致喂给上面「预测提前时间」的速度系统性
-    // 偏小。用这个系数把自身下发速率折算回像素、加回观测速度，就能拿到目标
-    // 的真实速度。0 = 关闭这项修正(不需要标定就能用，只是预测会偏保守)。
-    // 不知道填多少可以用界面上的「测算灵敏度」在线拟合。
-    double k_px_per_count = 0.0;
-
-    // ── 在途自身位移补偿 (Smith) ────────────────────────────────────────────
-    // 扣除链路死区内已下发但画面尚未显现的自身位移，避免重复下令导致过冲振荡。
-    // 纯计数域运算，不需要任何"每计数像素"标定。inflight_beta = 0 时关闭，
-    // 与没有这个功能逐位相同。
-    double inflight_beta = 1.6;          // 补偿强度(无量纲)；0=关闭
-    double inflight_dead_time_ms = 46.0; // 补偿窗口(ms)；必须等于真实链路死区
-
-    // 瞄点 Y 随机抖动的种子 (0 = 用内部固定常数)
-    int random_seed = 0;
-
-    // 夹取。★ 逐条对应 config.cpp 里原来手写的那一组, 不新增也不放松任何一条。
-    void clamp()
-    {
-        kp_x = std::max(0.0, kp_x);
-        kp_y = std::max(0.0, kp_y);
-        ki_x = std::max(0.0, ki_x);
-        ki_y = std::max(0.0, ki_y);
-        kd_x = std::max(0.0, kd_x);
-        kd_y = std::max(0.0, kd_y);
-        tau_unwind_sec = std::clamp(tau_unwind_sec, 1e-4, 10.0);
-        tau_deriv_sec = std::clamp(tau_deriv_sec, 0.0, 10.0);
-        i_max = std::max(0.0, i_max);
-        p_full_scale_px = std::max(0.0, p_full_scale_px);
-        // 下面三个 0 都有明确含义(关闭/不限制), 所以只做下界与有限性保护,
-        // 上界留宽, 避免把用户合理的调参夹掉。
-        predict_lead_ms = std::clamp(predict_lead_ms, 0.0, 1000.0);
-        predict_max_velocity_px_s = std::clamp(predict_max_velocity_px_s, 0.0, 100000.0);
-        predict_max_lead_ratio = std::clamp(predict_max_lead_ratio, 0.0, 100.0);
-        // ★ 物理合法范围与标定器的拟合上限一致(见 sensitivity_calibrator.h)。
-        k_px_per_count = std::clamp(k_px_per_count, 0.0, 10.0);
-        max_output_counts = std::clamp(max_output_counts, 1, 1000);
-        random_seed = std::max(0, random_seed);
-        // ★ 上限 3.0：实测 beta=2.0 在 60fps 已经发散(尾段 56px)，3.0 用来挡住
-        //   填错量级的配置，不是可用值。0 合法(=关闭)，不夹掉。
-        inflight_beta = std::clamp(inflight_beta, 0.0, 3.0);
-        // ★ 窗口不许离真实链路死区太远：填错窗口等于把"还没生效的位移"算错。
-        inflight_dead_time_ms = std::clamp(inflight_dead_time_ms, 0.0, 1000.0);
-    }
-};
-
 struct TriggerParams
 {
     bool trigger_enabled = false;
+    int trigger_fire_mode = -1; // AM: 0 smart click, 1 burst, 2 continuous, 3 smart continuous; -1 migrate
     int trigger_mode = 0; // 0 = existing, 1 = snap/fire/return, 2 = spin/search/fire
     double trigger_snap_px_per_count = 1.0;
     int trigger_snap_max_counts = 500;
@@ -150,6 +67,8 @@ struct TriggerParams
     int trigger_snap_cooldown_ms = 200;
     int trigger_flash_disappear_ms = 80;
     int trigger_fire_delay = 0;
+    bool trigger_prearm_enabled = false;
+    int trigger_prearm_expand_percent = 50;
     int trigger_fire_duration = 0;
     int trigger_fire_interval = 200;
     int trigger_y_percent = 100;
@@ -165,7 +84,7 @@ struct TriggerParams
     bool trigger_weapon_switch31 = false;
     int trigger_switch31_delay_ms = 50;
     int trigger_switch31_step_ms = 20;
-    int trigger_loss_delay_ms = 100;
+    int trigger_loss_delay_ms = 20;
 };
 
 struct HotkeyProfile
@@ -208,82 +127,19 @@ struct HotkeyProfile
     int dynamic_fov_shrink_ms = 200;
     int dynamic_fov_expand_ms = 120;
 
-    double ctl_kp_x = 35.0;
-    double ctl_kp_y = 35.0;
-    double ctl_ki_x = 0.0;
-    double ctl_ki_y = 0.0;
-    double ctl_kd_x = 0.0;
-    double ctl_kd_y = 0.0;
-
-    double ctl_tau_unwind_sec = 0.030;
-    double ctl_tau_deriv_sec = 0.020;
-    double ctl_i_max = 0.0;
-    int    ctl_max_output_counts = 200;
-    double ctl_p_full_scale_px = 0.0;
-
-    // ── 在途自身位移补偿 (Smith) ─────────────────────────────────────────
-    // 扣除链路死区内已下发但画面尚未显现的自身位移，避免重复下令导致过冲振荡。
-    // 纯计数域运算，不需要任何"每计数像素"标定。0 = 关闭。
-    double ctl_inflight_beta = 1.6;
-    double ctl_inflight_dead_time_ms = 46.0;
-
-    // ── 在途补偿（预测提前量）─────────────────────────────────────────────
-    // 链路（采集→推理→瞄准→下发→游戏渲染）有几十毫秒延迟，等这一拍算完
-    // 目标已经跑掉了。预测按目标速度把瞄准点往前推一段来抵消它。
-    //
-    // 生效规则：ctl_predict_lead_ms == 0 时预测整体不生效，
-    //           下面两个参数不读取（行为与未加该功能时逐帧一致）。
-    //           lead_ms != 0 时，下面两个各自 0 表示【不限制】。
-
-    // 预测提前时间（毫秒）= 整条链路的【全部延迟】，由用户实测后填入。
-    // ★ 只用这一个来源，程序不再自动往里加任何东西（来源单一，不会重复计算）。
-    // 包含采集、推理、瞄准、下发，以及游戏渲染的内部延迟 —— 全都算在这一个值里。
-    // ★ 0 = 关闭（默认）。这是总开关。
-    double ctl_predict_lead_ms = 0.0;
-
-    // 速度上限（像素/秒）。估计速度超过它时【钳住速度】——保留方向、只压大小。
-    // ★ 0 = 不限制（默认）。先看日志里打出的实际速度再定这个值。
-    double ctl_predict_max_velocity_px_s = 0.0;
-
-    // 预测距离上限，单位是【目标框对角线倍数】。
-    // 1.0 = 最多提前一个对角线；0.5 = 半个；★ 0 = 不限制（默认）。
-    // 用相对量而不是绝对像素，是为了让远近目标的保护尺度一致。
-    double ctl_predict_max_lead_ratio = 0.0;
-
-    // 灵敏度折算系数 k (像素/计数)。画面观测到的目标速度会被自己的追踪动作
-    // 污染(准星追近一截，画面里目标的相对位移就被抵消一截)，导致喂给上面
-    // 预测的速度系统性偏小。这里把自身下发速率折算回像素、加回观测速度，
-    // 就能拿到目标真实速度。0 = 关闭这项修正。可以用界面「测算灵敏度」在线拟合。
-    double ctl_k_px_per_count = 0.0;
-
     double ctl_y_offset = 0.5;
     double ctl_y_offset_max = 0.5;
     double ctl_x_offset = 0.5;
     double ctl_x_offset_max = 0.5;
 
-    double ctl_hysteresis_ratio = 1.3;
-
     bool ctl_enabled = false;
-
-    double ctl_max_distance_px = 0.0;
-
-    double ctl_match_center_ratio = 0.5;
-    double ctl_area_ratio_tol = 2.0;
-    double ctl_k_snap_mult = 1.15;
-    double ctl_min_aspect = 0.2;
-    double ctl_max_aspect = 5.0;
 
     int ctl_random_seed = 0;
 
-    // ── 开镜档 (自动开镜生效期间取代上面的 ctl_* 整组) ────────────────────
-    // ★ scope_ctl_enabled: 0 = 跟随热键默认档(默认值, 逐拍与没有这个功能一致);
-    //                      1 = 开关按下右键之后改用 ctl_scope。
-    // ★ 判定在 runtime/aim_loop.cpp: 只有【自动开镜真的按下了右键】且热键仍被
-    //   按住的那几拍才切档 —— 不是"只要开镜就切"。
     int scope_ctl_enabled = 0;
-    AimCtlParams ctl_scope;
 
     bool trigger_enabled = false;
+    int trigger_fire_mode = -1; // AM: 0 smart click, 1 burst, 2 continuous, 3 smart continuous; -1 migrate
     int trigger_mode = 0;
     double trigger_snap_px_per_count = 1.0;
     int trigger_snap_max_counts = 500;
@@ -301,6 +157,8 @@ struct HotkeyProfile
     int trigger_snap_cooldown_ms = 200;
     int trigger_flash_disappear_ms = 80;
     int  trigger_fire_delay = 0;
+    bool trigger_prearm_enabled = false;
+    int trigger_prearm_expand_percent = 50;
     int  trigger_fire_duration = 0;
     int  trigger_fire_interval = 200;
     int  trigger_y_percent = 100;
@@ -317,7 +175,7 @@ struct HotkeyProfile
     int  trigger_switch31_delay_ms = 50;
     int  trigger_switch31_step_ms = 20; // 旧配置兼容；切枪按键时长与间隔固定 20ms
     bool secondary_trigger_custom = false;
-    int trigger_loss_delay_ms = 100;
+    int trigger_loss_delay_ms = 20;
     TriggerParams secondary_trigger{};
 
     int   aim_path_mode = 0;
@@ -345,6 +203,7 @@ inline TriggerParams triggerParamsOf(const HotkeyProfile& hk)
 {
     TriggerParams p;
     p.trigger_enabled = hk.trigger_enabled;
+    p.trigger_fire_mode = hk.trigger_fire_mode;
     p.trigger_mode = hk.trigger_mode;
     p.trigger_snap_px_per_count = hk.trigger_snap_px_per_count;
     p.trigger_snap_max_counts = hk.trigger_snap_max_counts;
@@ -362,6 +221,8 @@ inline TriggerParams triggerParamsOf(const HotkeyProfile& hk)
     p.trigger_snap_cooldown_ms = hk.trigger_snap_cooldown_ms;
     p.trigger_flash_disappear_ms = hk.trigger_flash_disappear_ms;
     p.trigger_fire_delay = hk.trigger_fire_delay;
+    p.trigger_prearm_enabled = hk.trigger_prearm_enabled;
+    p.trigger_prearm_expand_percent = hk.trigger_prearm_expand_percent;
     p.trigger_fire_duration = hk.trigger_fire_duration;
     p.trigger_fire_interval = hk.trigger_fire_interval;
     p.trigger_y_percent = hk.trigger_y_percent;
@@ -384,6 +245,7 @@ inline TriggerParams triggerParamsOf(const HotkeyProfile& hk)
 inline void applyTriggerParams(HotkeyProfile& hk, const TriggerParams& p)
 {
     hk.trigger_enabled = p.trigger_enabled;
+    hk.trigger_fire_mode = p.trigger_fire_mode;
     hk.trigger_mode = p.trigger_mode;
     hk.trigger_snap_px_per_count = p.trigger_snap_px_per_count;
     hk.trigger_snap_max_counts = p.trigger_snap_max_counts;
@@ -401,6 +263,8 @@ inline void applyTriggerParams(HotkeyProfile& hk, const TriggerParams& p)
     hk.trigger_snap_cooldown_ms = p.trigger_snap_cooldown_ms;
     hk.trigger_flash_disappear_ms = p.trigger_flash_disappear_ms;
     hk.trigger_fire_delay = p.trigger_fire_delay;
+    hk.trigger_prearm_enabled = p.trigger_prearm_enabled;
+    hk.trigger_prearm_expand_percent = p.trigger_prearm_expand_percent;
     hk.trigger_fire_duration = p.trigger_fire_duration;
     hk.trigger_fire_interval = p.trigger_fire_interval;
     hk.trigger_y_percent = p.trigger_y_percent;
@@ -419,66 +283,11 @@ inline void applyTriggerParams(HotkeyProfile& hk, const TriggerParams& p)
     hk.trigger_loss_delay_ms = p.trigger_loss_delay_ms;
 }
 
-// ── 默认档 ↔ AimCtlParams 的搬运 ────────────────────────────────────────────
-//
-// 两个用途, 都用同一份实现:
-//   1) Config::loadConfig 的夹取: 默认档借道 AimCtlParams::clamp() 走【同一份】
-//      规则, 免得默认档与开镜档的夹取各写一遍、日后漂移。
-//   2) 界面上的「一键复制指定热键的默认瞄准参数」: 把别的热键的【默认档】
-//      搬进本热键的【开镜档】(复制的是默认档, 不是对方的开镜档)。
-//
-// ★ 故意放在头文件里(非 config.cpp): 它是纯搬运, 逻辑测试不需要链 config.cpp
-//   就能钉住它。
-inline AimCtlParams ctlParamsOf(const HotkeyProfile& hk)
-{
-    AimCtlParams p;
-    p.kp_x = hk.ctl_kp_x;
-    p.kp_y = hk.ctl_kp_y;
-    p.ki_x = hk.ctl_ki_x;
-    p.ki_y = hk.ctl_ki_y;
-    p.kd_x = hk.ctl_kd_x;
-    p.kd_y = hk.ctl_kd_y;
-    p.tau_unwind_sec = hk.ctl_tau_unwind_sec;
-    p.tau_deriv_sec = hk.ctl_tau_deriv_sec;
-    p.i_max = hk.ctl_i_max;
-    p.max_output_counts = hk.ctl_max_output_counts;
-    p.p_full_scale_px = hk.ctl_p_full_scale_px;
-    p.predict_lead_ms = hk.ctl_predict_lead_ms;
-    p.predict_max_velocity_px_s = hk.ctl_predict_max_velocity_px_s;
-    p.predict_max_lead_ratio = hk.ctl_predict_max_lead_ratio;
-    p.k_px_per_count = hk.ctl_k_px_per_count;
-    p.inflight_beta = hk.ctl_inflight_beta;
-    p.inflight_dead_time_ms = hk.ctl_inflight_dead_time_ms;
-    p.random_seed = hk.ctl_random_seed;
-    return p;
-}
-
-inline void applyCtlParams(HotkeyProfile& hk, const AimCtlParams& p)
-{
-    hk.ctl_kp_x = p.kp_x;
-    hk.ctl_kp_y = p.kp_y;
-    hk.ctl_ki_x = p.ki_x;
-    hk.ctl_ki_y = p.ki_y;
-    hk.ctl_kd_x = p.kd_x;
-    hk.ctl_kd_y = p.kd_y;
-    hk.ctl_tau_unwind_sec = p.tau_unwind_sec;
-    hk.ctl_tau_deriv_sec = p.tau_deriv_sec;
-    hk.ctl_i_max = p.i_max;
-    hk.ctl_max_output_counts = p.max_output_counts;
-    hk.ctl_p_full_scale_px = p.p_full_scale_px;
-    hk.ctl_predict_lead_ms = p.predict_lead_ms;
-    hk.ctl_predict_max_velocity_px_s = p.predict_max_velocity_px_s;
-    hk.ctl_predict_max_lead_ratio = p.predict_max_lead_ratio;
-    hk.ctl_k_px_per_count = p.k_px_per_count;
-    hk.ctl_inflight_beta = p.inflight_beta;
-    hk.ctl_inflight_dead_time_ms = p.inflight_dead_time_ms;
-    hk.ctl_random_seed = p.random_seed;
-}
-
 struct CrosshairColorProfileConfig
 {
     std::string name = "Red-Low";
     bool enabled = true;
+    bool exact_hsv = false;
     int h_low = 0;
     int h_high = 10;
     int s_min = 120;
@@ -493,8 +302,9 @@ class Config
 {
 public:
     std::string capture_device;
-    std::string capture_source = "device"; // device | udp | tcp
+    std::string capture_source = "device"; // device | udp | tcp | ndi
     std::string capture_stream_url;
+    std::string capture_ndi_source;
     std::string capture_format;
     int  capture_width  = 0;
     int  capture_height = 0;
@@ -600,12 +410,8 @@ public:
     // ── 全局选靶与稳定器 (独立于热键的视觉目标感知层) ────────────────────────
     double target_hysteresis_ratio   = 1.3;
     double target_max_distance_px    = 0.0;
-    double target_match_center_ratio = 0.5;
-    double target_area_ratio_tol     = 2.0;
-    double target_k_snap_mult        = 1.15;
-    double target_min_aspect         = 0.2;
-    double target_max_aspect         = 5.0;
 
+    int crosshair_algorithm = 0; // 0: existing, 1: whole-mask centroid
     int crosshair_rect_w = 40;
     int crosshair_rect_h = 40;
     int crosshair_offset_y = 0;

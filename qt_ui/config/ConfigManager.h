@@ -22,6 +22,8 @@ public:
     QString captureSource() const;
     void setCaptureSource(const QString& v);
     QString captureStreamUrl() const;
+    QString captureNdiSource() const;
+    void setCaptureNdiSource(const QString& v);
     void setCaptureStreamUrl(const QString& v);
     QString captureFormat() const;
     void setCaptureFormat(const QString& v);
@@ -112,12 +114,15 @@ public:
     void setCrosshairOffsetY(int v);
     int crosshairMinPixelCount() const;
     void setCrosshairMinPixelCount(int v);
+    int crosshairAlgorithm() const;
+    void setCrosshairAlgorithm(int v);
     int crosshairCloseRadius() const;
     void setCrosshairCloseRadius(int v);
 
     struct ColorProfile {
         QString name;
         bool enabled = true;
+        bool exactHsv = false;
         int hLow = 0, hHigh = 10;
         int sMin = 120, sMax = 255;
         int vMin = 120, vMax = 255;
@@ -161,16 +166,6 @@ public:
     void setTargetHysteresisRatio(double v);
     double targetMaxDistancePx() const;
     void setTargetMaxDistancePx(double v);
-    double targetMatchCenterRatio() const;
-    void setTargetMatchCenterRatio(double v);
-    double targetAreaRatioTol() const;
-    void setTargetAreaRatioTol(double v);
-    double targetKSnapMult() const;
-    void setTargetKSnapMult(double v);
-    double targetMinAspect() const;
-    void setTargetMinAspect(double v);
-    double targetMaxAspect() const;
-    void setTargetMaxAspect(double v);
 
     QString activeHotkeyGroup() const;
     void setActiveHotkeyGroup(const QString& v);
@@ -196,40 +191,11 @@ public:
         int aimDelayMs = 0;
 
         bool   ctlEnabled = false;
-        double ctlKpX = 35.0, ctlKpY = 35.0;
-        double ctlKiX = 0.0,  ctlKiY = 0.0;
-        double ctlKdX = 0.0,  ctlKdY = 0.0;
-        double ctlTauUnwindSec = 0.030;
-        double ctlTauDerivSec = 0.020;
-        double ctlIMax = 0.0;
-        int    ctlMaxOutputCounts = 200;
-        double ctlPFullScalePx = 0.0;
-
-        // 在途补偿（预测提前量）。leadMs == 0 ⇒ 预测整体关闭，
-        // 另两个参数不生效（0 = 不限制）。
-        double ctlPredictLeadMs = 0.0;
-        double ctlPredictMaxVelocityPxPerSec = 0.0;
-        double ctlPredictMaxLeadRatio = 0.0;
-
-        // 灵敏度折算系数 k (像素/计数)：修正预测吃到的目标速度里的自身运动污染。
-        double ctlKPxPerCount = 0.0;
-
-        // 在途自身位移补偿 (Smith)：把已下发但画面未显现的自身位移从输出里扣掉。
-        double ctlInflightBeta = 1.6;
-        double ctlInflightDeadTimeMs = 46.0;
-
         double ctlYOffset = 0.5;
         double ctlYOffsetMax = 0.5;
         double ctlXOffset = 0.5;
         double ctlXOffsetMax = 0.5;
-        double ctlHysteresisRatio = 1.3;
-        double ctlMaxDistancePx = 0.0;
         int    ctlRandomSeed = 0;
-        double ctlMatchCenterRatio = 0.5;
-        double ctlAreaRatioTol = 2.0;
-        double ctlKSnapMult = 1.15;
-        double ctlMinAspect = 0.2;
-        double ctlMaxAspect = 5.0;
     };
 
     HotkeyData hotkey(int index) const;

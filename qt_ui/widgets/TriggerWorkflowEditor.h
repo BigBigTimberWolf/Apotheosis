@@ -76,7 +76,10 @@ private:
     QComboBox* scopeMode_ = nullptr;
     QSpinBox* scopeDelay_ = nullptr;
     QSpinBox* fireDelay_ = nullptr;
+    QCheckBox* prearmEnabled_ = nullptr;
+    QSpinBox* prearmExpand_ = nullptr;
     QSpinBox* delayJitter_ = nullptr;
+    QComboBox* fireMode_ = nullptr;
     QSpinBox* fireDuration_ = nullptr;
     QSpinBox* lossDelay_ = nullptr;
     QSpinBox* durationJitter_ = nullptr;

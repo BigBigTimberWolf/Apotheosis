@@ -4,6 +4,7 @@ project(ApotheosisUIPreview LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
@@ -11,6 +12,7 @@ set(SRC
     preview_main.cpp
     PreviewWindow.cpp
     PreviewWindow.h
+    ../style/theme.qrc
     ../widgets/IconFont.cpp
     ../widgets/IconFont.h
     ../widgets/StatusPill.cpp

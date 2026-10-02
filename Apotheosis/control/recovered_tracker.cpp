@@ -85,7 +85,7 @@ double gateAxis(double old, double next, double size, bool xAxis, int& reverseCo
 }
 
 void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
-                   double dtSec, Vec2 eventSum, const RecoveredTrackerConfig& config)
+                   double dtSec, const RecoveredTrackerConfig& config)
 {
     const Box old = state.track.box;
     const Box& incoming = candidate.box;
@@ -104,17 +104,16 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
     const double height = old.h + (incoming.h - old.h) * sizeAlpha;
     state.track.box = { center.x - width * 0.5, center.y - height * 0.5, width, height };
 
-    // No movement-event context is available at this boundary. The two gains
-    // are the documented no-event branch; other track state gates remain open.
+    // Image-space target velocity supplies controller FF. Per user choice,
+    // mouse-count conversion and the source's fixed 0.91 are not reintroduced.
     const double velocityDt = std::clamp(dtSec, 0.0020833334, 0.12);
     const Vec2 rawVelocity = (incoming.center() - state.lastObservation) /
                              velocityDt;
     const double firstAlpha = base * 0.3;
     state.firstVelocity += (rawVelocity - state.firstVelocity) * firstAlpha;
     const double outputAlpha = std::clamp(std::max(base, 0.55) * 0.24, 0.12, 0.65);
-    const Vec2 compensated = rawVelocity + eventSum * (0.91 / std::max(velocityDt, 0.001));
     const Vec2 next = state.track.velocity +
-        (compensated - state.track.velocity) * outputAlpha;
+        (rawVelocity - state.track.velocity) * outputAlpha;
     state.track.velocity = {
         gateAxis(state.track.velocity.x, next.x, incoming.w, true, state.reverseX),
         gateAxis(state.track.velocity.y, next.y, incoming.h, false, state.reverseY)
@@ -131,7 +130,7 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
 } // namespace
 
 std::vector<RecoveredTrack> RecoveredTracker::update(
-    const std::vector<Candidate>& candidates, double dtSec, Vec2 eventSum)
+    const std::vector<Candidate>& candidates, double dtSec)
 {
     struct Pair { double score; size_t track; size_t candidate; };
     std::vector<Pair> pairs;
@@ -162,7 +161,7 @@ std::vector<RecoveredTrack> RecoveredTracker::update(
         if (!usable(candidates[ci])) continue;
         if (assignment[ci] >= 0)
             updateMatched(tracks_[assignment[ci]], candidates[ci], dtSec,
-                          eventSum, config_);
+                          config_);
         else
         {
             State state;
@@ -203,14 +202,14 @@ void RecoveredTracker::reset()
 }
 
 std::vector<RecoveredTrack> RecoveredDualTracker::update(
-    const std::vector<Candidate>& candidates, double dtSec, Vec2 eventSum)
+    const std::vector<Candidate>& candidates, double dtSec)
 {
     // Preserve the common candidate order supplied by the detector. Its
     // historical re-ranking is an upstream stage, not part of either tracker.
     std::vector<Candidate> ordered;
     for (const Candidate& candidate : candidates)
         if (usable(candidate)) ordered.push_back(candidate);
-    const auto motion = motion_.update(ordered, dtSec, eventSum);
+    const auto motion = motion_.update(ordered, dtSec);
     if (ordered.empty()) return {};
 
     // The 0x168 input is pre-merged within the frame. The E8 motion tracker

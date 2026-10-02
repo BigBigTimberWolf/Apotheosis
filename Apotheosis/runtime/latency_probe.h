@@ -324,10 +324,17 @@ inline void notePipelineTimes(bool graph, double preprocessMs, double inferenceM
     }
     sh.gpu_pipeline.push(totalGpuMs);
     sh.cpu_postprocess.push(postprocessMs);
-    sh.aim_tick.push(aimTickMs);
+    if (aimTickMs >= 0.0) sh.aim_tick.push(aimTickMs);
     sh.last_timing_was_graph = graph;
     sh.engine_inference_ms = totalGpuMs;
     sh.engine_update_ns = nowNs();
+}
+
+inline void noteAimTick(double ms)
+{
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    sh.aim_tick.push(ms);
 }
 
 inline void noteSyncWait(double ms, bool spun, uint64_t fallbacks)

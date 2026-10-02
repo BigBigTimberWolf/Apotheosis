@@ -22,7 +22,7 @@ namespace {
 QLabel* hint(const QString& value) {
     auto* label = new QLabel(value);
     label->setWordWrap(true);
-    label->setStyleSheet(QStringLiteral("color:#71717A;font-size:12px;"));
+    label->setStyleSheet(QStringLiteral("color:#ABA697;font-size:12px;"));
     return label;
 }
 }

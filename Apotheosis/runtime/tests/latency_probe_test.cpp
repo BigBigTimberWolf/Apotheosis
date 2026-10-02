@@ -223,6 +223,12 @@ int main()
         CHECK(!directTiming.last_timing_was_graph && directTiming.gpu_engine.n == 1 &&
               directTiming.gpu_engine.last_ms == 4.2 && directTiming.aim_tick.max_ms == 0.6,
               "direct timing exposes segments and tracks control tick spikes");
+        lat::noteAimTick(0.7);
+        const auto asyncCount = lat::snapshot().aim_tick.n;
+        lat::notePipelineTimes(false, 0.02, 4.2, 0.01, 0.03, -1.0);
+        CHECK(lat::snapshot().aim_tick.n == asyncCount &&
+              lat::snapshot().aim_tick.last_ms == 0.7,
+              "inference timings do not overwrite independent control timings");
         lat::reset();
     }
 

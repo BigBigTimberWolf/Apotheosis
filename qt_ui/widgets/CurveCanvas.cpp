@@ -106,8 +106,8 @@ void CurveCanvas::paintEvent(QPaintEvent*)
     const QRect r = plotRect();
 
     // 背景
-    p.fillRect(r, QColor(0xFA, 0xFA, 0xFB));
-    p.setPen(QPen(QColor(0, 0, 0, 20), 1));
+    p.fillRect(r, QColor("#151517"));
+    p.setPen(QPen(QColor("#35332D"), 1));
     p.drawRect(r);
 
     drawGrid(p, r);
@@ -121,12 +121,12 @@ void CurveCanvas::paintEvent(QPaintEvent*)
         if (i == 0) path.moveTo(x, y);
         else        path.lineTo(x, y);
     }
-    p.setPen(QPen(QColor(0x5E, 0x6A, 0xD2), 2.0));
+    p.setPen(QPen(QColor("#D5B56B"), 2.0));
     p.drawPath(path);
 
     // 起点/终点圆点：提示"两端必须落在中轴线上"
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(0x5E, 0x6A, 0xD2));
+    p.setBrush(QColor("#D5B56B"));
     const double yMid = r.top() + r.height() / 2.0;
     p.drawEllipse(QPointF(r.left(),  yMid), 3.0, 3.0);
     p.drawEllipse(QPointF(r.right(), yMid), 3.0, 3.0);
@@ -135,7 +135,7 @@ void CurveCanvas::paintEvent(QPaintEvent*)
     // 悬停竖线
     if (m_hoverX >= r.left() && m_hoverX <= r.right())
     {
-        p.setPen(QPen(QColor(0x9C, 0xA3, 0xAF, 140), 1, Qt::DashLine));
+        p.setPen(QPen(QColor(213, 181, 107, 140), 1, Qt::DashLine));
         p.drawLine(m_hoverX, r.top(), m_hoverX, r.bottom());
     }
 }
@@ -144,10 +144,10 @@ void CurveCanvas::drawGrid(QPainter& p, const QRect& r)
 {
     // 中轴线（Y=0）实线，其余虚线
     const double yMid = r.top() + r.height() / 2.0;
-    p.setPen(QPen(QColor(0, 0, 0, 60), 1));
+    p.setPen(QPen(QColor(213, 181, 107, 90), 1));
     p.drawLine(QPointF(r.left(), yMid), QPointF(r.right(), yMid));
 
-    p.setPen(QPen(QColor(0, 0, 0, 25), 1, Qt::DashLine));
+    p.setPen(QPen(QColor(213, 181, 107, 35), 1, Qt::DashLine));
     // 横向：Y = ±0.5，以及边界 ±1
     for (double v : { -0.5, 0.5 })
     {
@@ -162,7 +162,7 @@ void CurveCanvas::drawGrid(QPainter& p, const QRect& r)
     }
 
     // 角标：只标最必要的两个数，避免画布变表格
-    p.setPen(QColor(0x9C, 0xA3, 0xAF));
+    p.setPen(QColor("#A49E90"));
     QFont f = p.font();
     f.setPointSizeF(7.5);
     p.setFont(f);
@@ -197,8 +197,10 @@ void CurveCanvas::mouseMoveEvent(QMouseEvent* e)
 
 void CurveCanvas::mouseReleaseEvent(QMouseEvent* e)
 {
-    if (e->button() != Qt::LeftButton) return;
+    if (e->button() != Qt::LeftButton || !m_dragging) return;
+    writeAt(e->pos().x(), e->pos().y());
     m_dragging = false;
+    update();
     emit curveEdited();
     emit curveChanged();      // 一笔结束才通知落盘
 }

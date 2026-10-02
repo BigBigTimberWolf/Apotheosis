@@ -1,3 +1,4 @@
+#include "macro/rule_logic.h"
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
@@ -185,7 +186,7 @@ void update(const std::shared_ptr<const Config>& cfg, bool macroEditing) {
         if(vk<=0 || vk>=256) return;
         windows.set(vk);
         if(const int b=buttonCode(key)) buttons.set(b);
-        else if(const int hid=macros::hidKey(key)) { keys.set(hid); localKeyboard.set(vk); }
+        else if(const int hid=macros::hidKey(key)) { if(hid<256)keys.set(hid);localKeyboard.set(vk); }
     };
     for (int i = 0; i < static_cast<int>(cfg->hotkeys.size()); ++i) {
         const auto& profile = cfg->hotkeys[i];
@@ -196,7 +197,7 @@ void update(const std::shared_ptr<const Config>& cfg, bool macroEditing) {
     if(cfg->macro_programs_enabled && !macroEditing)
         for(const auto& p:cfg->macro_programs)
             if(p.enabled && p.blockTrigger && !p.actions.empty() && p.trigger!=cfg->macro_stop_key)
-                add(p.trigger);
+                for(const auto& step:macros::split(p.trigger,'>'))for(const auto& key:macros::split(step,'+'))if(key!=cfg->macro_stop_key)add(key);
 
     const bool wanted=windows.any();
     const bool native=cfg->input_method=="WINDOWS";

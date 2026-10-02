@@ -38,6 +38,10 @@
 #include "runtime/latency_probe.h"
 #include "runtime/sched_boost.h"
 #include "runtime/aim_loop.h"
+#include "crosshair/crosshair_runtime.h"
+#include "runtime/latest_control_worker.h"
+#include "capture/gpu_color_ops.h"
+#include "macro/rule_sources.h"
 
 int model_quant;
 std::vector<float> outputData;
@@ -1297,6 +1301,17 @@ void TrtDetector::processFrameGpu(GpuImage frame, runtime::FrameContext context)
 
 void TrtDetector::inferenceThread()
 {
+    runtime::LatestControlWorker controlWorker([consumedVersion = -1]() mutable {
+        static thread_local sched_boost::LiveThreadBoost boost;
+        const auto settings = runtime_config::read();
+        boost.update(settings->use_mmcss, settings->mmcss_task_name.c_str());
+        const auto start = std::chrono::steady_clock::now();
+        try { runtime::aim_loop::tick(&consumedVersion); }
+        catch (const std::exception& e) { std::cerr << "[AimControl] " << e.what() << std::endl; }
+        catch (...) { std::cerr << "[AimControl] unknown exception" << std::endl; }
+        runtime::latency::noteAimTick(std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count());
+    });
     std::string mmcssTask;
     std::unique_ptr<sched_boost::ScopedThreadBoost> threadBoost;
 
@@ -1310,14 +1325,60 @@ void TrtDetector::inferenceThread()
     std::array<cv::Mat, 2> inflightCpu;
 
     bool graphCaptureGivenUp = false;
+    int motionHotkey = -1;
 
     auto publishSlot = [&](int slot)
     {
         if (slot < 0) return;
         waitForEvent(copyCompleteEvent[slot]);
         publishContext = slotContexts[slot];
+        // Derive dimensions from the owned image even for callers that omit context.
+        publishContext.width = !inflightGpu[slot].empty() ? inflightGpu[slot].cols() : inflightCpu[slot].cols;
+        publishContext.height = !inflightGpu[slot].empty() ? inflightGpu[slot].rows() : inflightCpu[slot].rows;
         publishCaptureNs = slotCaptureNs[slot];
         publishSubmitNs = slotSubmitNs[slot];
+        publishCrosshair = {};
+        // Color and detections consume the SAME retained inference image.
+        // Never rendezvous with the capture worker's latest-only slot.
+        const auto colorStart = std::chrono::steady_clock::now();
+        const auto motionSettings = runtime_config::read();
+        const int activeMotionKey = runtime::g_active_hotkey_index.load();
+        bool needMotion = false;
+        if (activeMotionKey >= 0 && size_t(activeMotionKey) < motionSettings->hotkeys.size()) {
+            const auto& hk = motionSettings->hotkeys[activeMotionKey];
+            auto enabled = [](const control::RecoveredPidConfig& p) { return p.followX > 0 || p.followY > 0; };
+            needMotion = enabled(hk.recovered_pid) || enabled(hk.recovered_secondary_pid) || enabled(hk.recovered_scope_pid);
+        }
+        if (!needMotion || motionHotkey != activeMotionKey) backgroundEstimator_.reset();
+        motionHotkey = activeMotionKey;
+        motionThumbnail_.release();
+        if (needMotion) {
+            if (!inflightGpu[slot].empty()) {
+                const auto& frame = inflightGpu[slot];
+                const auto size = runtime::BackgroundMotionEstimator::thumbnailSize({frame.cols(),frame.rows()});
+                if (motionThumbnailGpu_.create(size.height,size.width,1)) {
+                    launch_motion_thumbnail(frame.data(),frame.step(),frame.cols(),frame.rows(),frame.channels(),
+                        motionThumbnailGpu_.data(),motionThumbnailGpu_.step(),size.width,size.height,stream);
+                    if (cudaGetLastError()==cudaSuccess) {
+                        motionThumbnailGpu_.download(motionThumbnail_,stream);
+                        if (cudaStreamSynchronize(stream)!=cudaSuccess) motionThumbnail_.release();
+                    }
+                }
+            } else if (!inflightCpu[slot].empty()) {
+                runtime::BackgroundMotionEstimator::thumbnail(inflightCpu[slot],motionThumbnail_);
+            }
+        }
+        if (crosshair_runtime::same_frame_crosshair_active())
+        {
+            crosshair_runtime::PivotSnapshot pivot;
+            if (!inflightGpu[slot].empty())
+                pivot = crosshair_runtime::process_gpu_frame(inflightGpu[slot]);
+            else if (!inflightCpu[slot].empty())
+                pivot = crosshair_runtime::process_frame(inflightCpu[slot], publishCaptureNs, true);
+            publishCrosshair = {publishContext, pivot.x, pivot.y, pivot.active_hotkey, pivot.valid};
+        }
+        const double colorMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - colorStart).count();
         // The source image is still owned by this inference slot. Refresh its
         // cache entry before publishing detections so the sampler can save the
         // exact frame even if inference took longer than the capture cache.
@@ -1330,6 +1391,10 @@ void TrtDetector::inferenceThread()
         }
 
         const auto postStart = std::chrono::steady_clock::now();
+        if(macros::visionRequested()) {
+            if(!inflightGpu[slot].empty())macros::submitVisionFrame(inflightGpu[slot],publishCaptureNs);
+            else if(!inflightCpu[slot].empty())macros::submitVisionFrame(inflightCpu[slot],publishCaptureNs);
+        }
         frameAimTickMs = 0.0;
         auto& pinned = pinnedSlot(slot);
         for (const auto& name : outputNames)
@@ -1339,6 +1404,7 @@ void TrtDetector::inferenceThread()
                 postProcess(it->second, name, outputTypes[name], &lastNmsTimeValue);
         }
         const auto postEnd = std::chrono::steady_clock::now();
+        controlWorker.notify();
 
         float preprocessMs = 0.0f;
         float inferenceMs = 0.0f;
@@ -1348,14 +1414,14 @@ void TrtDetector::inferenceThread()
         cudaEventElapsedTime(&copyMs, inferenceCompleteEvent[slot], copyCompleteEvent[slot]);
         const double postprocessMs = std::max(
             0.0, std::chrono::duration<double, std::milli>(postEnd - postStart).count()
-                     - frameAimTickMs);
+                     - frameAimTickMs) + colorMs;
         const bool usedGraph = slotUsedGraph[slot];
         lastPreprocessTimeValue = std::chrono::duration<double, std::milli>(
             usedGraph ? -1.0 : preprocessMs);
         lastInferenceTimeValue = std::chrono::duration<double, std::milli>(
             usedGraph ? preprocessMs + inferenceMs + copyMs : inferenceMs);
         runtime::latency::notePipelineTimes(
-            usedGraph, preprocessMs, inferenceMs, copyMs, postprocessMs, frameAimTickMs);
+            usedGraph, preprocessMs, inferenceMs, copyMs, postprocessMs, -1.0);
         runtime::latency::noteSyncWait(lastSyncSpinMs, lastSyncUsedSpin, syncFallbackCount);
         lastCopyTimeValue = std::chrono::duration<double, std::milli>(
             usedGraph ? -1.0 : copyMs);
@@ -1404,6 +1470,7 @@ void TrtDetector::inferenceThread()
             slotSubmitNs[0]  = slotSubmitNs[1]  = 0;
             curr_slot = 0;
             graphCaptureGivenUp = false;
+            backgroundEstimator_.reset();
         }
 
         if (useCudaGraph != runtime_config::read()->use_cuda_graph)
@@ -1768,6 +1835,13 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
             *nmsTime = std::chrono::duration<double, std::milli>(0);
     }
 
+    // Exclude every detected object before class filtering, including objects
+    // that the user has removed from the aiming classes.
+    std::vector<cv::Rect> foreground;
+    foreground.reserve(detections.size());
+    for (const auto& det : detections) foreground.push_back(det.box);
+    const auto background = backgroundEstimator_.update(motionThumbnail_,
+        {publishContext.width,publishContext.height},foreground,publishCaptureNs/1000);
     applyDeleteBucketFilter(detections);
 
     {
@@ -1787,17 +1861,9 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
 
         runtime::latency::markInferenceDone(publishSubmitNs);
         detectionBuffer.bumpVersionLocked(publishContext);
+        detectionBuffer.frame_crosshair = publishCrosshair;
+        detectionBuffer.background_motion = background;
         detectionBuffer.cv.notify_all();
     }
 
-    const auto tickStart = std::chrono::steady_clock::now();
-    try
-    {
-        runtime::aim_loop::tick();
-    }
-    catch (...)
-    {
-    }
-    frameAimTickMs += std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - tickStart).count();
 }

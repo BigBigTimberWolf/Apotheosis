@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStyle>
@@ -30,15 +31,18 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
 
     auto* mark = new QLabel(this);
     mark->setObjectName("brandMark");
-    mark->setFixedSize(29, 29);
+    mark->setFixedSize(50, 50);
     mark->setAlignment(Qt::AlignCenter);
-    if (IconFont::available()) {
-        mark->setFont(IconFont::font(17));
-        mark->setText(QString(IconFont::glyph("crosshair")));
-    }
+    const QPixmap logo(QStringLiteral(":/assets/apotheosis_logo.png"));
+    const qreal scale = devicePixelRatioF();
+    QPixmap displayed = logo.scaled(QSize(qRound(50 * scale), qRound(50 * scale)),
+                                   Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    displayed.setDevicePixelRatio(scale);
+    mark->setPixmap(displayed);
+    mark->setToolTip(QStringLiteral("Apotheosis"));
     row->addWidget(mark);
 
-    auto* word = new QLabel(QStringLiteral("Apotheosis"), this);
+    auto* word = new QLabel(QStringLiteral("APOTHEOSIS"), this);
     word->setObjectName("brandWord");
     row->addSpacing(9);
     row->addWidget(word);

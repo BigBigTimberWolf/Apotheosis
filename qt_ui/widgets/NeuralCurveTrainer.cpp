@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <thread>
 #include <utility>
 
@@ -42,6 +43,7 @@ void NeuralCurveTrainingCanvas::startRecording(int rounds, bool append)
     requested_ = std::clamp(rounds, 5, 80);
     acceptedThisRun_ = 0;
     rejected_ = 0;
+    rejectionReason_.clear();
     if (!append) trajectories_.clear();
     recording_ = true;
     beginRound();
@@ -73,20 +75,25 @@ void NeuralCurveTrainingCanvas::beginRound()
     update();
 }
 
-boss::NeuralTrajectory NeuralCurveTrainingCanvas::normalizeStroke() const
+boss::NeuralTrajectory NeuralCurveTrainingCanvas::normalizeStroke(QString& reason) const
 {
     boss::NeuralTrajectory sampled;
     const QPointF delta = target_ - start_;
     const double length = std::hypot(delta.x(), delta.y());
-    if (length < 50.0 || stroke_.size() < 6) return sampled;
+    if (length < 50.0 || stroke_.size() < 3) {
+        reason = QString::fromUtf8(u8"轨迹采样太少，请从起点连续拖到目标");
+        return sampled;
+    }
     double travelled = 0.0;
     for (size_t i = 1; i < stroke_.size(); ++i)
     {
         const double step = QLineF(stroke_[i - 1], stroke_[i]).length();
-        if (step > length * 0.55) return {};
         travelled += step;
     }
-    if (travelled > length * 4.0) return {};
+    if (travelled > length * 4.0) {
+        reason = QString::fromUtf8(u8"轨迹绕行过多，请直接拖向目标");
+        return {};
+    }
 
     const QPointF axis(delta.x() / length, delta.y() / length);
     const QPointF perp(-axis.y(), axis.x());
@@ -106,7 +113,10 @@ boss::NeuralTrajectory NeuralCurveTrainingCanvas::normalizeStroke() const
             maxProgress = progress;
         }
     }
-    if (monotonic.size() < 5 || maxProgress < 0.85) return {};
+    if (monotonic.size() < 3 || maxProgress < 1.0 - kTargetRadius / length - 1e-6) {
+        reason = QString::fromUtf8(u8"有效前进采样不足，请连续拖动后再松开");
+        return {};
+    }
     monotonic.push_back({ 1.0, 0.0 });
 
     sampled.reserve(kTrainingSamples);
@@ -131,7 +141,8 @@ boss::NeuralTrajectory NeuralCurveTrainingCanvas::normalizeStroke() const
 
 void NeuralCurveTrainingCanvas::finishRound()
 {
-    auto normalized = normalizeStroke();
+    rejectionReason_.clear();
+    auto normalized = normalizeStroke(rejectionReason_);
     if (!normalized.empty())
     {
         if (trajectories_.size() >= 200)
@@ -162,10 +173,25 @@ void NeuralCurveTrainingCanvas::mousePressEvent(QMouseEvent* event)
 void NeuralCurveTrainingCanvas::mouseMoveEvent(QMouseEvent* event)
 {
     if (!recording_ || !dragging_) return;
-    const QPointF point = event->position();
+    appendStroke(event->position());
+}
+
+void NeuralCurveTrainingCanvas::appendStroke(QPointF point)
+{
+    // Desktop mouse events can skip across the whole target between samples.
+    // Test the segment, not just its final pixel, and keep the arrival point.
+    const QPointF previous = stroke_.empty() ? start_ : stroke_.back();
+    const QPointF step = point - previous;
+    const double length2 = QPointF::dotProduct(step, step);
+    const double fraction = length2 > 0.0
+        ? std::clamp(QPointF::dotProduct(target_ - previous, step) / length2, 0.0, 1.0)
+        : 0.0;
+    const QPointF closest = previous + step * fraction;
+    const bool arrived = QLineF(closest, target_).length() <= kTargetRadius;
+    if (arrived) point = closest;
     if (stroke_.empty() || QLineF(stroke_.back(), point).length() >= 1.0)
         stroke_.push_back(point);
-    if (QLineF(point, target_).length() <= kTargetRadius)
+    if (arrived)
         finishRound();
     else update();
 }
@@ -173,8 +199,11 @@ void NeuralCurveTrainingCanvas::mouseMoveEvent(QMouseEvent* event)
 void NeuralCurveTrainingCanvas::mouseReleaseEvent(QMouseEvent* event)
 {
     if (!recording_ || !dragging_ || event->button() != Qt::LeftButton) return;
+    appendStroke(event->position());
+    if (!recording_ || !dragging_) return; // Arrival already finished this round.
     dragging_ = false;
     ++rejected_;
+    rejectionReason_ = QString::fromUtf8(u8"尚未到达绿色目标就松开，请重录本条");
     beginRound();
 }
 
@@ -182,32 +211,32 @@ void NeuralCurveTrainingCanvas::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.fillRect(rect(), QColor("#F7F8FA"));
-    p.setPen(QPen(QColor("#D8DBE2"), 1));
-    p.setBrush(Qt::white);
+    p.fillRect(rect(), QColor("#151517"));
+    p.setPen(QPen(QColor("#35332D"), 1));
+    p.setBrush(QColor("#19191C"));
     p.drawRoundedRect(rect().adjusted(1, 1, -1, -1), 10, 10);
     if (!recording_)
     {
-        p.setPen(QColor("#71717A"));
+        p.setPen(QColor("#ABA697"));
         p.drawText(rect(), Qt::AlignCenter,
-                   QString::fromUtf8(u8"设置轮数并开始录制\n从蓝色起点按住左键拖向绿色目标"));
+                   QString::fromUtf8(u8"设置轮数并开始录制\n从金色起点按住左键拖向绿色目标"));
         return;
     }
     if (stroke_.size() >= 2)
     {
         QPainterPath path(stroke_.front());
         for (size_t i = 1; i < stroke_.size(); ++i) path.lineTo(stroke_[i]);
-        p.setPen(QPen(QColor(74, 127, 229, 160), 2));
+        p.setPen(QPen(QColor(213, 181, 107, 160), 2));
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
     }
-    p.setPen(QPen(QColor("#2563EB"), 2));
-    p.setBrush(QColor("#60A5FA"));
+    p.setPen(QPen(QColor("#D5B56B"), 2));
+    p.setBrush(QColor("#E9CD8A"));
     p.drawEllipse(start_, kStartRadius, kStartRadius);
-    p.setPen(QPen(QColor("#16A34A"), 2));
+    p.setPen(QPen(QColor("#53C583"), 2));
     p.setBrush(QColor("#22C55E"));
     p.drawEllipse(target_, kTargetRadius, kTargetRadius);
-    p.setPen(QColor("#52525B"));
+    p.setPen(QColor("#BCB7AA"));
     p.drawText(QRectF(12, 8, width() - 24, 25), Qt::AlignLeft,
                QString::fromUtf8(u8"第 %1 / %2 条（无效重录 %3）")
                    .arg(acceptedThisRun_ + 1).arg(requested_).arg(rejected_));
@@ -219,7 +248,7 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
     resize(740, 690);
     auto* root = new QVBoxLayout(this);
     auto* hint = new QLabel(QString::fromUtf8(
-        u8"用当前 Windows 桌面的鼠标，在蓝色起点按住左键拖到绿色目标。"
+        u8"用当前 Windows 桌面的鼠标，在金色起点按住左键拖到绿色目标。"
         u8"录制多条真实手动轨迹后，网络学习平均路径；曲线只改变瞄准移动方向。"));
     hint->setWordWrap(true);
     root->addWidget(hint);
@@ -235,6 +264,10 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
     recordButton_ = new QPushButton(QString::fromUtf8(u8"开始录制"));
     recordButton_->setObjectName("neuralStartRecording");
     controls->addWidget(recordButton_);
+    trainButton_ = new QPushButton(QString::fromUtf8(u8"训练已有轨迹"));
+    trainButton_->setObjectName("neuralTrainExisting");
+    trainButton_->setEnabled(false);
+    controls->addWidget(trainButton_);
     controls->addStretch();
     root->addLayout(controls);
 
@@ -275,6 +308,7 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
             canvas_->stopRecording();
             setRecordingUi(false);
             status_->setText(QString::fromUtf8(u8"录制已停止；可勾选追加后继续"));
+            exportButton_->setEnabled(!canvas_->trajectories().empty());
         }
         else
         {
@@ -290,8 +324,11 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
         status_->setText(QString::fromUtf8(u8"本次有效 %1 / %2，需重录 %3；总样本 %4")
                          .arg(accepted).arg(requested).arg(rejected)
                          .arg(canvas_->trajectories().size()));
+        if (!canvas_->rejectionReason().isEmpty())
+            status_->setText(status_->text() + QStringLiteral("\n") + canvas_->rejectionReason());
     };
     canvas_->collectionFinished = [this] { launchTraining(); };
+    connect(trainButton_, &QPushButton::clicked, this, [this] { launchTraining(); });
     connect(exportButton_, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getSaveFileName(
             this, QString::fromUtf8(u8"导出训练轨迹"),
@@ -323,25 +360,41 @@ void NeuralCurveTrainerDialog::setRecordingUi(bool recording)
 {
     rounds_->setEnabled(!recording);
     append_->setEnabled(!recording);
+    trainButton_->setEnabled(!recording && !training_ && canvas_->trajectories().size() >= 5);
     recordButton_->setText(recording ? QString::fromUtf8(u8"停止录制")
                                      : QString::fromUtf8(u8"开始录制"));
 }
 
 void NeuralCurveTrainerDialog::launchTraining()
 {
+    if (training_ || canvas_->recording() || canvas_->trajectories().size() < 5) return;
+    result_ = {};
+    applyButton_->setEnabled(false);
+    preview_->hide();
+    quality_->hide();
     setRecordingUi(false);
     exportButton_->setEnabled(true);
     recordButton_->setEnabled(false);
+    trainButton_->setEnabled(false);
     status_->setText(QString::fromUtf8(u8"正在后台训练，并评估留出的轨迹…"));
     auto data = canvas_->trajectories();
     training_ = std::make_shared<TrainingState>();
     auto state = training_;
-    std::thread([data = std::move(data), state = std::move(state)]() mutable {
-        auto result = boss::trainNeuralCurve(data);
+    try {
+        std::thread([data = std::move(data), state]() mutable {
+            boss::NeuralCurveTrainResult result;
+            try { result = boss::trainNeuralCurve(data); }
+            catch (const std::exception& e) { result.error = std::string("训练失败：") + e.what(); }
+            catch (...) { result.error = "训练失败：未知错误，可重新训练"; }
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->result = std::move(result);
+            state->ready = true;
+        }).detach();
+    } catch (const std::exception& e) {
         std::lock_guard<std::mutex> lock(state->mutex);
-        state->result = std::move(result);
+        state->result.error = std::string("无法启动训练：") + e.what();
         state->ready = true;
-    }).detach();
+    }
     pollTimer_->start();
 }
 
@@ -356,6 +409,7 @@ void NeuralCurveTrainerDialog::pollTraining()
     training_.reset();
     pollTimer_->stop();
     recordButton_->setEnabled(true);
+    trainButton_->setEnabled(canvas_->trajectories().size() >= 5);
     if (!result_.success)
     {
         status_->setText(QString::fromUtf8(result_.error.c_str()));

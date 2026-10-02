@@ -120,6 +120,8 @@ set(APP_SOURCES
     "${SRC_DIR}/capture/auto_capture.cpp"
     "${SRC_DIR}/capture/capture.cpp"
     "${SRC_DIR}/capture/stream_capture.cpp"
+    "${SRC_DIR}/capture/ndi_capture.cpp"
+    "${SRC_DIR}/ndi/ndi_runtime.cpp"
     "${SRC_DIR}/capture/capture_card_caps.h"
     "${SRC_DIR}/capture/capture_card_probe.h"
     "${SRC_DIR}/capture/capture_utils.cpp"
@@ -144,6 +146,7 @@ set(APP_SOURCES
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
     "${SRC_DIR}/keyboard/hotkey_blocking.cpp"
     "${SRC_DIR}/macro/macro_engine.cpp"
+    "${SRC_DIR}/macro/rule_sources.cpp"
     "${SRC_DIR}/macro/macro_engine.h"
     "${SRC_DIR}/macro/macro_config.h"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
@@ -236,6 +239,8 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/AutoFlashPage.h"
     "${QT_UI_DIR}/pages/MacroPage.cpp"
     "${QT_UI_DIR}/pages/MacroPage.h"
+    "${QT_UI_DIR}/widgets/MacroRuleEditor.cpp"
+    "${QT_UI_DIR}/widgets/MacroRuleEditor.h"
     "${QT_UI_DIR}/pages/HeadBodyFusionPage.cpp"
     "${QT_UI_DIR}/pages/HeadBodyFusionPage.h"
     "${QT_UI_DIR}/pages/DebugPage.cpp"
@@ -291,8 +296,7 @@ target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/inc
 target_link_libraries(serial_embedded PUBLIC setupapi)
 
 add_executable(ai WIN32 ${APP_SOURCES})
-set(APOTHEOSIS_EXECUTABLE_NAME "Apotheosis" CACHE STRING
-    "Executable name (allows a side-by-side diagnostic build while the app is running)")
+target_sources(ai PRIVATE "${QT_UI_DIR}/style/theme.qrc")
 
 # Optional official Magewell SDK. The SDK is installed separately; its files are
 # deliberately not copied into the source tree or packaged with the application.
@@ -318,7 +322,7 @@ endif()
 # Native code for the deployed Turing/Ampere GPUs; compute_86 PTX provides
 # forward JIT compatibility. TensorRT/driver compatibility is still required.
 set_target_properties(ai PROPERTIES
-    OUTPUT_NAME "${APOTHEOSIS_EXECUTABLE_NAME}"
+    OUTPUT_NAME "Apotheosis"
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     # 运行机使用的 CMP 40HX/TU106 是 sm_75，开发机 RTX 3060 是 sm_86。
@@ -347,6 +351,7 @@ if(MSVC)
 endif()
 
 target_include_directories(ai PRIVATE
+    "${CMAKE_SOURCE_DIR}/third_party/ndi/include"
     "${CMAKE_SOURCE_DIR}"
     "${SRC_DIR}"
     "${SRC_DIR}/auth"
@@ -539,6 +544,8 @@ copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/vcruntime140.dll")
 copy_runtime(mfcap_bench "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
 
 # Direct KS probe uses the installed UVC driver and bypasses MF/DirectShow.
+add_subdirectory(tools/ndi_sender)
+
 # Kept separate from the application until same-mode measurements show a gain.
 add_executable(ks_capture_probe "${CMAKE_SOURCE_DIR}/tools/ks_capture_probe.cpp")
 target_link_libraries(ks_capture_probe PRIVATE setupapi ksuser)

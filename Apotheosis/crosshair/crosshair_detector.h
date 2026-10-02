@@ -13,6 +13,7 @@ struct CrosshairColorBand
 {
     std::string name = "Red-Low";
     bool enabled = true;
+    bool exact_hsv = false;
     int h_low  = 0;
     int h_high = 10;
     int s_min  = 120;
@@ -31,6 +32,7 @@ struct CrosshairDetectorSettings
 
     std::vector<CrosshairColorBand> colors;
 
+    int algorithm = 0;
     int min_pixel_count = 4;
 
     int close_radius = 1;

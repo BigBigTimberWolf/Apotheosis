@@ -15,7 +15,7 @@ public:
     void setConfig(const ControllerConfig& config, const RecoveredPidConfig& pid);
     ControlOutput update(const ControlInput& input);
     void reset();
-    void resetCompensation() { compensator_.reset(); }
+    void resetCompensation() { compensator_.reset(); directionObserver_.reset(); macroSmoothed_=macroCarry_={}; }
     void resetPidAxes(bool x, bool y) { pid_.resetAxes(x, y); }
     void seedPidDerivativeAfterPause() { pid_.seedDerivativeAfterPause(); }
 
@@ -24,6 +24,7 @@ private:
     RecoveredDualTracker tracker_;
     RecoveredPid pid_;
     FollowCompensator compensator_;
+    TargetDirectionObserver directionObserver_;
     DynamicFov fov_;
     int selectedId_ = -1;
     int selectedClassId_ = -1;
@@ -33,6 +34,9 @@ private:
     uint64_t anchorSampleIndex_ = 0;
     Box selectedBox_{};
     int selectionMisses_ = 0;
+    uint64_t macroRevision_ = 0;
+    int macroLockedId_ = -1;
+    Vec2 macroSmoothed_{}, macroCarry_{};
 };
 
 } // namespace control

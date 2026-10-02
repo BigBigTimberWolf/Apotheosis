@@ -1,6 +1,7 @@
 #include "config/config.h"
 
 #include <cstdio>
+#include <cmath>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -55,7 +56,85 @@ std::string write_global_config(const std::string& path, const std::string& glob
 
 int main()
 {
+    {
+        Config c;
+        c.loadConfig(write_config("curve_full_seed.ini", "aim_path_mode = 2\n"));
+        std::vector<float> samples(32768);
+        for (size_t i=0; i<samples.size(); ++i)
+            samples[i]=float(.37 * std::sin(double(i)*.001));
+        c.hotkeys[0].aim_path_custom_samples=std::make_shared<const std::vector<float>>(samples);
+        check(c.saveConfig("curve_full_roundtrip.ini"), "full hand-drawn curve saves");
+        Config restored;
+        check(restored.loadConfig("curve_full_roundtrip.ini"), "full curve file loads");
+        const auto actual=restored.hotkeys[0].aim_path_custom_samples;
+        bool same=actual && actual->size()==samples.size();
+        if(same) for(size_t i=0;i<samples.size();++i)
+            same &= std::abs((*actual)[i]-samples[i]) <= .000051f;
+        check(same, "all 32768 hand-drawn samples survive save/restart");
+
+        // Recover the old writer's indented lines while still present on disk.
+        write_config("curve_old_wrapped.ini",
+            "aim_path_custom_samples = 0,1000,\n    2000,-3000,\n    4000,0\n"
+            "aim_path_neural_trained = false\n");
+        Config legacy;
+        legacy.loadConfig("curve_old_wrapped.ini");
+        const auto old=legacy.hotkeys[0].aim_path_custom_samples;
+        check(old && old->size()==6 && std::abs((*old)[3]+.3f)<1e-6,
+              "legacy wrapped curve continuation is recovered");
+    }
+
+    {
+        Config migrated;
+        check(migrated.loadConfig(write_config("am_trigger_migrate.ini",
+            "trigger_fire_duration = 0\nsecondary_trigger_custom = true\n"
+            "secondary_trigger_fire_duration = 25\n")), "load legacy AM mode migration");
+        check(!migrated.hotkeys.empty() && migrated.hotkeys[0].trigger_fire_mode == 3 &&
+            migrated.hotkeys[0].secondary_trigger.trigger_fire_mode == 0,
+            "legacy hold becomes smart continuous; timed press becomes smart click");
+        if (!migrated.hotkeys.empty()) {
+            migrated.hotkeys[0].trigger_fire_mode = 1;
+            migrated.hotkeys[0].secondary_trigger.trigger_fire_mode = 2;
+            migrated.hotkeys[0].trigger_fire_interval = 0;
+            check(migrated.saveConfig("am_trigger_roundtrip.ini"), "save AM modes");
+            Config loaded;
+            check(loaded.loadConfig("am_trigger_roundtrip.ini") && !loaded.hotkeys.empty() &&
+                loaded.hotkeys[0].trigger_fire_mode == 1 &&
+                loaded.hotkeys[0].secondary_trigger.trigger_fire_mode == 2 &&
+                loaded.hotkeys[0].trigger_fire_interval == 0,
+                "all AM modes and zero release delay survive save/load");
+        }
+    }
+
     std::printf("=== config_migration_test: 配置解析 ===\n");
+    {
+        Config c;
+        const auto path=write_global_config("ndi_config.ini",
+            "capture_source = ndi\ncapture_ndi_source = 游戏电脑 (Apotheosis)\n");
+        check(c.loadConfig(path) && c.capture_source=="ndi" &&
+            c.capture_ndi_source=="游戏电脑 (Apotheosis)", "NDI source loads including UTF-8 and spaces");
+        check(c.saveConfig("ndi_config_roundtrip.ini"), "NDI config saves");
+        Config restored;
+        check(restored.loadConfig("ndi_config_roundtrip.ini") && restored.capture_source=="ndi" &&
+            restored.capture_ndi_source==c.capture_ndi_source, "NDI source survives roundtrip");
+    }
+
+    {
+        Config c;
+        const auto path = write_config("color_lab_exact_hsv.ini",
+            "[crosshair_color.0]\nname = Lab\nexact_hsv = true\nh_low = 50\nh_high = 70\n"
+            "s_min = 190\ns_max = 255\nv_min = 100\nv_max = 240\n");
+        check(c.loadConfig(path) && !c.crosshair_colors.empty() &&
+              c.crosshair_colors[0].exact_hsv &&
+              c.crosshair_colors[0].s_min == 190,
+              "lab profile exact HSV setting loads");
+        check(c.saveConfig("color_lab_exact_hsv_roundtrip.ini"),
+              "lab profile exact HSV setting saves");
+        Config restored;
+        check(restored.loadConfig("color_lab_exact_hsv_roundtrip.ini") &&
+              !restored.crosshair_colors.empty() &&
+              restored.crosshair_colors[0].exact_hsv,
+              "lab profile exact HSV survives save/load");
+    }
 
 
     {
@@ -685,150 +764,49 @@ int main()
               "旧配置缺键盘波特率 -> 默认 6000000");
     }
 
-    // 开镜档: 自动开镜生效期间取代「瞄准控制器」的那一整组参数。
-    //
-    // 这里守住三件事:
-    //   1) 老配置(没有这些键)读进来 = 开关关、值与默认档的默认值一致
-    //      —— 打开开关也不会突然变成另一套参数;
-    //   2) 写了这些键 ⇒ 原样读回, 往返不丢;
-    //   3) 两档共用同一份夹取规则 (默认档现在借道 AimCtlParams::clamp())。
-    std::printf("\n[7] ★★ 开镜档 (自动开镜期间取代瞄准控制器参数)\n");
+    // Retired controller keys may remain in imported INI files. They must
+    // not override the controller currently exposed in the UI.
     {
-        // 1) 缺键 ⇒ 开关关 + 默认值
-        const std::string p0 = write_config("scope_missing.ini");
-        Config c0;
-        check(c0.loadConfig(p0), "缺开镜档键的配置能加载");
-        if (!c0.hotkeys.empty())
-        {
-            const auto& hp = c0.hotkeys[0];
-            check(hp.scope_ctl_enabled == 0, "★★ 缺键 ⇒ 开镜档开关默认 0 (跟随热键)");
-            check(hp.ctl_scope.kp_x > 34.9 && hp.ctl_scope.kp_x < 35.1,
-                  "★★ 缺键 ⇒ 开镜档 kp_x 默认 35 (与默认档一致)");
-            check(hp.ctl_scope.kp_x == hp.ctl_kp_x,
-                  "★★ 缺键 ⇒ 开镜档与默认档逐位一致 (打开开关也不会突变)");
-            check(hp.ctl_scope.max_output_counts == hp.ctl_max_output_counts,
-                  "★★ 缺键 ⇒ 单拍限幅两档一致");
-            check(hp.ctl_scope.random_seed == hp.ctl_random_seed,
-                  "★★ 缺键 ⇒ 随机种子两档一致");
-            check(hp.ctl_scope.predict_lead_ms == hp.ctl_predict_lead_ms,
-                  "★★ 缺键 ⇒ 预测提前时间两档一致");
-        }
+        Config c;
+        const auto path = write_config("retired_controller_keys.ini",
+            "ctl_kp_x = 500\nctl_predict_lead_ms = 80\n"
+            "ctl_scope_kp_x = 500\nctl_scope_enabled = 1\n"
+            "recovered_pid_kp_x = 0.7\nrecovered_scope_pid_kp_x = 0.3\n");
+        check(c.loadConfig(path) && !c.hotkeys.empty() &&
+              c.hotkeys[0].recovered_pid.kpX == 0.7f &&
+              c.hotkeys[0].recovered_scope_pid.kpX == 0.3f &&
+              c.hotkeys[0].scope_ctl_enabled == 1,
+              "retired controller keys do not override visible controller settings");
+        check(c.saveConfig("retired_controller_keys_roundtrip.ini"),
+              "visible controller settings save");
+        std::ifstream saved("retired_controller_keys_roundtrip.ini");
+        const std::string contents((std::istreambuf_iterator<char>(saved)),
+                                    std::istreambuf_iterator<char>());
+        check(contents.find("ctl_predict_lead_ms") == std::string::npos &&
+              contents.find("ctl_scope_kp_x") == std::string::npos,
+              "retired controller keys are omitted on save");
+    }
 
-        // 2) 写了就原样读回, 且与默认档互不干扰
-        const std::string p1 = write_config("scope.ini",
-            "ctl_kp_x = 40.0\n"
-            "ctl_max_output_counts = 180\n"
-            "ctl_scope_enabled = 1\n"
-            "ctl_scope_kp_x = 6.5\n"
-            "ctl_scope_kp_y = 7.5\n"
-            "ctl_scope_k_px_per_count = 0.211\n"
-            "ctl_scope_predict_lead_ms = 15\n"
-            "ctl_scope_predict_max_velocity_px_s = 800\n"
-            "ctl_scope_predict_max_lead_ratio = 0.25\n"
-            "ctl_scope_max_output_counts = 45\n"
-            "ctl_scope_random_seed = 99\n"
-            "ctl_scope_inflight_dead_time_ms = 33\n"
-            "ctl_scope_tau_unwind_sec = 0.021\n");
-
-        Config c1;
-        check(c1.loadConfig(p1), "开镜档配置能加载");
-        if (!c1.hotkeys.empty())
-        {
-            const auto& hp = c1.hotkeys[0];
-            check(hp.scope_ctl_enabled == 1, "★★ ctl_scope_enabled 读到 1");
-            check(hp.ctl_scope.kp_x > 6.49 && hp.ctl_scope.kp_x < 6.51,
-                  "★★ ctl_scope_kp_x 读到 6.5");
-            check(hp.ctl_scope.kp_y > 7.49 && hp.ctl_scope.kp_y < 7.51,
-                  "★★ ctl_scope_kp_y 读到 7.5");
-            check(hp.ctl_scope.k_px_per_count > 0.210 && hp.ctl_scope.k_px_per_count < 0.212,
-                  "★★ ctl_scope_k_px_per_count 读到 0.211");
-            check(hp.ctl_scope.predict_lead_ms > 14.9 && hp.ctl_scope.predict_lead_ms < 15.1,
-                  "★★ ctl_scope_predict_lead_ms 读到 15");
-            check(hp.ctl_scope.predict_max_velocity_px_s > 799.9 &&
-                  hp.ctl_scope.predict_max_velocity_px_s < 800.1,
-                  "★★ ctl_scope_predict_max_velocity_px_s 读到 800");
-            check(hp.ctl_scope.predict_max_lead_ratio > 0.249 &&
-                  hp.ctl_scope.predict_max_lead_ratio < 0.251,
-                  "★★ ctl_scope_predict_max_lead_ratio 读到 0.25");
-            check(hp.ctl_scope.max_output_counts == 45, "★★ ctl_scope_max_output_counts 读到 45");
-            check(hp.ctl_scope.random_seed == 99, "★★ ctl_scope_random_seed 读到 99");
-            check(hp.ctl_scope.inflight_dead_time_ms > 32.9 &&
-                  hp.ctl_scope.inflight_dead_time_ms < 33.1,
-                  "★★ ctl_scope_inflight_dead_time_ms 读到 33");
-            check(hp.ctl_scope.tau_unwind_sec > 0.0209 && hp.ctl_scope.tau_unwind_sec < 0.0211,
-                  "★★ ctl_scope_tau_unwind_sec 读到 0.021");
-
-            // ★ 两档必须互不干扰: 改开镜档不能动到默认档
-            check(hp.ctl_kp_x > 39.9 && hp.ctl_kp_x < 40.1,
-                  "★★ 开镜档的键没有污染默认档 (ctl_kp_x 仍是 40)");
-            check(hp.ctl_max_output_counts == 180,
-                  "★★ 开镜档的键没有污染默认档 (限幅仍是 180)");
-        }
-
-        // 3) 往返: 存 → 读, 开镜档必须原样回来
-        const std::string p2 = "scope_roundtrip.ini";
-        check(c1.saveConfig(p2), "开镜档配置能存档");
-        Config c2;
-        check(c2.loadConfig(p2), "存档能重新加载");
-        if (!c2.hotkeys.empty())
-        {
-            const auto& hp = c2.hotkeys[0];
-            check(hp.scope_ctl_enabled == 1, "往返: 开关仍是 1");
-            check(hp.ctl_scope.kp_x > 6.49 && hp.ctl_scope.kp_x < 6.51,
-                  "往返: 开镜档 kp_x 仍是 6.5");
-            check(hp.ctl_scope.max_output_counts == 45, "往返: 开镜档限幅仍是 45");
-            check(hp.ctl_scope.random_seed == 99, "往返: 开镜档种子仍是 99");
-            check(hp.ctl_kp_x > 39.9 && hp.ctl_kp_x < 40.1, "往返: 默认档 kp_x 仍是 40");
-        }
-
-        // 4) 两档共用同一份夹取规则
-        const std::string p3 = write_config("scope_clamp.ini",
-            "ctl_kp_x = -5\n"
-            "ctl_max_output_counts = 0\n"
-            "ctl_tau_unwind_sec = 0\n"
-            "ctl_random_seed = -7\n"
-            "ctl_scope_enabled = 9\n"
-            "ctl_scope_kp_x = -5\n"
-            "ctl_scope_max_output_counts = 0\n"
-            "ctl_scope_tau_unwind_sec = 0\n"
-            "ctl_scope_random_seed = -7\n"
-            "ctl_scope_inflight_beta = 9\n"
-            "ctl_scope_predict_lead_ms = 99999\n");
-
-        Config c3;
-        check(c3.loadConfig(p3), "越界开镜档配置能加载");
-        if (!c3.hotkeys.empty())
-        {
-            const auto& hp = c3.hotkeys[0];
-            check(hp.scope_ctl_enabled == 1, "★★ 越界的开关 9 被夹成 1");
-            check(hp.ctl_scope.kp_x >= 0.0, "★★ 开镜档负 kp 被夹到 >= 0");
-            check(hp.ctl_scope.max_output_counts == 1, "★★ 开镜档限幅 0 被夹到 1");
-            check(hp.ctl_scope.tau_unwind_sec > 0.0, "★★ 开镜档 tau_unwind 0 被夹到 1e-4");
-            check(hp.ctl_scope.random_seed == 0, "★★ 开镜档负种子被夹到 0");
-            check(hp.ctl_scope.inflight_beta <= 3.0, "★★ 开镜档 β 9 被夹到 3.0");
-            check(hp.ctl_scope.predict_lead_ms <= 1000.0, "★★ 开镜档提前时间 99999 被夹到 1000");
-            // 默认档在同一份规则下被夹 (改动前是手写的一组 clamp)
-            check(hp.ctl_kp_x >= 0.0, "★★ 默认档负 kp 同样被夹到 >= 0");
-            check(hp.ctl_max_output_counts == 1, "★★ 默认档限幅 0 同样被夹到 1");
-            check(hp.ctl_tau_unwind_sec > 0.0, "★★ 默认档 tau_unwind 0 同样被夹到 1e-4");
-            check(hp.ctl_random_seed == 0, "★★ 默认档负种子同样被夹到 0");
-        }
-
-        // 5) 组外的参数不随开镜档走 (只有一份, 不受开关影响)
-        const std::string p4 = write_config("scope_off.ini",
-            "ctl_y_offset = 0.31\n"
-            "ctl_hysteresis_ratio = 2.4\n"
-            "ctl_scope_enabled = 1\n"
-            "ctl_scope_kp_x = 6.5\n");
-        Config c4;
-        check(c4.loadConfig(p4), "组外参数配置能加载");
-        if (!c4.hotkeys.empty())
-        {
-            const auto& hp = c4.hotkeys[0];
-            check(hp.ctl_y_offset > 0.30 && hp.ctl_y_offset < 0.32,
-                  "★ 瞄点 Y 只有一份, 不随开镜档走");
-            check(hp.ctl_hysteresis_ratio > 2.39 && hp.ctl_hysteresis_ratio < 2.41,
-                  "★ 选靶滞回只有一份, 不随开镜档走");
+    {
+        Config c;
+        check(c.loadConfig(write_config("trigger_prearm.ini",
+            "trigger_prearm_enabled = true\ntrigger_prearm_expand_percent = 75\n"
+            "secondary_trigger_custom = true\nsecondary_trigger_prearm_enabled = true\n"
+            "secondary_trigger_prearm_expand_percent = 120\n")) &&
+            !c.hotkeys.empty(), "load prearm for both trigger profiles");
+        if (!c.hotkeys.empty()) {
+            check(c.hotkeys[0].trigger_prearm_enabled &&
+                  c.hotkeys[0].trigger_prearm_expand_percent == 75 &&
+                  c.hotkeys[0].secondary_trigger.trigger_prearm_enabled &&
+                  c.hotkeys[0].secondary_trigger.trigger_prearm_expand_percent == 120,
+                  "prearm profile values stay independent");
+            c.saveConfig("trigger_prearm_roundtrip.ini");
+            Config again;
+            check(again.loadConfig("trigger_prearm_roundtrip.ini") &&
+                  !again.hotkeys.empty() &&
+                  again.hotkeys[0].trigger_prearm_expand_percent == 75 &&
+                  again.hotkeys[0].secondary_trigger.trigger_prearm_expand_percent == 120,
+                  "prearm survives config roundtrip");
         }
     }
 
@@ -854,12 +832,12 @@ int main()
             "trigger_loss_delay_ms = -1\nsecondary_trigger_custom = true\n"
             "secondary_trigger_loss_delay_ms = 9999\n")) && !limits.hotkeys.empty() &&
               limits.hotkeys[0].trigger_loss_delay_ms == 0 &&
-              limits.hotkeys[0].secondary_trigger.trigger_loss_delay_ms == 2000,
-              "grace is clamped to 0..2000 ms");
+              limits.hotkeys[0].secondary_trigger.trigger_loss_delay_ms == 1000,
+              "AM grace is clamped to 0..1000 ms");
         Config defaults;
         check(defaults.loadConfig(write_config("trigger_loss_default.ini", "trigger_enabled = true\n")) &&
-              !defaults.hotkeys.empty() && defaults.hotkeys[0].trigger_loss_delay_ms == 100,
-              "existing configs without grace use 100 ms");
+              !defaults.hotkeys.empty() && defaults.hotkeys[0].trigger_loss_delay_ms == 20,
+              "configs without grace use AM default 20 ms");
     }
 
     {
@@ -1012,6 +990,14 @@ int main()
             "1000 percent trigger range survives save/load");
     }
 
+    {
+        Config c;macros::Program p;p.id="macro-roundtrip";p.name=u8"嵌套条件";p.enabled=true;p.trigger="LeftControl+U";
+        p.options={{"event","ocr_found"},{"pattern",u8"中文 ; # = test"},{"priority","50"},{"mutex",u8"测试组"}};
+        macros::Condition condition;condition.metric="pixels.multi";condition.text="1,2,ff00ff;3,4,000000";condition.parent=-2;condition.region={2,3,100,150};condition.value=.125;condition.upper=16;
+        p.conditions={condition};macros::Action action;action.type=macros::ActionType::Log;action.text=u8"  中文 ; # = 路径 C:/测试  ";action.a=4;action.b=5;action.c=6;action.d=7;action.value=.0625;p.actions={action};
+        c.macro_programs={p};check(c.saveConfig("macro_roundtrip.ini"),"macro extended config saves");
+        Config restored;check(restored.loadConfig("macro_roundtrip.ini")&&restored.macro_programs==c.macro_programs,"macro conditions actions text and locks roundtrip exactly");
+    }
     std::printf("\n=== %d 项失败 ===\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

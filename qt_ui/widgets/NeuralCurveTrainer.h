@@ -29,6 +29,7 @@ public:
     const std::vector<boss::NeuralTrajectory>& trajectories() const { return trajectories_; }
     QPointF startPoint() const { return start_; }
     QPointF targetPoint() const { return target_; }
+    const QString& rejectionReason() const { return rejectionReason_; }
 
     std::function<void(int accepted, int requested, int rejected)> progressChanged;
     std::function<void()> collectionFinished;
@@ -42,7 +43,8 @@ protected:
 private:
     void beginRound();
     void finishRound();
-    boss::NeuralTrajectory normalizeStroke() const;
+    void appendStroke(QPointF point);
+    boss::NeuralTrajectory normalizeStroke(QString& reason) const;
 
     bool recording_ = false;
     bool dragging_ = false;
@@ -53,6 +55,7 @@ private:
     QPointF target_;
     std::vector<QPointF> stroke_;
     std::vector<boss::NeuralTrajectory> trajectories_;
+    QString rejectionReason_;
 };
 
 class NeuralCurveTrainerDialog final : public QDialog
@@ -80,6 +83,7 @@ private:
     QSpinBox* rounds_ = nullptr;
     QCheckBox* append_ = nullptr;
     QPushButton* recordButton_ = nullptr;
+    QPushButton* trainButton_ = nullptr;
     QPushButton* applyButton_ = nullptr;
     QPushButton* exportButton_ = nullptr;
     QLabel* status_ = nullptr;

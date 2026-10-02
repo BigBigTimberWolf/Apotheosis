@@ -14,7 +14,7 @@ int main() {
         {{100, 100, 100, 160}, 0, 0.95},
         {{120, 90, 40, 40}, 1, 0.95}
     };
-    const control::Vec2 cross{140, 100};
+    const control::Vec2 cross{140, 101};
     const auto first = selector.select(candidates, rules, cross, 200, 200, 0.5, true);
     if (!first.valid || first.classId != 1 || first.point.x != 140 ||
         std::abs(first.point.y - 98.0) > 0.001 || first.halfWidth != 4 || first.halfHeight != 6 ||
@@ -22,8 +22,12 @@ int main() {
         std::puts("trigger priority, point, or hit zone failed");
         return 1;
     }
+    if (first.contains({146, 98}) ||
+        !first.containsExpanded({146, 98}, 50) ||
+        first.containsExpanded({160, 98}, 50)) return 8;
     const auto same = selector.select(candidates, rules, cross, 200, 200, 0.5, true);
     if (same.trackId != first.trackId) return 2;
+    if (first.contains({first.point.x + first.halfWidth, first.point.y})) return 9; // AM excludes borders
     auto farHead = candidates;
     farHead[1].box.x = 190;
     const auto bodyUnderCross = selector.select(farHead, rules, cross, 200, 200, 0.5, true);

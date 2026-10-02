@@ -12,6 +12,8 @@ void tick(); // Called by the keyboard thread. Never sleeps for action delays.
 void stopAll();
 void shutdown();
 void runOnce(const std::string& id);
+void simulate(const std::string& id);
+std::string ruleDiagnostics();
 // Queue a short keyboard/mouse press without blocking the aim loop.
 void requestAutoFlash(const std::string& key, int aimHotkeyIndex);
 void cancelAutoFlash();

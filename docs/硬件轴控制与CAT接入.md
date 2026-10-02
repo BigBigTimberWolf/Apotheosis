@@ -42,6 +42,8 @@
 
 核对入口：[官方文档](https://docs.xferrum.dev/)。原文档域名已经重定向到这里。
 
+2026-10-02 再次核对官方完整文档和 [官方文档仓库](https://github.com/FerrumLLC/ferrumllc.github.io)。公开主分支最新提交为 `fe83ca1`（2026-01-06）；未找到另一个已公开的新协议。现有串口移动、按键、轴锁、键盘屏蔽和回调命令与当前 Software API 一致。本次接入 [组合键批量接口](https://docs.xferrum.dev/software_api/km_api/keyboard/keys/multi.html)：组合键使用 `km.multidown` / `km.multiup` 同份指令按下或释放；单键仍使用 `km.down` / `km.up`。保留软件指定按住时长，不改用固件随机时长的 `km.multipress`。Legacy API 不发送键盘命令。协议构造经过离线测试，未连接 Ferrum 实机验证。
+
 - 优先连接 Ferrum App 提供的虚拟串口，版本响应为 `kmbox: Ferrum`，支持 Software API 的键鼠操作。
 - 直连 CP210x 为 Legacy API，版本响应为 `kmbox: 2.0.0 Aug 31 2020 21:49:51`，只支持文档列出的鼠标接口；重上电默认 115200 波特率。
 - 本次补全旧接口识别、新接口键盘宏 `km.down/up`、侧键 `km.side1/side2`、真实轴屏蔽。按接口能力启用键盘监听，避免给 Legacy API 发送键盘命令。

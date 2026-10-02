@@ -27,12 +27,26 @@ int main(int argc, char** argv) {
     in.trigger_auto_stop = 1;
     in.trigger_weapon_switch31 = true;
     in.trigger_fire_delay = 135;
+    in.trigger_prearm_enabled = true;
+    in.trigger_prearm_expand_percent = 80;
     in.trigger_loss_delay_ms = 170;
     editor.load(in);
     HotkeyProfile out;
     editor.save(out);
     CHECK(out.trigger_enabled && out.trigger_auto_scope == 2 && out.trigger_auto_stop == 1);
     CHECK(out.trigger_weapon_switch31 && out.trigger_fire_delay == 135);
+    auto* fireMode = editor.findChild<QComboBox*>("triggerFireMode");
+    CHECK(fireMode && fireMode->count() == 4 && out.trigger_fire_mode == 3);
+    for (int i = 0; i < 4; ++i) {
+        fireMode->setCurrentIndex(i);
+        TriggerParams saved;
+        editor.save(saved);
+        CHECK(saved.trigger_fire_mode == i);
+    }
+
+    CHECK(!out.trigger_prearm_enabled && out.trigger_prearm_expand_percent == 80);
+    auto* prearmExpand = editor.findChild<QSpinBox*>("triggerPrearmExpand");
+    CHECK(prearmExpand && !prearmExpand->isEnabled());
     auto* lossDelay = editor.findChild<QSpinBox*>("triggerLossDelay");
     CHECK(lossDelay && !lossDelay->isEnabled() && out.trigger_loss_delay_ms == 170);
     TriggerParams secondary;

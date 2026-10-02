@@ -1,5 +1,6 @@
 #include "widgets/TriggerWorkflowEditor.h"
 #include "config.h"
+#include "mouse/am_trigger.h"
 #include "widgets/FormKit.h"
 
 #include <QCheckBox>
@@ -46,8 +47,8 @@ protected:
         QGraphicsView::wheelEvent(event);
     }
     void drawBackground(QPainter* painter, const QRectF& rect) override {
-        painter->fillRect(rect, QColor("#F7F9FC"));
-        painter->setPen(QPen(QColor("#D9E0EB"), 1));
+        painter->fillRect(rect, QColor("#151517"));
+        painter->setPen(QPen(QColor("#35332D"), 1));
         const int left = static_cast<int>(rect.left()) / 20 * 20;
         const int top = static_cast<int>(rect.top()) / 20 * 20;
         for (int x = left; x < rect.right(); x += 20)
@@ -62,7 +63,7 @@ QWidget* panelPage(const QString& title, const QString& description, QVBoxLayout
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(10);
     auto* heading = new QLabel(title);
-    heading->setStyleSheet("font-size:15px; font-weight:700; color:#202737;");
+    heading->setStyleSheet("font-size:15px; font-weight:700; color:#F0EDE6;");
     layout->addWidget(heading);
     page->setToolTip(description);
     heading->setToolTip(description);
@@ -120,7 +121,7 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
     snapLayout->setSpacing(8);
     snapHint_ = new QLabel(snapPanel_);
     snapHint_->setWordWrap(true);
-    snapHint_->setStyleSheet("color:#687386; font-size:12px;");
+    snapHint_->setStyleSheet("color:#ABA697; font-size:12px;");
     snapHint_->setVisible(false);
     auto snapRow = [](const QString& title, QWidget* control) {
         auto* row = new QWidget;
@@ -218,7 +219,7 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
         fitCanvas();
     });
 
-    const QPen pathPen(QColor("#AAB9CC"), 2);
+    const QPen pathPen(QColor("#8E7950"), 2);
     auto arrowRight = [scene, pathPen](qreal left, qreal right, qreal y) {
         scene->addLine(left, y, right, y, pathPen);
         scene->addLine(right - 7, y - 6, right, y, pathPen);
@@ -227,8 +228,8 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
     auto* entry = new QPushButton(zh(u8"按住热键\n\n原扳机流程"));
     entry->setFixedSize(164, 100);
     entry->setEnabled(false);
-    entry->setStyleSheet("QPushButton { text-align:left; padding:10px; border:2px solid #9EA8B7; "
-                         "border-radius:10px; background:#E9EDF4; color:#273247; font-size:12px; font-weight:600; }");
+    entry->setStyleSheet("QPushButton { text-align:left; padding:10px; border:2px solid #8E7950; "
+                         "border-radius:10px; background:#302A1E; color:#DCD7CA; font-size:12px; font-weight:600; }");
     scene->addWidget(entry)->setPos(18, 50);
     arrowRight(182, 209, 100);
 
@@ -326,36 +327,51 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
     page->addStretch(); add(stopPage);
 
     auto* scopePage = panelPage(zh(u8"03 · 自动开镜"),
-        zh(u8"右键作为热键时不会再次按右键。启用 3-1 切枪后，每枪重新开镜，最少等待 20 ms。"), page);
+        zh(u8"右键作为热键时不重复开镜。点按右键至少保持 30 ms，采用按住时长与统一随机浮动；长按右键当次即可开火，直到停用才松开。"), page);
     scopeMode_ = new QComboBox;
     scopeMode_->addItem(zh(u8"跳过"), 0);
     scopeMode_->addItem(zh(u8"点按开镜（切枪后重新开镜）"), 1);
-    scopeMode_->addItem(zh(u8"命中区内长按"), 2);
+    scopeMode_->addItem(zh(u8"触发后长按"), 2);
     row(page, u8"方式", scopeMode_);
-    scopeDelay_ = spin(0, 2000, 5, 0); row(page, u8"开镜等待 ms", scopeDelay_);
+    scopeDelay_ = spin(0, 2000, 5, 0); scopeDelay_->setParent(this); scopeDelay_->hide();
     page->addStretch(); add(scopePage);
 
     auto* waitPage = panelPage(zh(u8"04 · 等待开火"),
-        zh(u8"新目标进入命中区后的首发等待；后续连发走冷却节点。"), page);
-    fireDelay_ = spin(0, 2000, 5, 0); row(page, u8"首发等待 ms", fireDelay_);
-    delayJitter_ = spin(0, 500, 1, 0); row(page, u8"随机浮动 ±ms", delayJitter_);
+        zh(u8"AM 规则：进入射击区域后开始计时，换目标不重启计时。智能连点跳过起始等待；基础时长为 0 时不增加随机等待。"), page);
+    fireDelay_ = spin(0, 2000, 5, 0); row(page, u8"起始等待 ms", fireDelay_);
+    delayJitter_ = spin(0, 500, 1, 0); row(page, u8"统一随机浮动 ±ms", delayJitter_);
+    prearmEnabled_ = new QCheckBox(zh(u8"预备开火"));
+    prearmEnabled_->setObjectName("triggerPrearmEnabled");
+    prearmEnabled_->setToolTip(zh(u8"目标靠近命中区时先累计首发等待；长按开镜也提前开始。真正进入命中区且开镜就绪后才按左键。点按开镜仍在进入命中区后执行。"));
+    prearmEnabled_->setParent(this); prearmEnabled_->hide();
+    prearmExpand_ = spin(0, 300, 5, 50);
+    prearmExpand_->setObjectName("triggerPrearmExpand");
+    prearmExpand_->setToolTip(zh(u8"相对当前扳机命中框向四周扩展的比例。50% 表示预备框的半宽和半高各增加 50%，不改变真正开火范围。"));
+    prearmExpand_->setParent(this); prearmExpand_->hide();
     page->addStretch(); add(waitPage);
 
     auto* firePage = panelPage(zh(u8"05 · 执行开火"),
-        zh(u8"0 表示在命中区内持续按住左键；正数表示每次按住对应毫秒数，短暂丢框会完成已开始的这次按住。启用 3-1 切枪时会转为至少 20 ms 的单发。"), page);
+        zh(u8"智能连点：进区即按下，离区即停止。连点：起始等待后循环，按住和松开各至少 10 ms。持续：首次触发后保持到停用。智能持续：离区超过宽限才松开。3-1 切枪使用短按。"), page);
+    fireMode_ = new QComboBox;
+    fireMode_->setObjectName("triggerFireMode");
+    fireMode_->addItem(zh(u8"智能连点"), 0);
+    fireMode_->addItem(zh(u8"连点"), 1);
+    fireMode_->addItem(zh(u8"持续"), 2);
+    fireMode_->addItem(zh(u8"智能持续"), 3);
+    row(page, u8"开火模式", fireMode_);
     fireDuration_ = spin(0, 2000, 5, 0); row(page, u8"按住时长 ms", fireDuration_);
-    durationJitter_ = spin(0, 500, 1, 0); row(page, u8"随机浮动 ±ms", durationJitter_);
-    lossDelay_ = spin(0, 2000, 10, 100);
+    durationJitter_ = spin(0, 500, 1, 0); durationJitter_->setParent(this); durationJitter_->hide();
+    lossDelay_ = spin(0, 1000, 10, 20);
     lossDelay_->setObjectName("triggerLossDelay");
-    lossDelay_->setToolTip(zh(u8"仅持续长按生效：目标丢失后继续按住左键，到时松开；0 为立即松开。目标仍可见但离开命中区、松开热键或切换热键时立即停止。"));
-    row(page, u8"丢失续扳 ms", lossDelay_);
+    lossDelay_->setToolTip(zh(u8"仅智能持续生效：短暂丢失或离区时保持左键，到时松开；任一允许目标重新进区就重置计时。0 为立即松开；松开热键或关闭扳机立即停止。"));
+    row(page, u8"短暂离区宽限 ms", lossDelay_);
     page->addStretch(); add(firePage);
 
     auto* cooldownPage = panelPage(zh(u8"06 · 冷却"),
-        zh(u8"两发间隔从上一次按下左键时开始计时；按住时长短、间隔长时会表现为点射。"), page);
-    fireInterval_ = spin(1, 2000, 5, 200); row(page, u8"两发间隔 ms", fireInterval_);
-    intervalJitter_ = spin(0, 500, 1, 0); row(page, u8"随机浮动 ±ms", intervalJitter_);
-    targetCooldown_ = spin(0, 2000, 5, 0); row(page, u8"换目标等待 ms", targetCooldown_);
+        zh(u8"AM 规则：从松开左键开始计时，到时经过一轮状态清理再允许下次按下。连点模式最少等待 10 ms。"), page);
+    fireInterval_ = spin(0, 2000, 5, 200); row(page, u8"松开后等待 ms", fireInterval_);
+    intervalJitter_ = spin(0, 500, 1, 0); intervalJitter_->setParent(this); intervalJitter_->hide();
+    targetCooldown_ = spin(0, 2000, 5, 0); targetCooldown_->setParent(this); targetCooldown_->hide();
     page->addStretch(); add(cooldownPage);
 
     auto* switchPage = panelPage(zh(u8"07 · 3-1 切枪"),
@@ -376,10 +392,11 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
                         turnStepDegrees_, turnDurationMs_, turnHoldMs_})
         connect(input, QOverload<int>::of(&QSpinBox::valueChanged), this, onChange);
     connect(switchEnabled_, &QCheckBox::toggled, this, onChange);
-    for (auto* combo : {stopMode_, scopeMode_})
+    connect(prearmEnabled_, &QCheckBox::toggled, this, onChange);
+    for (auto* combo : {stopMode_, scopeMode_, fireMode_})
         connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, onChange);
     for (auto* input : {zone_, targetCooldown_, stopBefore_, stopAfter_, scopeDelay_,
-                        fireDelay_, delayJitter_, fireDuration_, durationJitter_, lossDelay_,
+                        fireDelay_, delayJitter_, prearmExpand_, fireDuration_, durationJitter_, lossDelay_,
                         fireInterval_, intervalJitter_, switchDelay_})
         connect(input, QOverload<int>::of(&QSpinBox::valueChanged), this, onChange);
     selectNode(0);
@@ -442,8 +459,9 @@ void TriggerWorkflowEditor::refreshNodes() {
                        : zh(u8"命中区 ") + QString::number(zone_->value()) + "%",
         stopMode_->currentIndex() == 0 ? zh(u8"跳过") : stopMode_->currentText(),
         scopeMode_->currentIndex() == 0 ? zh(u8"跳过") : scopeMode_->currentText(),
-        QString::number(fireDelay_->value()) + " ms",
-        fireDuration_->value() == 0 ? zh(u8"持续按住") : QString::number(fireDuration_->value()) + " ms",
+        QString::number(fireDelay_->value()) + " ms" +
+            (prearmEnabled_->isChecked() ? zh(u8" · 预备") : QString()),
+        fireMode_->currentText(),
         QString::number(fireInterval_->value()) + " ms",
         switchEnabled_->isChecked() ? zh(u8"开火后执行") : zh(u8"跳过")
     };
@@ -454,12 +472,12 @@ void TriggerWorkflowEditor::refreshNodes() {
         const bool selected = inspector_->currentIndex() == i;
         node->setChecked(selected);
         node->setToolTip(inspector_->widget(i)->toolTip());
-        const QString border = selected ? "#5965D9" : "#D8DFEB";
-        const QString bg = selected ? "#F0F1FF" : "#FFFFFF";
+        const QString border = selected ? "#D5B56B" : "#514C40";
+        const QString bg = selected ? "#302A1E" : "#19191C";
         node->setStyleSheet(QString(
             "QPushButton { text-align:left; padding:10px; border:2px solid %1; "
-            "border-radius:10px; background:%2; color:#273247; font-size:12px; font-weight:600; }"
-            "QPushButton:hover { border-color:#7D88E7; }").arg(border, bg));
+            "border-radius:10px; background:%2; color:#DCD7CA; font-size:12px; font-weight:600; }"
+            "QPushButton:hover { border-color:#E9CD8A; }").arg(border, bg));
     }
     const QString returnSummaries[] = {
         zh(u8"目标结束路线"), zh(u8"新帧确认"), zh(u8"按原流程松键"),
@@ -476,9 +494,9 @@ void TriggerWorkflowEditor::refreshNodes() {
     normalBranch_->setToolTip(zh(u8"原扳机流程直接寻找下一目标，不进行回位或旋转搜索。"));
     normalBranch_->setStyleSheet(QString(
         "QPushButton { text-align:left; padding:10px; border:2px solid %1; "
-        "border-radius:10px; background:%2; color:#273247; font-size:12px; font-weight:600; }"
-        "QPushButton:hover { border-color:#7D88E7; }")
-        .arg(branch == 0 ? "#5965D9" : "#D8DFEB", branch == 0 ? "#F0F1FF" : "#F1F3F7"));
+        "border-radius:10px; background:%2; color:#DCD7CA; font-size:12px; font-weight:600; }"
+        "QPushButton:hover { border-color:#E9CD8A; }")
+        .arg(branch == 0 ? "#D5B56B" : "#514C40", branch == 0 ? "#302A1E" : "#242321"));
     for (int lane = 0; lane < 2; ++lane) {
         const bool active = branch == lane + 1;
         for (int step = 0; step < 6; ++step) {
@@ -491,16 +509,27 @@ void TriggerWorkflowEditor::refreshNodes() {
                 : zh(u8"每段快速转完才取新画面，找到目标按上方原扳机流程瞄准开火。目标结束后转下一段，一次热键累计最多 360°。"));
             node->setStyleSheet(QString(
                 "QPushButton { text-align:left; padding:10px; border:2px solid %1; "
-                "border-radius:10px; background:%2; color:#273247; font-size:12px; font-weight:600; }"
-                "QPushButton:hover { border-color:#7D88E7; }")
-                .arg(active ? "#5965D9" : "#D8DFEB", active ? "#F0F1FF" : "#F1F3F7"));
+                "border-radius:10px; background:%2; color:#DCD7CA; font-size:12px; font-weight:600; }"
+                "QPushButton:hover { border-color:#E9CD8A; }")
+                .arg(active ? "#D5B56B" : "#514C40", active ? "#302A1E" : "#242321"));
         }
     }
     stopBefore_->setEnabled(stopMode_->currentData().toInt() == 1);
     stopAfter_->setEnabled(stopMode_->currentData().toInt() == 1);
     scopeDelay_->setEnabled(scopeMode_->currentData().toInt() != 0);
     switchDelay_->setEnabled(switchEnabled_->isChecked());
-    lossDelay_->setEnabled(fireDuration_->value() == 0 && !switchEnabled_->isChecked());
+    lossDelay_->setEnabled(fireMode_->currentData().toInt() == 3 && !switchEnabled_->isChecked());
+    prearmEnabled_->setEnabled(false);
+    prearmExpand_->setEnabled(false);
+    prearmEnabled_->setToolTip(zh(u8"AM 只在进入射击区域后开始等待，不提前累计。"));
+    targetCooldown_->setEnabled(false);
+    targetCooldown_->setToolTip(zh(u8"AM 不因目标编号变化额外等待。"));
+    scopeDelay_->setEnabled(false);
+    scopeDelay_->setToolTip(zh(u8"点按开镜采用按住时长，至少 30 ms；长按不额外等待。"));
+    durationJitter_->setEnabled(false);
+    intervalJitter_->setEnabled(false);
+    fireDelay_->setEnabled(fireMode_->currentData().toInt() != 0);
+    fireInterval_->setEnabled(fireMode_->currentData().toInt() < 2);
     zone_->setEnabled(!hasClassRules_);
 }
 
@@ -545,7 +574,10 @@ void TriggerWorkflowEditor::load(const TriggerParams& p) {
     scopeMode_->setCurrentIndex(std::max(0, scopeMode_->findData(p.trigger_auto_scope)));
     scopeDelay_->setValue(p.trigger_scope_delay_ms);
     fireDelay_->setValue(p.trigger_fire_delay);
+    prearmEnabled_->setChecked(false);
+    prearmExpand_->setValue(p.trigger_prearm_expand_percent);
     delayJitter_->setValue(p.trigger_delay_jitter_ms);
+    fireMode_->setCurrentIndex(static_cast<int>(boss::amFireMode(p.trigger_fire_mode, p.trigger_fire_duration)));
     fireDuration_->setValue(p.trigger_fire_duration);
     lossDelay_->setValue(p.trigger_loss_delay_ms);
     durationJitter_->setValue(p.trigger_duration_jitter_ms);
@@ -576,19 +608,22 @@ void TriggerWorkflowEditor::save(TriggerParams& p) const {
     p.trigger_snap_cooldown_ms = legacyCooldownMs_;
     p.trigger_flash_disappear_ms = disappearMs_->value();
     p.trigger_y_percent = zone_->value();
-    p.trigger_switch_cooldown_ms = targetCooldown_->value();
+    p.trigger_switch_cooldown_ms = 0;
     p.trigger_auto_stop = stopMode_->currentData().toInt();
     p.trigger_stop_before_ms = stopBefore_->value();
     p.trigger_stop_after_ms = stopAfter_->value();
     p.trigger_auto_scope = scopeMode_->currentData().toInt();
     p.trigger_scope_delay_ms = scopeDelay_->value();
     p.trigger_fire_delay = fireDelay_->value();
+    p.trigger_prearm_enabled = false;
+    p.trigger_prearm_expand_percent = prearmExpand_->value();
     p.trigger_delay_jitter_ms = delayJitter_->value();
+    p.trigger_fire_mode = fireMode_->currentData().toInt();
     p.trigger_fire_duration = fireDuration_->value();
     p.trigger_loss_delay_ms = lossDelay_->value();
-    p.trigger_duration_jitter_ms = durationJitter_->value();
+    p.trigger_duration_jitter_ms = delayJitter_->value();
     p.trigger_fire_interval = fireInterval_->value();
-    p.trigger_interval_jitter_ms = intervalJitter_->value();
+    p.trigger_interval_jitter_ms = delayJitter_->value();
     p.trigger_weapon_switch31 = switchEnabled_->isChecked();
     p.trigger_switch31_delay_ms = switchDelay_->value();
 }

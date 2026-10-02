@@ -34,7 +34,7 @@ void TelemetryChart::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    const QColor grid(0, 0, 0, 12);
+    const QColor grid(213, 181, 107, 28);
     const int left = 6, right = 6, top = 10, bottom = 12;
     const double plotW = width() - left - right;
     const double plotH = height() - top - bottom;
@@ -94,6 +94,6 @@ void TelemetryChart::paintEvent(QPaintEvent*) {
 
     const QPointF last = pointAt(count - 1);
     p.setBrush(m_accent);
-    p.setPen(QPen(QColor("#FFFFFF"), 2));
+    p.setPen(QPen(QColor("#19191C"), 2));
     p.drawEllipse(last, 3.5, 3.5);
 }

@@ -4,6 +4,17 @@
 #include <Windows.h>
 #include "macro/macro_engine.h"
 #include "macro/macro_config.h"
+#include "macro/rule_executor.h"
+#include "macro/rule_sources.h"
+#include "macro/control_directive.h"
+#include "runtime/aim_telemetry.h"
+#include "config/config_profiles.h"
+#include <QApplication>
+#include <QMessageBox>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QMetaObject>
 #include "Apotheosis.h"
 #include "keyboard/keyboard_listener.h"
 #include "keyboard/keycodes.h"
@@ -30,9 +41,12 @@ Status currentStatus;
 std::vector<Program> programs;
 std::shared_ptr<const Config> seenConfig;
 std::string configPath, backend, stopKey, request;
+std::string simulationRequest;
+RuleSnapshot latestSnapshot;
+std::unique_ptr<RuleExecutor> executor, simulator;
 bool master = false, editing = false, rearm = true;
 int paused = 0;
-std::map<std::string,bool> previousKeys;
+int sourceResolution=0;
 std::mutex flashRequestMutex;
 std::string flashRequest;
 int flashRequestHotkey = -1;
@@ -45,15 +59,8 @@ struct FlashPulse {
     Clock::time_point deadline{};
 } flash;
 struct Job {
-    Program program;
-    size_t index = 0;
-    bool active = false, once = false, waiting = false, stepDone = false;
-    bool moved = false;
-    Clock::time_point deadline{};
-    // false = mouse channel, true = HID keyboard usage.
+    // Aggregate hardware report; per-rule ownership lives in RuleExecutor.
     std::set<std::pair<bool,int>> held;
-    std::pair<bool,int> pulse{};
-    bool hasPulse = false;
 } job;
 std::mt19937 randomEngine{std::random_device{}()};
 
@@ -70,6 +77,7 @@ bool send(Output op,int a,int b=0) {
         }
     }
     if(op==Output::Key) {
+        if(a>=0x10000)return false;
         if(backend=="CAT" || backend=="FERRUM") {
             auto driver=backend=="CAT" ? catDriver : ferrumDriver;
             return driver && driver->isOpen() && (b ? driver->keyDown(a) : driver->keyUp(a));
@@ -143,7 +151,7 @@ void releaseFlash() {
     send(old.keyboard ? Output::Key : Output::Button,old.code,0);
 }
 void beginFlash(const std::string& key, int aimHotkeyIndex) {
-    if(flash.active || job.active || devicesChanging.load()) return;
+    if(flash.active || outputOwned.load() || devicesChanging.load()) return;
     bool keyboard=true;
     int code=hidKey(key);
     if(!code) {
@@ -168,13 +176,15 @@ void beginFlash(const std::string& key, int aimHotkeyIndex) {
 }
 void finish(const std::string& message) {
     std::lock_guard<std::recursive_mutex> output(outputLock);
+    if(executor)executor->stop();if(simulator)simulator->stop();
+    stopSourceEffects();
+    clearDirective();
     bool released=true;
     const auto held=job.held;
     for(const auto& h:held) {
         released=send(h.first ? Output::Key : Output::Button,h.second,0) && released;
         job.held.erase(h);
     }
-    if(job.active) runtime::aim_loop::finishMacroControl(job.moved);
     job={}; outputOwned=false;
     currentStatus.running=false;
     currentStatus.message=message;
@@ -187,6 +197,7 @@ bool pressed(const std::string& key) {
     const int hid=hidKey(key);
     if(hid) {
         if(mouse_driver::windowsPhysicalKeyPressed(vk)) return true;
+        if(hid>=0x10000)return false;
         std::lock_guard<std::mutex> device(inputDeviceMutex);
         if(backend=="FERRUM") return ferrumDriver && ferrumDriver->physicalKeyPressed(hid)>0;
         if(backend=="CAT") return catDriver && catDriver->physicalKeyPressed(hid)>0;
@@ -196,141 +207,143 @@ bool pressed(const std::string& key) {
     if((GetAsyncKeyState(vk)&0x8000)!=0) return true;
     return isAnyKeyPressed({key});
 }
-bool condition(const Program& p,int resolution) {
-    if(!p.targetOnly) return true;
-    std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
-    const auto age=Clock::now()-detectionBuffer.stamp;
-    if(detectionBuffer.stamp==Clock::time_point{} || age>std::chrono::milliseconds(600) ||
-        detectionBuffer.staleLocked()) return false;
-    for(size_t i=0;i<detectionBuffer.boxes.size() && i<detectionBuffer.classes.size();++i) {
-        if(!p.classes.empty() && std::find(p.classes.begin(),p.classes.end(),
-            detectionBuffer.classes[i])==p.classes.end()) continue;
-        const double h=100.0*detectionBuffer.boxes[i].height/std::max(1,resolution);
-        if(!p.heightFilter || (h>=p.minHeightPercent && h<=p.maxHeightPercent)) return true;
-    }
-    return false;
-}
-std::string validate(const Program& p) {
-    if(p.actions.empty()) return u8"请先添加动作";
-    std::set<int> keyboardHeld;
-    std::set<int> mouseHeld;
-    for(const auto& a:p.actions) {
-        if(static_cast<int>(a.type)<0 || static_cast<int>(a.type)>11) return u8"存在无法识别的动作";
-        if(a.type==ActionType::KeyDown || a.type==ActionType::KeyUp || a.type==ActionType::KeyPress) {
-            const int key=hidKey(a.key);
-            if(!key) return u8"动作中的键盘按键无效";
-            if(a.type==ActionType::KeyPress && keyboardHeld.count(key))
-                return u8"不能点按宏已按住的同一个键；请先添加松开动作";
-            if(a.type==ActionType::KeyUp) keyboardHeld.erase(key);
-            else keyboardHeld.insert(key);
-            if(std::count_if(keyboardHeld.begin(),keyboardHeld.end(),[](int k){ return k<224; })>6)
-                return u8"同一时间最多支持按住 6 个普通键（Ctrl、Shift 等修饰键另计）";
-            if(a.type==ActionType::KeyPress) keyboardHeld.erase(key);
-            std::lock_guard<std::mutex> device(inputDeviceMutex);
-            if(backend=="WINDOWS") {
-                if(!windowsDriver || !windowsDriver->isOpen()) return u8"Windows 原生输入尚未启用";
-            } else if(backend=="KMBOXNET") {
-                if(!kmboxNetSerial || !kmboxNetSerial->isOpen()) return u8"KMBox Net 未连接";
-            } else if(backend=="CAT" || backend=="FERRUM") {
-                auto driver=backend=="CAT" ? catDriver : ferrumDriver;
-                if(!driver || !driver->isOpen() || !(driver->capabilities() & mouse_driver::kCapKeyboard))
-                    return u8"当前设备接口不支持键盘输出或尚未连接";
-            } else if((backend!="MAKCU" && backend!="MAKCUNEW") ||
-                !makcuNewSerialKbd || !makcuNewSerialKbd->isOpen()) return u8"请先连接 KMBox Net 或使用本项目键盘固件的独立 MAKCU 键盘设备";
-        }
-        if(a.type==ActionType::MouseDown || a.type==ActionType::MouseUp || a.type==ActionType::MouseClick) {
-            if(a.a<1 || a.a>5) return u8"鼠标按键无效";
-            if(a.type==ActionType::MouseClick && mouseHeld.count(a.a))
-                return u8"不能点击宏已按住的同一个鼠标键；请先添加松开动作";
-            if(a.type==ActionType::MouseDown) mouseHeld.insert(a.a);
-            if(a.type==ActionType::MouseUp) mouseHeld.erase(a.a);
-
-        }
-        if(a.type==ActionType::MouseDown || a.type==ActionType::MouseUp || a.type==ActionType::MouseClick ||
-            a.type==ActionType::MouseMove || a.type==ActionType::Wheel) {
-            std::lock_guard<std::mutex> device(inputDeviceMutex);
-            bool connected=false;
-            if(backend=="WINDOWS") connected=windowsDriver && windowsDriver->isOpen();
-            else if(backend=="MAKCU") connected=makcuSerial && makcuSerial->isOpen();
-            else if(backend=="MAKCUNEW") connected=makcuNewSerial && makcuNewSerial->isOpen();
-            else if(backend=="KMBOXNET") connected=kmboxNetSerial && kmboxNetSerial->isOpen();
-            else if(backend=="CAT") connected=catDriver && catDriver->isOpen();
-            else if(backend=="FERRUM") connected=ferrumDriver && ferrumDriver->isOpen();
-            else if(backend=="DHZBOX_MINI") connected=dhzboxDriver && dhzboxDriver->isOpen();
-            if(!connected) return u8"当前鼠标设备未连接";
-            if(backend=="CAT" && a.type==ActionType::Wheel) return u8"当前 CAT 协议未提供滚轮输出接口";
-        }
-    }
-    return {};
-}
-void start(const Program& p,bool once) {
-    const auto error=validate(p);
-    if(!error.empty()) { currentStatus.message=error; return; }
-    std::lock_guard<std::recursive_mutex> output(outputLock);
-    releaseFlash();
-    if(!runtime::aim_loop::prepareForMacro()) {
-        currentStatus.message=u8"自动切枪正在完成，请稍后重试"; return;
-    }
-    job={}; job.program=p; job.active=true; job.once=once; job.deadline=Clock::now();
-    outputOwned=true;
-    currentStatus={true,p.id,u8"正在执行："+p.name,1,static_cast<int>(p.actions.size())};
-}
-void advance() {
-    if(!job.active || job.waiting || Clock::now()<job.deadline) return;
-    std::lock_guard<std::recursive_mutex> output(outputLock);
-    const auto now=Clock::now();
-    if(job.hasPulse) {
-        if(!button(job.pulse.first,job.pulse.second,false)) { finish(u8"松键失败，宏已停止"); return; }
-        job.hasPulse=false;
-    }
-    if(job.stepDone) {
-        job.stepDone=false;
-        ++job.index;
-        if(job.index==job.program.actions.size()) {
-            if(job.once || job.program.mode==Mode::Once || job.program.mode==Mode::Sequence) {
-                finish(u8"执行完成"); return;
+void systemResult(const std::string& text){std::lock_guard<std::mutex> lock(stateMutex);currentStatus.message=text;if(executor)executor->report(text);}
+std::shared_future<std::string> beginSystemAction(const Action& a,std::shared_ptr<std::atomic<bool>> alive) {
+    if(a.type!=ActionType::Notification&&a.type!=ActionType::SwitchProfile&&a.type!=ActionType::ExportConfig&&a.type!=ActionType::ImportConfig)return {};
+    auto promise=std::make_shared<std::promise<std::string>>();auto future=promise->get_future().share();
+    if(!qApp){promise->set_value(u8"界面尚未就绪");return future;}
+        QMetaObject::invokeMethod(qApp,[a,promise,alive]{
+            if(!alive->load()){promise->set_value(u8"动作已取消");return;}
+            const auto text=QString::fromUtf8(a.text.c_str());QString error;bool ok=true;
+            if(a.type==ActionType::Notification){auto* box=new QMessageBox(QMessageBox::Information,QStringLiteral("宏通知"),text,QMessageBox::Ok);box->setTextFormat(Qt::PlainText);box->setAttribute(Qt::WA_DeleteOnClose);box->open();}
+            else if(a.type==ActionType::SwitchProfile)ok=ConfigProfiles::instance().switchTo(text,&error);
+            else if(a.type==ActionType::ExportConfig){Config copy;{std::lock_guard<std::recursive_mutex> l(configMutex);copy=config;}ok=copy.saveConfig(a.text);if(!ok)error=QStringLiteral("导出文件失败");}
+            else {const QFileInfo file(text);auto name=ConfigProfiles::sanitizeName(file.completeBaseName());
+                const auto destination=QDir(ConfigProfiles::instance().directory()).filePath(name+".ini");
+                if(name.isEmpty()||QFile::exists(destination)){ok=false;error=QStringLiteral("导入名称为空或与已有方案重名，请先重命名文件");}
+                else if(!QFile::copy(text,destination)){ok=false;error=QStringLiteral("无法读取或复制配置文件");}
+                else {ConfigProfiles::instance().refresh();ok=ConfigProfiles::instance().switchTo(name,&error);}
             }
-            // A loop boundary releases unmatched presses. No stuck key leaks into the next cycle.
-            const auto held=job.held;
-            for(const auto& h:held) if(!button(h.first,h.second,false)) { finish(u8"松键失败，宏已停止"); return; }
-            job.index=0; job.deadline=now+std::chrono::milliseconds(job.program.loopIntervalMs);
-            return;
-        }
-        if(!job.once && job.program.mode==Mode::Sequence) {
-            job.waiting=true; currentStatus.message=u8"等待下一次按键 · 下一步 "+std::to_string(job.index+1);
-            currentStatus.step=static_cast<int>(job.index+1); return;
-        }
-    }
-    const auto& a=job.program.actions[job.index];
-    currentStatus.step=static_cast<int>(job.index+1);
-    currentStatus.message=u8"正在执行："+job.program.name;
-    bool ok=true;
-    int delay=0;
+            const auto result=ok?std::string{}:u8"系统动作失败："+error.toUtf8().toStdString();
+            if(!ok)systemResult(result);promise->set_value(result);
+        },Qt::QueuedConnection);return future;
+
+}
+bool hostAction(const Action& a,const RuleSnapshot& s,std::string& error) {
     switch(a.type) {
-    case ActionType::Delay: delay=std::uniform_int_distribution<int>(a.a,a.b)(randomEngine); break;
-    case ActionType::MouseMove: job.moved=true; ok=send(Output::Move,a.a,a.b); break;
-    case ActionType::Wheel: ok=send(Output::Wheel,a.a); break;
-    case ActionType::KeyDown: ok=button(true,hidKey(a.key),true); break;
-    case ActionType::KeyUp: ok=button(true,hidKey(a.key),false); break;
-    case ActionType::MouseDown: ok=button(false,a.a,true); break;
-    case ActionType::MouseUp: ok=button(false,a.a,false); break;
-    case ActionType::KeyPress:
-    case ActionType::MouseClick: {
-        const bool keyboard=a.type==ActionType::KeyPress;
-        const int code=keyboard ? hidKey(a.key) : a.a;
-        if(job.held.count({keyboard,code})) { finish(u8"不能点按宏已按住的同一个键；请先添加松开动作"); return; }
-        delay=a.b;
-        ok=button(keyboard,code,true); job.hasPulse=ok; job.pulse={keyboard,code};
-        break;
+    case ActionType::MouseMove:return send(Output::Move,a.a,a.b);
+    case ActionType::Wheel:return send(Output::Wheel,a.a);
+    case ActionType::PidReset:runtime::aim_loop::resetPidAxes(true,true);return true;
+    case ActionType::PidResetX:runtime::aim_loop::resetPidAxes(true,false);return true;
+    case ActionType::PidResetY:runtime::aim_loop::resetPidAxes(false,true);return true;
+    case ActionType::Text:
+        if(backend!="WINDOWS"){error=u8"文本输入需要 Windows 原生输出；硬件请使用键盘动作 / 组合键";return false;}
+        return mouse_driver::windowsTypeText(a.text);
+    case ActionType::AbsoluteMove:
+        if(backend!="WINDOWS"){error=u8"绝对桌面坐标需要 Windows 原生输出；硬件支持相对移动";return false;}
+        return mouse_driver::windowsMoveAbsolute(a.a,a.b);
+    case ActionType::MoveToTarget:case ActionType::MoveToPrediction: {
+        auto it=std::find_if(s.targets.begin(),s.targets.end(),[&](const Target& t){return t.id==s.targetId;});
+        if(it==s.targets.end()){error=u8"目标已丢失";return false;}
+        if(!(a.value>0)){error=u8"请设置每像素对应设备计数，不能直接混用图像像素和鼠标计数";return false;}
+        auto get=[&](const char* k,double fallback){auto v=s.values.find(k);return v!=s.values.end()&&v->second.known?v->second.number:fallback;};
+        const double seconds=a.type==ActionType::MoveToPrediction?std::clamp(a.c,0,500)/1000.:0;
+        return send(Output::Move,int(std::clamp((it->x+a.a+it->vx*seconds-get("cross.x",s.width*.5))*a.value,-32767.,32767.)),
+            int(std::clamp((it->y+a.b+it->vy*seconds-get("cross.y",s.height*.5))*a.value,-32767.,32767.)));
     }
-    case ActionType::PidReset: runtime::aim_loop::resetPidAxes(true,true); break;
-    case ActionType::PidResetX: runtime::aim_loop::resetPidAxes(true,false); break;
-    case ActionType::PidResetY: runtime::aim_loop::resetPidAxes(false,true); break;
-    default: ok=false;
+    case ActionType::LockTarget:case ActionType::NextTarget: {
+        if(s.targets.empty()){error=u8"没有可选择的目标";return false;}
+        auto it=std::find_if(s.targets.begin(),s.targets.end(),[&](const Target& t){return t.id==s.targetId;});
+        if(a.type==ActionType::NextTarget&&it!=s.targets.end())++it;if(it==s.targets.end())it=s.targets.begin();
+        changeDirective([&](ControlDirective& d){d.commandSerial=d.revision+1;d.command=a.type==ActionType::LockTarget?1:3;d.x=it->x;d.y=it->y;});return true;
     }
-    if(!ok) { finish(u8"动作发送失败，宏已停止；请检查设备连接和动作支持情况"); return; }
-    job.stepDone=true;
-    job.deadline=Clock::now()+std::chrono::milliseconds(delay);
+    case ActionType::UnlockTarget:case ActionType::ClearTarget:
+        changeDirective([&](ControlDirective& d){d.commandSerial=d.revision+1;d.command=a.type==ActionType::UnlockTarget?2:4;});return true;
+    case ActionType::AimPart:case ActionType::AimClass:case ActionType::AimPriority:
+    case ActionType::Prediction:case ActionType::Smoothing:case ActionType::SpeedLimit:
+        changeDirective([&](ControlDirective& d){
+            if(a.type==ActionType::AimPart){d.partX=std::clamp(a.a/100.,0.,1.);d.partY=std::clamp(a.b/100.,0.,1.);}
+            if(a.type==ActionType::AimClass)d.classId=a.a;
+            if(a.type==ActionType::AimPriority)d.priority=std::clamp(a.a,0,4);
+            if(a.type==ActionType::Prediction)d.predictionMs=std::clamp(a.value,0.,500.);
+            if(a.type==ActionType::Smoothing)d.smoothing=std::clamp(a.value,.01,1.);
+            if(a.type==ActionType::SpeedLimit)d.speed=std::max(0.,a.value);
+        });return true;
+    case ActionType::Sound:case ActionType::Vibration:return sourceAction(a,s,error);
+    default:error=u8"动作尚未受支持";return false;
+    }
+}
+void ensureExecutor() {
+    if(executor)return;
+    RuleHost host;
+    host.button=[](bool keyboard,int code,bool down){return button(keyboard,code,down);};
+    host.action=hostAction;host.asyncAction=beginSystemAction;
+    host.acquire=[] {releaseFlash();const auto orphaned=job.held;for(const auto& key:orphaned)if(!button(key.first,key.second,false))return false;
+        if(!runtime::aim_loop::prepareForMacro())return false;outputOwned=true;return true;};
+    host.release=[](bool moved){runtime::aim_loop::finishMacroControl(moved);outputOwned=false;};
+    executor=std::make_unique<RuleExecutor>(host);
+    simulator=std::make_unique<RuleExecutor>(RuleHost{});
+}
+RuleSnapshot snapshot(const Config& cfg) {
+    RuleSnapshot s;s.now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+    s.width=s.height=cfg.detection_resolution;
+    static int version=-1,nextId=1;static int64_t previousTime=0,lockStarted=0;static int previousTarget=-1;
+    static std::vector<Target> tracks;
+    {
+        std::lock_guard<std::mutex> l(detectionBuffer.mutex);
+        const bool fresh=detectionBuffer.stamp!=Clock::time_point{}&&Clock::now()-detectionBuffer.stamp<std::chrono::milliseconds(600)&&!detectionBuffer.staleLocked();
+        const auto currentCross=detectionBuffer.frame_crosshair.forDetection(detectionBuffer.frame_context,runtime::g_active_hotkey_index.load(),cfg.detection_resolution);
+        s.values["color.hit"]=Value::numeric(fresh&&currentCross.has_value());
+        if(fresh&&currentCross){s.values["cross.x"]=Value::numeric(currentCross->x);s.values["cross.y"]=Value::numeric(currentCross->y);}
+        if(fresh&&version!=detectionBuffer.version){
+            version=detectionBuffer.version;std::vector<Target> next;std::set<int> used;
+            const auto frameMs=detectionBuffer.frame_stamp_ns>0?detectionBuffer.frame_stamp_ns/1000000:s.now;
+            const double dt=(frameMs-previousTime)/1000.;
+            for(size_t i=0;i<detectionBuffer.boxes.size()&&i<detectionBuffer.classes.size();++i){
+                const auto& b=detectionBuffer.boxes[i];Target t;t.x=b.x+b.width*.5;t.y=b.y+b.height*.5;t.width=b.width;t.height=b.height;t.classId=detectionBuffer.classes[i];
+                t.confidence=i<detectionBuffer.confidences.size()?detectionBuffer.confidences[i]:0;
+                const Target* nearest=nullptr;double best=std::max(40.,std::hypot(t.width,t.height));
+                if(dt>0&&dt<.6)for(const auto& old:tracks)if(old.classId==t.classId&&!used.count(old.id)){
+                    const double distance=std::hypot(t.x-old.x,t.y-old.y);if(distance<best){best=distance;nearest=&old;}}
+                if(nearest){t.id=nearest->id;used.insert(t.id);t.vx=(t.x-nearest->x)/dt;t.vy=(t.y-nearest->y)/dt;}else t.id=nextId++;
+                next.push_back(t);
+            }tracks=std::move(next);previousTime=frameMs;
+        }
+        if(fresh)s.targets=tracks;else tracks.clear();
+    }
+    const auto overlay=runtime::readAimOverlay();
+    const bool fresh=Clock::now()-overlay.ts<std::chrono::milliseconds(200);
+    double best=1e30;for(const auto& t:s.targets){const double distance=std::hypot(t.x-(fresh&&overlay.valid?overlay.filtered_cx:s.width*.5),t.y-(fresh&&overlay.valid?overlay.filtered_cy:s.height*.5));if(distance<best){best=distance;s.targetId=t.id;}}
+    if(outputOwned.load())for(const auto& t:s.targets)if(t.id==latestSnapshot.targetId){s.targetId=t.id;break;}
+    s.values["aim.active"]=Value::numeric(fresh&&overlay.engaged);
+    s.values["trigger.active"]=Value::numeric(fresh&&overlay.trigger_reason==runtime::TriggerOverlayReason::Pressed);
+    s.values["aim.key"]=Value::numeric(runtime::g_active_hotkey_index.load()>=0);
+    static int64_t lastVisible=0;static int lastVisibleId=-1;
+    if(s.targetId>=0){lastVisible=s.now;lastVisibleId=s.targetId;}
+    s.values["target.occluded"]=Value::numeric(s.targetId<0&&lastVisibleId>=0&&s.now-lastVisible<=150);
+    const int active=runtime::g_active_hotkey_index.load();
+    double rx=fresh?overlay.fov_radius_x:0,ry=fresh?overlay.fov_radius_y:0;
+    if((rx<=0||ry<=0)&&active>=0&&active<int(cfg.hotkeys.size())){rx=cfg.hotkeys[active].fovX*.5;ry=cfg.hotkeys[active].fovY*.5;}
+    const auto crossx=s.values.find("cross.x"),crossy=s.values.find("cross.y");
+    const double cx=crossx==s.values.end()?s.width*.5:crossx->second.number,cy=crossy==s.values.end()?s.height*.5:crossy->second.number;
+    bool within=false;for(const auto& t:s.targets)if(rx>0&&ry>0)within|=std::pow(std::max(0.,std::abs(t.x-cx)-t.width*.5)/rx,2)+std::pow(std::max(0.,std::abs(t.y-cy)-t.height*.5)/ry,2)<=1;
+    s.values["target.fov"]=Value::numeric(within);
+    s.values["target.locked"]=Value::numeric(fresh&&overlay.valid);
+    if(s.targetId!=previousTarget){previousTarget=s.targetId;lockStarted=s.now;}
+    s.values["target.lock_ms"]=Value::numeric(s.targetId<0?0:s.now-lockStarted);
+    // Output ownership suspends the aim loop; this suspension itself is not an aim-stop event.
+    if(outputOwned.load())for(const char* name:{"aim.active","trigger.active","target.locked"}){
+        auto it=latestSnapshot.values.find(name);if(it!=latestSnapshot.values.end())s.values[name]=active>=0?it->second:Value::numeric(0);
+    }
+    std::set<std::string> wanted;
+    for(const auto& p:programs){for(const auto& step:split(p.trigger,'>'))for(const auto& key:split(step,'+'))wanted.insert(key);
+        for(const auto& c:p.conditions)if(c.metric=="key")for(const auto& key:split(c.text,'+'))wanted.insert(key);}
+    for(const auto& key:wanted)if(pressed(key))s.keys.insert(key);
+    static uint64_t wheelUp=0,wheelDown=0;
+    const auto up=mouse_driver::windowsWheelCounter(true),down=mouse_driver::windowsWheelCounter(false);
+    if(up!=wheelUp)s.keys.insert("WheelUp");if(down!=wheelDown)s.keys.insert("WheelDown");wheelUp=up;wheelDown=down;
+    s.values["random.percent"]=Value::numeric(std::uniform_real_distribution<double>(0,100)(randomEngine));
+    s.values["profile"]=Value::string(cfg.configPath());appendSources(s);return s;
 }
 } // namespace
 
@@ -347,6 +360,7 @@ void shutdown() {
     cancelAutoFlash();
     releaseFlash();
     finish(u8"宏已关闭"); request.clear(); rearm=true;
+    stopSources();
     hotkey_blocking::clear();
 }
 void setEditing(bool value) {
@@ -354,8 +368,16 @@ void setEditing(bool value) {
     if(editing==value) return;
     editing=value;
     if(value) { finish(u8"编排中：热键暂停，可点击运行一次"); request.clear(); }
-    else if(!job.active) currentStatus.message=u8"等待触发";
+    else if(!outputOwned.load()) currentStatus.message=u8"等待触发";
     rearm=true;
+}
+void simulate(const std::string& id){std::lock_guard<std::mutex> lock(stateMutex);simulationRequest=id;}
+std::string ruleDiagnostics(){std::lock_guard<std::mutex> lock(stateMutex);std::ostringstream out;
+    if(executor)for(const auto& item:executor->stats()){const auto& v=item.second;out<<item.first<<u8"：启动 "<<v.starts<<u8" 次，完成 "<<v.completed<<u8" 次，中断 "<<v.cancelled<<u8" 次，上次耗时 "<<v.lastElapsedMs<<" ms\n";}
+    if(executor)for(const auto& line:executor->log())out<<line<<'\n';
+    if(simulator)for(const auto& line:simulator->log())out<<line<<'\n';
+    for(const auto& p:programs)for(size_t i=0;i<p.conditions.size();++i){const auto v=evaluate(p,latestSnapshot,int(i));out<<p.name<<u8" 条件 "<<i+1<<u8"："<<(v.known?(v.number?u8"满足":u8"不满足"):v.error)<<'\n';}
+    return out.str();
 }
 void runOnce(const std::string& id) {
     std::lock_guard<std::mutex> lock(stateMutex);
@@ -389,6 +411,7 @@ void cancelAutoFlash() {
 void tick() {
     std::lock_guard<std::mutex> lock(stateMutex);
     if(paused) return;
+    ensureExecutor();
     const auto cfg=runtime_config::read();
     if(!cfg) return;
     hotkey_blocking::update(cfg,editing);
@@ -399,9 +422,11 @@ void tick() {
         finish(u8"配置已更新，等待触发");
         programs=cfg->macro_programs; configPath=cfg->configPath();
         master=cfg->macro_programs_enabled; backend=cfg->input_method; stopKey=cfg->macro_stop_key;
-        previousKeys.clear(); rearm=true; if(differentDeviceOrProfile) request.clear();
+        executor->configure(programs,differentDeviceOrProfile);simulator->configure(programs);configureSources(programs,master,cfg->detection_resolution);sourceResolution=cfg->detection_resolution;
+        rearm=true; if(differentDeviceOrProfile) request.clear();
     }
     seenConfig=cfg;
+    if(sourceResolution!=cfg->detection_resolution){configureSources(programs,master,cfg->detection_resolution);sourceResolution=cfg->detection_resolution;}
     std::string flashKey;
     int flashHotkey=-1;
     bool cancelFlash=false;
@@ -416,43 +441,20 @@ void tick() {
          flash.aimHotkeyIndex!=runtime::g_active_hotkey_index.load()))) releaseFlash();
     if(!cancelFlash && !flashKey.empty() &&
         flashHotkey==runtime::g_active_hotkey_index.load()) beginFlash(flashKey,flashHotkey);
-    if(!master) { currentStatus.message=u8"宏编排已关闭"; request.clear(); return; }
-    std::map<std::string,bool> down;
-    for(const auto& p:programs) if(p.enabled && !p.trigger.empty())
-        down.try_emplace(p.trigger,false);
-    for(auto& entry:down) entry.second=pressed(entry.first);
-    if(pressed(stopKey.empty() ? "F12" : stopKey)) {
-        finish(u8"已按停止键，全部宏停止"); request.clear(); rearm=true; previousKeys=down; return;
-    }
-    const bool suppress=rearm || editing;
-    rearm=false;
-    if(job.active) {
-        if(!condition(job.program,cfg->detection_resolution) ||
-            (!job.once && job.program.mode==Mode::Hold && !down[job.program.trigger]))
-            finish(u8"触发条件结束，宏已停止");
-    }
+    if(!master&&simulationRequest.empty()&&!simulator->active()){currentStatus.message=u8"宏编排已关闭";request.clear();return;}
+    latestSnapshot=snapshot(*cfg);
+    const auto dry=std::exchange(simulationRequest,std::string{});
+    if(!dry.empty()){simulator->configure(programs);simulator->run(dry,latestSnapshot,true);}
+    simulator->tick(latestSnapshot,true);
+    if(!master){currentStatus.message=u8"宏编排已关闭；可使用模拟运行";request.clear();return;}
+    std::lock_guard<std::recursive_mutex> output(outputLock);
+    if(pressed(stopKey.empty()?"F12":stopKey)){finish(u8"已按停止键，全部宏停止");request.clear();rearm=true;return;}
     const auto manual=std::exchange(request,std::string{});
-    for(const auto& p:programs) {
-        if(!p.enabled) continue;
-        const bool clicked=manual==p.id;
-        const bool edge=!suppress && down[p.trigger] && !previousKeys[p.trigger];
-        if(!clicked && !edge) continue;
-        if(!clicked && std::count_if(programs.begin(),programs.end(),[&](const Program& other){
-            return other.enabled && other.trigger==p.trigger;
-        })>1) { currentStatus.message=u8"多个宏使用了同一触发键，请在宏编排中修改"; continue; }
-        if(!clicked && p.trigger==stopKey) { currentStatus.message=u8"触发键与停止键冲突"; continue; }
-        if(job.active) {
-            if(job.program.id==p.id && !job.once && p.mode==Mode::Toggle && !clicked)
-                finish(u8"循环已停止");
-            else if(job.program.id==p.id && job.waiting && !clicked) job.waiting=false;
-            else currentStatus.message=u8"已有宏运行；请先停止当前宏";
-            break;
-        }
-        if(!condition(p,cfg->detection_resolution)) { currentStatus.message=u8"等待满足目标条件"; continue; }
-        start(p,clicked);
-        break;
-    }
-    previousKeys=std::move(down);
-    advance();
+    if(!manual.empty())executor->run(manual,latestSnapshot);
+    executor->tick(latestSnapshot,rearm||editing);rearm=false;
+    const auto records=executor->records();currentStatus.running=!records.empty();
+    if(!records.empty()){currentStatus.id=records.front().rule;currentStatus.step=records.front().step;currentStatus.message=records.front().name+u8"："+records.front().message;
+        for(const auto& p:programs)if(p.id==currentStatus.id)currentStatus.total=int(p.actions.size());}
+    else if(!executor->log().empty())currentStatus.message=executor->log().back();
 }
 } // namespace macros

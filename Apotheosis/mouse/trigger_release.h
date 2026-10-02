@@ -13,7 +13,8 @@ struct TargetLossRelease
 
 // 丢失目标时归还长按的按键。点按开镜只释放待完成的短按，保留已开镜状态，
 // 避免重新发现目标时再点一次右键而把游戏里的镜关掉。
-inline TargetLossRelease releaseOnTargetLoss(TriggerFsm& trigger,
+template<class Trigger>
+inline TargetLossRelease releaseOnTargetLoss(Trigger& trigger,
                                              ScopeController& scope,
                                              int scopeMode, int64_t now_ms,
                                              int holdGraceMs = 0,
@@ -45,7 +46,8 @@ inline TargetLossRelease releaseOnTargetLoss(TriggerFsm& trigger,
 }
 
 // 自动开镜尚未就绪时扳机不会 tick；若左键已按下，必须在跳过状态机前归还。
-inline bool releaseTriggerIfUnavailable(TriggerFsm& trigger,
+template<class Trigger>
+inline bool releaseTriggerIfUnavailable(Trigger& trigger,
                                         bool triggerEnabled,
                                         bool scopeReady)
 {

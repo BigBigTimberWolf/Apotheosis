@@ -14,6 +14,7 @@
 #include <thread>
 
 #include <QApplication>
+#include "style/Theme.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -459,37 +460,13 @@ void assignInputDevices()
 {
 }
 
-static void applyLightPalette(QApplication& app)
-{
-    app.setStyle(QStyleFactory::create("Fusion"));
-
-    QPalette pal;
-    pal.setColor(QPalette::Window, QColor("#F4F6FA"));
-    pal.setColor(QPalette::WindowText, QColor("#17191F"));
-    pal.setColor(QPalette::Base, QColor("#FFFFFF"));
-    pal.setColor(QPalette::AlternateBase, QColor("#FBFCFD"));
-    pal.setColor(QPalette::Text, QColor("#17191F"));
-    pal.setColor(QPalette::Button, QColor("#F8F9FB"));
-    pal.setColor(QPalette::ButtonText, QColor("#17191F"));
-    pal.setColor(QPalette::ToolTipBase, QColor("#17191F"));
-    pal.setColor(QPalette::ToolTipText, QColor("#FFFFFF"));
-    pal.setColor(QPalette::PlaceholderText, QColor("#98A1B0"));
-    pal.setColor(QPalette::Highlight, QColor("#5865D8"));
-    pal.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
-    pal.setColor(QPalette::Disabled, QPalette::Text, QColor("#B8C0CC"));
-    pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#B8C0CC"));
-    app.setPalette(pal);
-
-    QFont appFont;
-    appFont.setFamilies({QStringLiteral("Segoe UI Variable"),
-                         QStringLiteral("Microsoft YaHei UI"),
-                         QStringLiteral("Segoe UI")});
-    appFont.setPixelSize(13);
-    app.setFont(appFont);
-}
 
 static QString loadStyleSheet()
 {
+    QFile resource(":/style/theme.qss");
+    if (resource.open(QIODevice::ReadOnly | QIODevice::Text))
+        return QString::fromUtf8(resource.readAll());
+
     QString appDir = QCoreApplication::applicationDirPath();
     QStringList candidates = {
         appDir + "/style/theme.qss",
@@ -729,7 +706,7 @@ int main(int argc, char* argv[])
         app.setApplicationName("Apotheosis");
         app.setOrganizationName("Apotheosis");
 
-        applyLightPalette(app);
+        ApotheosisTheme::apply(app);
         IconFont::load();
 
         if (auto qss = loadStyleSheet(); !qss.isEmpty())

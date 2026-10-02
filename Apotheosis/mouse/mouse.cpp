@@ -67,24 +67,28 @@ MouseThread::~MouseThread()
 
 bool MouseThread::sendLeftDownToDriver()
 {
+    mouse_async::ButtonPriority::Pending pending(buttonPriority_, input_method_mutex);
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     return driver_ && driver_->leftDown();
 }
 
 bool MouseThread::sendLeftUpToDriver()
 {
+    mouse_async::ButtonPriority::Pending pending(buttonPriority_, input_method_mutex);
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     return driver_ && driver_->leftUp();
 }
 
 bool MouseThread::sendRightDownToDriver()
 {
+    mouse_async::ButtonPriority::Pending pending(buttonPriority_, input_method_mutex);
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     return driver_ && driver_->rightDown();
 }
 
 bool MouseThread::sendRightUpToDriver()
 {
+    mouse_async::ButtonPriority::Pending pending(buttonPriority_, input_method_mutex);
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     return driver_ && driver_->rightUp();
 }
@@ -141,7 +145,7 @@ void MouseThread::moveWorkerLoop()
                 continue;
 
             const auto sendStarted = std::chrono::steady_clock::now();
-            const bool sent = sendMovementToDriver(move.dx, move.dy);
+            const bool sent = sendMovementToDriver(move.dx, move.dy, move.generation);
             const auto sendFinished = std::chrono::steady_clock::now();
             if (extra_driver_ && std::strcmp(extra_driver_->name(), "FERRUM") == 0 &&
                 sendFinished - move.queued_at >= std::chrono::milliseconds(10) &&
@@ -163,7 +167,7 @@ void MouseThread::moveWorkerLoop()
                     std::chrono::steady_clock::now().time_since_epoch()).count();
                 appliedEvents_.push_back({ move.dx, move.dy, stamp, 0 });
                 if (appliedEvents_.size() > 128) appliedEvents_.pop_front();
-            } else {
+            } else if (moveSlot_.isCurrent(move.generation)) {
                 failedMoves_.fetch_add(1, std::memory_order_release);
             }
             const auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -192,9 +196,11 @@ void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns
         return;
     }
     {
-        std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+        std::unique_lock<std::recursive_mutex> lock(input_method_mutex);
         if (driver_ && driver_->directSend())
         {
+            buttonPriority_.wait(lock);
+            if (!driver_) return;
             const auto t0 = std::chrono::steady_clock::now();
             const bool ok = driver_->move(dx, dy);
             const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -280,6 +286,9 @@ bool MouseThread::supports(uint32_t capability) const
 
 uint32_t MouseThread::driverCapabilities() const
 {
+    // Extra drivers have a fixed shared lifetime and immutable capabilities.
+    // Checking a trigger prerequisite must not queue behind their USB write.
+    if (extra_driver_) return extra_driver_->capabilities();
     std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex&>(input_method_mutex));
     return driver_ ? driver_->capabilities() : mouse_driver::kCapNone;
 }
@@ -302,15 +311,18 @@ std::string MouseThread::driverStatus() const
         std::string(u8"能力: ") + mouse_driver::describeCapabilities(driver_->capabilities()));
 }
 
-bool MouseThread::sendMovementToDriver(int dx, int dy)
+bool MouseThread::sendMovementToDriver(int dx, int dy, std::uint64_t generation)
 {
     if (dx == 0 && dy == 0)
         return true;
 
+    std::unique_lock<std::recursive_mutex> lock(input_method_mutex);
+    buttonPriority_.wait(lock);
+    // A newer observation or cancellation can arrive while buttons take
+    // priority. Never resume the old movement after that handoff.
+    if (!moveSlot_.isCurrent(generation)) return false;
     if (extra_driver_)
         return extra_driver_->move(dx, dy);
-
-    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     if (!driver_) return false;
     return driver_->move(dx, dy);
 }

@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include "ferrum_driver.h"
+#include "ferrum_protocol.h"
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -181,13 +182,15 @@ bool FerrumDriver::button(int b, bool down) {
     return send(std::string("km.")+names[b]+(down ? "(1)" : "(0)"));
 }
 bool FerrumDriver::tapKey(int hid,int holdMs,int modifiers) {
-    bool ok=true;
-    for(int i=0;i<8;++i) if(modifiers & (1<<i)) ok=keyDown(224+i) && ok;
-    ok=keyDown(hid) && ok;
-    if(ok) std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(holdMs,1,500)));
-    ok=keyUp(hid) && ok;
-    for(int i=0;i<8;++i) if(modifiers & (1<<i)) ok=keyUp(224+i) && ok;
-    return ok;
+    if (!softwareApi_) return false;
+    const auto keys=ferrum_protocol::chordKeys(hid,modifiers);
+    if (keys.empty()) return false;
+    for (int key:keys) injectedKeys_[key]=true;
+    const bool pressed=send(ferrum_protocol::keyCommand(keys,true));
+    if (pressed) std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(holdMs,1,500)));
+    const bool released=send(ferrum_protocol::keyCommand(keys,false));
+    if (released) for (int key:keys) injectedKeys_[key]=false;
+    return pressed && released;
 }
 bool FerrumDriver::keyDown(int hid) {
     if(!softwareApi_ || hid<=0 || hid>=256) return false;

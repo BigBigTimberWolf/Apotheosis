@@ -42,7 +42,7 @@ public:
 
     void setConfig(const RecoveredTrackerConfig& config) { config_ = config; }
     std::vector<RecoveredTrack> update(const std::vector<Candidate>& candidates,
-                                       double dtSec, Vec2 eventSum = {});
+                                       double dtSec);
     void reset();
 
 private:
@@ -52,12 +52,12 @@ private:
 };
 
 // The source keeps a motion track (0xE8) and a separately filtered box
-// record (0x168). Only the motion track supplies PID feedforward.
+// record (0x168). Joined motion velocity supplies FF without mouse-event scaling.
 class RecoveredDualTracker
 {
 public:
     std::vector<RecoveredTrack> update(const std::vector<Candidate>& candidates,
-                                       double dtSec, Vec2 eventSum = {});
+                                       double dtSec);
     void setFrameSize(int width, int height);
     void reset();
 

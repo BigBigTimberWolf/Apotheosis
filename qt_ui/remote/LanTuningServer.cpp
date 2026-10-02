@@ -92,12 +92,12 @@ QStringList groups(const Config& c) {
 void pidFields(Fields& f, control::RecoveredPidConfig& p, const QString& prefix, const QString& section) {
     f.number(prefix+"kpX", "比例 Kp · X", section, p.kpX, 0, 10, .01);
     f.number(prefix+"kpY", "比例 Kp · Y", section, p.kpY, 0, 10, .01);
-    f.number(prefix+"kiX", "积分 Ki · X", section, p.kiX, 0, 10, .01);
-    f.number(prefix+"kiY", "积分 Ki · Y", section, p.kiY, 0, 10, .01);
+    f.number(prefix+"kiX", "积分 Ki · X", section, p.kiX, 0, 50, .01);
+    f.number(prefix+"kiY", "积分 Ki · Y", section, p.kiY, 0, 50, .01);
     f.number(prefix+"kdX", "微分 Kd · X", section, p.kdX, 0, 10, .01);
     f.number(prefix+"kdY", "微分 Kd · Y", section, p.kdY, 0, 10, .01);
-    f.number(prefix+"ffX", "速度前馈 FF · X", section, p.feedforwardX, 0, 10, .0005);
-    f.number(prefix+"ffY", "速度前馈 FF · Y", section, p.feedforwardY, 0, 10, .0005);
+    f.number(prefix+"ffX", "速度前馈 FF · X", section, p.feedforwardX, 0, 20, .0005);
+    f.number(prefix+"ffY", "速度前馈 FF · Y", section, p.feedforwardY, 0, 20, .0005);
     f.number(prefix+"deadzoneX", "死区半径 · X", section, p.deadzoneX, 0, 200, .5);
     f.number(prefix+"deadzoneY", "死区半径 · Y", section, p.deadzoneY, 0, 200, .5);
     f.number(prefix+"followX", "跟随补偿 · X", section, p.followX, 0, 50, .1);

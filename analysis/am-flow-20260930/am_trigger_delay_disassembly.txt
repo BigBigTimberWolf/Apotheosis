@@ -1,0 +1,69 @@
+Source: C:\Users\ADMINI~1\AppData\Local\Temp\aimmagic-review-1030\AimMagic_RE\v1030\unpacked\AimMagic_unpacked.exe
+Static disassembly only; executable not run.
+Function: 0x140079980; ECX=base delay, EDX=random delay.
+Verified: if max(base,0)==0 OR max(random,0)==0, returns max(base,0) without random sampling.
+
+0000000140079980  mov      qword ptr [rsp + 8], rbx
+0000000140079985  mov      qword ptr [rsp + 0x10], rsi
+000000014007998a  push     rdi
+000000014007998b  sub      rsp, 0x20
+000000014007998f  xor      edi, edi
+0000000140079991  test     ecx, ecx
+0000000140079993  cmovg    edi, ecx
+0000000140079996  xor      esi, esi
+0000000140079998  test     edx, edx
+000000014007999a  cmovg    esi, edx
+000000014007999d  test     edi, edi
+000000014007999f  jle      0x140079a58
+00000001400799a5  test     esi, esi
+00000001400799a7  jle      0x140079a58
+00000001400799ad  mov      ecx, dword ptr [rip + 0x6c0a69]
+00000001400799b3  mov      rax, qword ptr gs:[0x58]
+00000001400799bc  mov      rdx, qword ptr [rax + rcx*8]
+00000001400799c0  mov      ecx, 0x1598
+00000001400799c5  mov      eax, dword ptr [rcx + rdx]
+00000001400799c8  mov      ebx, 0x210
+00000001400799cd  add      rbx, rdx
+00000001400799d0  test     al, 1
+00000001400799d2  jne      0x140079a25
+00000001400799d4  or       eax, 1
+00000001400799d7  mov      dword ptr [rcx + rdx], eax
+00000001400799da  call     0x1401d9cd1
+00000001400799df  mov      edx, eax
+00000001400799e1  mov      dword ptr [rbx + 0x1384], 0xffffffff
+00000001400799eb  mov      dword ptr [rbx + 4], eax
+00000001400799ee  mov      ecx, 1
+00000001400799f3  nop      dword ptr [rax]
+00000001400799f7  nop      word ptr [rax + rax]
+0000000140079a00  mov      eax, edx
+0000000140079a02  shr      eax, 0x1e
+0000000140079a05  xor      eax, edx
+0000000140079a07  imul     edx, eax, 0x6c078965
+0000000140079a0d  add      edx, ecx
+0000000140079a0f  mov      dword ptr [rbx + rcx*4 + 4], edx
+0000000140079a13  inc      rcx
+0000000140079a16  cmp      rcx, 0x270
+0000000140079a1d  jb       0x140079a00
+0000000140079a1f  mov      dword ptr [rbx], 0x270
+0000000140079a25  mov      ecx, edi
+0000000140079a27  sub      ecx, esi
+0000000140079a29  xor      eax, eax
+0000000140079a2b  test     ecx, ecx
+0000000140079a2d  cmovg    eax, ecx
+0000000140079a30  mov      dword ptr [rsp + 0x40], eax
+0000000140079a34  lea      eax, [rsi + rdi]
+0000000140079a37  mov      dword ptr [rsp + 0x44], eax
+0000000140079a3b  mov      rdx, rbx
+0000000140079a3e  lea      rcx, [rsp + 0x40]
+0000000140079a43  call     0x14004e700
+0000000140079a48  mov      rbx, qword ptr [rsp + 0x30]
+0000000140079a4d  mov      rsi, qword ptr [rsp + 0x38]
+0000000140079a52  add      rsp, 0x20
+0000000140079a56  pop      rdi
+0000000140079a57  ret      
+0000000140079a58  mov      eax, edi
+0000000140079a5a  mov      rbx, qword ptr [rsp + 0x30]
+0000000140079a5f  mov      rsi, qword ptr [rsp + 0x38]
+0000000140079a64  add      rsp, 0x20
+0000000140079a68  pop      rdi
+0000000140079a69  ret      

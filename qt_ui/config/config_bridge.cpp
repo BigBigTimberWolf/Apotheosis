@@ -56,6 +56,7 @@ void ConfigBridge::syncToRuntime() {
     const std::string oldCaptureDevice = config.capture_device;
     const std::string oldCaptureSource = config.capture_source;
     const std::string oldCaptureStreamUrl = config.capture_stream_url;
+    const std::string oldCaptureNdiSource = config.capture_ndi_source;
     const std::string oldCaptureFormat = config.capture_format;
     const int  oldCaptureWidth  = config.capture_width;
     const int  oldCaptureHeight = config.capture_height;
@@ -65,6 +66,7 @@ void ConfigBridge::syncToRuntime() {
     config.capture_device     = qs(cm.captureDevice());
     config.capture_source     = qs(cm.captureSource());
     config.capture_stream_url = qs(cm.captureStreamUrl());
+    config.capture_ndi_source = qs(cm.captureNdiSource());
     config.capture_format     = qs(cm.captureFormat());
     config.capture_width      = cm.captureWidth();
     config.capture_height     = cm.captureHeight();
@@ -114,6 +116,7 @@ void ConfigBridge::syncToRuntime() {
     config.crosshair_rect_h         = cm.crosshairRectH();
     config.crosshair_offset_y       = cm.crosshairOffsetY();
     config.crosshair_min_pixel_count = cm.crosshairMinPixelCount();
+    config.crosshair_algorithm = cm.crosshairAlgorithm();
     config.crosshair_close_radius   = cm.crosshairCloseRadius();
     config.laser_rect_w = cm.laserRectW();
     config.laser_rect_h = cm.laserRectH();
@@ -135,6 +138,7 @@ void ConfigBridge::syncToRuntime() {
             CrosshairColorProfileConfig c;
             c.name    = qs(qc.name);
             c.enabled = qc.enabled;
+            c.exact_hsv = qc.exactHsv;
             c.h_low   = qc.hLow;
             c.h_high  = qc.hHigh;
             c.s_min   = qc.sMin;
@@ -152,6 +156,7 @@ void ConfigBridge::syncToRuntime() {
             CrosshairColorProfileConfig c;
             c.name = qs(qc.name);
             c.enabled = qc.enabled;
+            c.exact_hsv = qc.exactHsv;
             c.h_low = qc.hLow; c.h_high = qc.hHigh;
             c.s_min = qc.sMin; c.s_max = qc.sMax;
             c.v_min = qc.vMin; c.v_max = qc.vMax;
@@ -173,16 +178,12 @@ void ConfigBridge::syncToRuntime() {
     // 全局选靶与稳定器
     config.target_hysteresis_ratio   = cm.targetHysteresisRatio();
     config.target_max_distance_px    = cm.targetMaxDistancePx();
-    config.target_match_center_ratio = cm.targetMatchCenterRatio();
-    config.target_area_ratio_tol     = cm.targetAreaRatioTol();
-    config.target_k_snap_mult        = cm.targetKSnapMult();
-    config.target_min_aspect         = cm.targetMinAspect();
-    config.target_max_aspect         = cm.targetMaxAspect();
 
     const bool captureDeviceChanged =
         config.capture_device != oldCaptureDevice
         || config.capture_source != oldCaptureSource
         || config.capture_stream_url != oldCaptureStreamUrl
+        || config.capture_ndi_source != oldCaptureNdiSource
         || config.capture_format != oldCaptureFormat
         || config.capture_width  != oldCaptureWidth
         || config.capture_height != oldCaptureHeight
@@ -218,6 +219,7 @@ void ConfigBridge::syncFromRuntime()
     cm.setCaptureDevice(qstr(config.capture_device));
     cm.setCaptureSource(qstr(config.capture_source));
     cm.setCaptureStreamUrl(qstr(config.capture_stream_url));
+    cm.setCaptureNdiSource(qstr(config.capture_ndi_source));
     cm.setCaptureFormat(qstr(config.capture_format));
     cm.setCaptureWidth(config.capture_width);
     cm.setCaptureHeight(config.capture_height);
@@ -263,6 +265,7 @@ void ConfigBridge::syncFromRuntime()
     cm.setCrosshairRectH(config.crosshair_rect_h);
     cm.setCrosshairOffsetY(config.crosshair_offset_y);
     cm.setCrosshairMinPixelCount(config.crosshair_min_pixel_count);
+    cm.setCrosshairAlgorithm(config.crosshair_algorithm);
     cm.setCrosshairCloseRadius(config.crosshair_close_radius);
     cm.setLaserRectW(config.laser_rect_w);
     cm.setLaserRectH(config.laser_rect_h);
@@ -282,6 +285,7 @@ void ConfigBridge::syncFromRuntime()
             ConfigManager::ColorProfile qc;
             qc.name    = qstr(c.name);
             qc.enabled = c.enabled;
+            qc.exactHsv = c.exact_hsv;
             qc.hLow    = c.h_low;
             qc.hHigh   = c.h_high;
             qc.sMin    = c.s_min;
@@ -297,6 +301,7 @@ void ConfigBridge::syncFromRuntime()
         for (const auto& c : config.laser_colors) {
             ConfigManager::ColorProfile qc;
             qc.name = qstr(c.name); qc.enabled = c.enabled;
+            qc.exactHsv = c.exact_hsv;
             qc.hLow = c.h_low; qc.hHigh = c.h_high;
             qc.sMin = c.s_min; qc.sMax = c.s_max;
             qc.vMin = c.v_min; qc.vMax = c.v_max;
@@ -320,11 +325,6 @@ void ConfigBridge::syncFromRuntime()
     // 全局选靶与稳定器
     cm.setTargetHysteresisRatio(config.target_hysteresis_ratio);
     cm.setTargetMaxDistancePx(config.target_max_distance_px);
-    cm.setTargetMatchCenterRatio(config.target_match_center_ratio);
-    cm.setTargetAreaRatioTol(config.target_area_ratio_tol);
-    cm.setTargetKSnapMult(config.target_k_snap_mult);
-    cm.setTargetMinAspect(config.target_min_aspect);
-    cm.setTargetMaxAspect(config.target_max_aspect);
 
     cm.setActiveHotkeyGroup(qstr(config.active_hotkey_group));
 
@@ -373,35 +373,11 @@ void ConfigBridge::syncFromRuntime()
         hd.unlockYDelayMs = hp.unlock_y_delay_ms;
         hd.aimDelayMs = hp.aim_delay_ms;
         hd.ctlEnabled          = hp.ctl_enabled;
-        hd.ctlKpX              = hp.ctl_kp_x;
-        hd.ctlKpY              = hp.ctl_kp_y;
-        hd.ctlKiX              = hp.ctl_ki_x;
-        hd.ctlKiY              = hp.ctl_ki_y;
-        hd.ctlKdX              = hp.ctl_kd_x;
-        hd.ctlKdY              = hp.ctl_kd_y;
-        hd.ctlTauUnwindSec     = hp.ctl_tau_unwind_sec;
-        hd.ctlTauDerivSec      = hp.ctl_tau_deriv_sec;
-        hd.ctlIMax             = hp.ctl_i_max;
-        hd.ctlMaxOutputCounts  = hp.ctl_max_output_counts;
-        hd.ctlPFullScalePx     = hp.ctl_p_full_scale_px;
-        hd.ctlPredictLeadMs             = hp.ctl_predict_lead_ms;
-        hd.ctlPredictMaxVelocityPxPerSec = hp.ctl_predict_max_velocity_px_s;
-        hd.ctlPredictMaxLeadRatio       = hp.ctl_predict_max_lead_ratio;
-        hd.ctlKPxPerCount      = hp.ctl_k_px_per_count;
-        hd.ctlInflightBeta     = hp.ctl_inflight_beta;
-        hd.ctlInflightDeadTimeMs = hp.ctl_inflight_dead_time_ms;
         hd.ctlYOffset          = hp.ctl_y_offset;
         hd.ctlYOffsetMax       = hp.ctl_y_offset_max;
         hd.ctlXOffset          = hp.ctl_x_offset;
         hd.ctlXOffsetMax       = hp.ctl_x_offset_max;
-        hd.ctlHysteresisRatio  = hp.ctl_hysteresis_ratio;
-        hd.ctlMaxDistancePx    = hp.ctl_max_distance_px;
         hd.ctlRandomSeed       = hp.ctl_random_seed;
-        hd.ctlMatchCenterRatio = hp.ctl_match_center_ratio;
-        hd.ctlAreaRatioTol     = hp.ctl_area_ratio_tol;
-        hd.ctlKSnapMult        = hp.ctl_k_snap_mult;
-        hd.ctlMinAspect        = hp.ctl_min_aspect;
-        hd.ctlMaxAspect        = hp.ctl_max_aspect;
         if (i < cm.hotkeyCount())
             cm.setHotkey(i, hd);
         else

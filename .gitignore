@@ -37,6 +37,7 @@ cmake_install.cmake
 compile_commands.json
 CMakePresets.json.user
 /build/
+/analysis/**/build/
 cmake-build-*/
 
 # modules

@@ -3,6 +3,8 @@
 #include "anchor.h"
 #include "selector.h"
 #include "types.h"
+#include "background_motion.h"
+#include "macro/control_directive.h"
 
 #include <vector>
 #include <cstdint>
@@ -41,11 +43,12 @@ struct ControllerConfig
 
 struct ControlInput
 {
+    macros::ControlDirective macro;
     std::vector<Candidate> candidates;
     Vec2 cross{};
     double dtSec = 0.0;
     int64_t observationTimeUs = 0;
-    Vec2 motionEventSum{};
+    BackgroundMotion backgroundMotion;
     uint64_t frameIndex = 0;
     bool detectionFresh = true;
     bool crosshairFresh = true;
@@ -61,6 +64,8 @@ struct ControlOutput
     Vec2 anchor{};
     Vec2 controlAnchor{};
     Vec2 followStrength{}; // Active profile, after PID config sanitization.
+    // Legacy recording fields: error-only states store original error rate in
+    // followMotion and zero in followPreset. Older recordings retain meaning.
     Vec2 followMotion{}, followPreset{};
     int followStateX = 0, followStateY = 0;
     Vec2 cross{};

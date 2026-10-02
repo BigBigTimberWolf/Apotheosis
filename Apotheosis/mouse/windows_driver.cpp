@@ -11,6 +11,7 @@
 namespace mouse_driver {
 namespace {
 std::array<std::atomic<bool>,256> physical{};
+std::atomic<int64_t> wheelUp{0},wheelDown{0};
 std::array<std::atomic<bool>,256> blockedHotkeys{}, blockedPress{};
 bool recordPhysical(int vk,bool down,bool enteringUi=false) {
     if(down && !physical[vk].load()) {
@@ -49,6 +50,8 @@ LRESULT CALLBACK mouseHook(int code,WPARAM message,LPARAM data) {
         const auto& m=*reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
         int vk=0; bool down=false;
         if(!((m.flags&LLMHF_INJECTED) && m.dwExtraInfo==inputTag)) switch(message) {
+        case WM_MOUSEWHEEL:
+            if(static_cast<short>(HIWORD(m.mouseData))>0)++wheelUp;else ++wheelDown;break;
         case WM_LBUTTONDOWN: vk=VK_LBUTTON; down=true; break;
         case WM_LBUTTONUP: vk=VK_LBUTTON; break;
         case WM_RBUTTONDOWN: vk=VK_RBUTTON; down=true; break;
@@ -98,10 +101,12 @@ private:
 };
 PhysicalMonitor& monitor() { static PhysicalMonitor value; return value; }
 int virtualKey(int hid) {
+    if(hid>0x10000&&hid<0x10100)return hid&255;
     if(hid>=4 && hid<=29) return 'A'+hid-4;
     if(hid>=30 && hid<=38) return '1'+hid-30;
     if(hid==39) return '0';
     if(hid>=58 && hid<=69) return VK_F1+hid-58;
+    if(hid>=104 && hid<=115) return VK_F13+hid-104;
     if(hid>=89 && hid<=97) return VK_NUMPAD1+hid-89;
     if(hid>=224 && hid<=231) { const int mods[]={VK_LCONTROL,VK_LSHIFT,VK_LMENU,VK_LWIN,VK_RCONTROL,VK_RSHIFT,VK_RMENU,VK_RWIN}; return mods[hid-224]; }
     switch(hid) {
@@ -117,11 +122,27 @@ int virtualKey(int hid) {
     case 80:return VK_LEFT; case 81:return VK_DOWN; case 82:return VK_UP;
     case 83:return VK_NUMLOCK; case 84:return VK_DIVIDE; case 85:return VK_MULTIPLY;
     case 86:return VK_SUBTRACT; case 87:return VK_ADD; case 98:return VK_NUMPAD0;
-    case 99:return VK_DECIMAL; default:return 0;
+    case 99:return VK_DECIMAL;case 101:return VK_APPS; default:return 0;
     }
 }
 } // namespace
 bool windowsPhysicalKeyPressed(int vk) { return vk>0 && vk<256 && monitor().ready && physical[vk].load(); }
+int64_t windowsWheelCounter(bool up) {monitor();return up?wheelUp.load():wheelDown.load();}
+bool windowsMoveAbsolute(int x,int y) {
+    INPUT input{};input.type=INPUT_MOUSE;input.mi.dwExtraInfo=inputTag;
+    const int left=GetSystemMetrics(SM_XVIRTUALSCREEN),top=GetSystemMetrics(SM_YVIRTUALSCREEN);
+    input.mi.dx=LONG(std::clamp(double(x-left)/std::max(1,GetSystemMetrics(SM_CXVIRTUALSCREEN)-1),0.,1.)*65535);
+    input.mi.dy=LONG(std::clamp(double(y-top)/std::max(1,GetSystemMetrics(SM_CYVIRTUALSCREEN)-1),0.,1.)*65535);
+    input.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK;
+    return SendInput(1,&input,sizeof(input))==1;
+}
+bool windowsTypeText(const std::string& text) {
+    const int size=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text.data(),int(text.size()),nullptr,0);if(size<=0)return text.empty();
+    std::wstring value(size,0);MultiByteToWideChar(CP_UTF8,0,text.data(),int(text.size()),value.data(),size);
+    std::vector<INPUT> input;input.reserve(size*2);
+    for(wchar_t c:value){INPUT i{};i.type=INPUT_KEYBOARD;i.ki.wScan=c;i.ki.dwExtraInfo=inputTag;i.ki.dwFlags=KEYEVENTF_UNICODE;input.push_back(i);i.ki.dwFlags|=KEYEVENTF_KEYUP;input.push_back(i);}
+    return SendInput(UINT(input.size()),input.data(),sizeof(INPUT))==input.size();
+}
 bool windowsSetBlockedHotkeys(const std::bitset<256>& keys) {
     if(keys.any() && !monitor().ready) return false;
     for(int i=0;i<256;++i) blockedHotkeys[i]=keys[i];
@@ -183,6 +204,7 @@ bool WindowsDriver::key(int hid,bool down) {
     const UINT scan=MapVirtualKeyW(vk,MAPVK_VK_TO_VSC_EX);
     in.ki.wScan=static_cast<WORD>(scan&0xff); in.ki.dwFlags=KEYEVENTF_SCANCODE;
     if((scan&0xff00)==0xe000 || hid==88) in.ki.dwFlags|=KEYEVENTF_EXTENDEDKEY;
+    if(hid>=0x10000||!scan){in.ki.wVk=WORD(vk);in.ki.wScan=0;in.ki.dwFlags=0;}
     if(!down) in.ki.dwFlags|=KEYEVENTF_KEYUP;
     if(!result(SendInput(1,&in,sizeof(in)))) return false;
     if(down) heldKeys_.insert(hid); else heldKeys_.erase(hid);

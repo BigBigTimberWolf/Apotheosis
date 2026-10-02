@@ -25,11 +25,11 @@ StatusPill::StatusPill(QWidget* parent) : QWidget(parent) {
 void StatusPill::setStatus(const QString& text, Tone tone) {
     QString dot, fg;
     switch (tone) {
-        case Success: dot = "#22C55E"; fg = "#16A34A"; break;
-        case Warning: dot = "#F5A623"; fg = "#B45309"; break;
-        case Danger:  dot = "#E5484D"; fg = "#C0362C"; break;
+        case Success: dot = "#22C55E"; fg = "#53C583"; break;
+        case Warning: dot = "#F5A623"; fg = "#E9BD69"; break;
+        case Danger:  dot = "#E5484D"; fg = "#EF7A71"; break;
         case Neutral:
-        default:      dot = "#B0B0B8"; fg = "#6B6B73"; break;
+        default:      dot = "#B0B0B8"; fg = "#ABA697"; break;
     }
 
     setStyleSheet(QStringLiteral("background:transparent;"));

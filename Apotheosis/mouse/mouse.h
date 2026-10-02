@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "latest_move_slot.h"
+#include "button_priority.h"
 #include "mouse_driver.h"
 #include "weapon_switch31.h"
 
@@ -95,7 +96,7 @@ private:
     std::shared_ptr<mouse_driver::IDriver> extra_driver_;
     void moveWorkerLoop();
     void queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns);
-    bool sendMovementToDriver(int dx, int dy);
+    bool sendMovementToDriver(int dx, int dy, std::uint64_t generation);
 
     bool sendLeftDownToDriver();
     bool sendLeftUpToDriver();
@@ -106,6 +107,7 @@ private:
 
     MouseRuntimeParams params_{};
     std::mutex outputMtx_;
+    mouse_async::ButtonPriority buttonPriority_;
     std::mutex moveDispatchMutex_;
     bool automaticMovesSuspended_ = false; // guarded by moveDispatchMutex_
 

@@ -1,6 +1,8 @@
 #ifndef CROSSHAIR_COLOR_PICKER_H
 #define CROSSHAIR_COLOR_PICKER_H
 
+#include "crosshair/color_lab.h"
+
 namespace cv { class Mat; }
 
 namespace crosshair
@@ -20,6 +22,9 @@ bool TakePickedColor(int token, int& h, int& s, int& v);
 
 bool SampleRegionHSV(const cv::Mat& bgr, int cx, int cy, int half,
                      int& h, int& s, int& v);
+
+void SetColorLabPreview(std::vector<ColorLabBand> bands);
+std::vector<ColorLabBand> ColorLabPreviewBands();
 
 }
 

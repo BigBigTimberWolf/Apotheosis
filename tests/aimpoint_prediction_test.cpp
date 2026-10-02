@@ -1,6 +1,7 @@
 #include "control/recovered_aim_controller.h"
 #include <cmath>
 #include <cstdio>
+#include <limits>
 using namespace control;
 namespace {
 int failures = 0;
@@ -9,159 +10,149 @@ void check(bool pass, const char* name) {
 }
 }
 int main() {
-    // Retained target name for existing build scripts; the old frame predictor
-    // has been replaced with following compensation. Not run in this change.
     FollowCompensator c;
     Vec2 offset;
     for (int n=0; n<200; ++n)
-        offset=c.update({5,-5},{80,80},{1,0},1000000+n*10000,.01);
-    check(offset.x>1 && offset.x<5 && offset.y==0,
-          "persistent lag builds a gradual correction on the enabled axis only");
-    double before=offset.x;
-    for (int n=0; n<100; ++n)
-        offset=c.update({100,0},{80,80},{1,0},2990000,.01);
-    check(offset.x<before+.1, "duplicate images cannot accumulate repeated error");
-    for (int n=0; n<100; ++n)
-        offset=c.update({-5,0},{80,80},{1,0},3000000+n*10000,.01);
-    check(offset.x<before && offset.x>0,
-          "persistent opposite error gradually retracts correction without resetting it");
-    offset=c.update({5,5},{80,80},{0,0},4000000,.01);
-    check(offset.norm()==0, "disabling returns the original point immediately");
+        offset=c.update({5,5},{416,416},{10,10},1000000+n*10000,.01);
+    check(offset.x>20 && offset.y>20, "persistent error builds both axes");
+    const double beforeY=offset.y;
+    offset=c.update({-.01,5},{416,416},{10,10},3000000,.01);
+    check(offset.x>20 && offset.y>=beforeY,
+          "crossing the real aimpoint preserves learned and applied lead");
+    offset=c.update({-.01,5},{416,416},{10,10},3010000,.01,{1,0});
+    check(offset.x==0 && offset.y>=beforeY && c.stateX()==FollowCompensator::ErrorReversed,
+          "confirmed target reversal clears both X storage and smoother on this image only");
+    for (int n=2; n<100; ++n)
+        offset=c.update({-5,5},{416,416},{10,10},3000000+n*10000,.01);
+    check(offset.x<-5, "new direction rebuilds after reversal");
+    offset=c.update({0,5},{416,416},{10,10},4000000,.01);
+    check(offset.x<0, "zero error is not a reversal");
+    offset=c.update({5,5},{416,416},{10,10},4010000,.01);
+    check(offset.x<0, "crossing zero does not masquerade as a target reversal");
+    for (int n=1;n<300;++n)
+        offset=c.update({5,5},{416,416},{10,10},4010000+n*10000,.01);
+    check(offset.x>0,"unconfirmed opposite error can still unwind excessive lead gradually");
+
     c.reset();
     for (int n=0; n<200; ++n) {
-        offset=c.update({5,0},{80,80},{1,0},5000000+n*10000,.01);
+        offset=c.update({5,0},{416,416},{10,0},5000000+n*10000,.01);
         c.setSaturation({1,0});
     }
-    check(offset.x==0, "output saturation prevents accumulating more same-direction correction");
-    offset=c.update({5,0},{80,80},{1,0},8000000,.01);
-    check(offset.norm()==0, "long image gap restarts correction");
+    check(offset.x==0 && offset.y==0, "saturation blocks same-direction accumulation");
+    c.reset();
+    for (int n=0; n<100; ++n)
+        offset=c.update({41,5},{416,416},{10,10},8000000+n*10000,.01);
+    check(offset.x>41, "large persistent lag still builds without a box-width cap");
+    offset=c.update({41,5},{416,416},{0,10},9000000,.01);
+    check(offset.x==0 && offset.y>0, "axis disable clears only that axis");
+    offset=c.update({41,5},{416,416},{10,10},10000000,.01);
+    check(offset.norm()==0 && c.errorRate().norm()==0, "long gap resets lead and diagnostic error history");
+    offset=c.update({41,5},{416,416},{10,10},9990000,.01);
+    check(offset.norm()==0 && c.errorRate().norm()==0, "backward timestamps reseed history");
+    c.update({std::numeric_limits<double>::quiet_NaN(),0},{416,416},{10,10},10010000,.01);
+    check(c.errorRate().norm()==0, "invalid error clears history");
 
+    // Error-rate telemetry is independent of velocity FF and must not count
+    // duplicate images even when following compensation is disabled.
     c.reset();
-    for (int n=0; n<200; ++n)
-        offset=c.update({80,-80},{20,20},{10,10},9000000+n*10000,.01);
-    check(offset.x>5 && offset.x<=10 && offset.y<-5 && offset.y>=-10,
-          "correction respects half the observation field, independent of target size");
-    c.reset();
-    for (int n=0; n<100; ++n)
-        offset=c.update({41,0},{416,416},{10,0},11000000+n*10000,.01);
-    check(offset.x>41 && offset.x<208,
-          "41px persistent lag can build more than a single-digit correction");
-    offset=c.update({-41,0},{416,416},{10,0},12000000,.01);
-    check(offset.x>40, "crossing the original aimpoint never hard-clears compensation");
-    for (int n=1; n<30; ++n)
-        offset=c.update({-41,0},{416,416},{10,0},12000000+n*10000,.01);
-    check(offset.x>0,
-          "opposite point error adjusts the existing lead instead of treating crossing as motion reversal");
-    c.reset();
-    for (int n=0; n<80; ++n)
-        offset=c.update({41,5},{416,416},{50,10},16000000+n*10000,.01);
-    check(offset.x>150, "strength above ten is used without an internal ten cap");
-    const double oldY=offset.y;
-    offset=c.update({-41,5},{416,416},{50,10},16800000,.01);
-    check(offset.x>150 && offset.y>=oldY,
-          "even a large error crossing preserves the stored correction on both axes");
-    c.reset();
-    for (int n=0; n<200; ++n)
-        offset=c.update({double(n%2),0},{80,80},{10,0},12000000+n*10000,.01);
-    check(offset.x>.1 && offset.y==0,
-          "zero/one pixel observations with a positive mean continue accumulating");
-    c.reset();
-    for (int n=0; n<200; ++n)
-        offset=c.update({.1,0},{80,80},{10,0},25000000+n*10000,.01);
-    check(offset.x>.1,
-          "subpixel persistent error has no hidden direction or learning deadband");
-    c.reset();
-    for (int n=0; n<100; ++n)
-        offset=c.update({5,0},{80,80},{10,0},28000000+n*10000,.01);
-    for (int n=0; n<100; ++n)
-        offset=c.update({5,0},{80,80},{10,0},28990000,.01);
-    const double beforeZero=offset.x;
-    offset=c.update({0,0},{80,80},{10,0},29000000,.01);
-    check(offset.x>beforeZero+.001,
-          "zero raw error still allows residual filtered trend to grow the lead");
-    const double beforeCrossing=offset.x;
-    offset=c.update({-.5,0},{80,80},{10,0},29010000,.01);
-    check(offset.x>beforeCrossing,
-          "slightly crossing the original aimpoint does not abruptly stop accumulation");
-    for (int n=0; n<300; ++n)
-        offset=c.update({0,0},{80,80},{10,0},29020000+n*10000,.01);
-    check(offset.x<beforeZero+2,
-          "with zero error the filtered trend fades instead of growing indefinitely");
-    c.reset();
-    for (int n=0; n<200; ++n)
-        offset=c.update({2.0+double(n%2),0},{80,80},{10,0},14000000+n*10000,.01);
-    check(offset.x>.1 && offset.y==0,
-          "small persistent lag above the noise floor still builds compensation");
-    const double learned=offset.x;
-    offset=c.update({-1,0},{80,80},{10,0},16000000,.01);
-    check(offset.x>=learned,
-          "one-pixel crossing does not discard an established lead");
-    c.reset();
+    c.update({20,0},{416,416},{0,0},11000000,.01);
+    check(c.errorRate().norm()==0, "first error seeds diagnostic history");
+    c.update({21,0},{416,416},{0,0},11010000,.01);
+    const double rate=c.errorRate().x;
+    check(rate>0, "diagnostic error trend survives disabled compensation");
     for (int n=0; n<10; ++n)
-        offset=c.update({41,0},{416,416},{10,0},18000000+n*10000,.01);
-    check(offset.x>3,
-          "large lag starts visible compensation within 100ms at strength ten");
-    c.reset();
-    for (int n=0; n<200; ++n)
-        offset=c.update({n==0 ? 0.0 : (n%2 ? 1.0 : -1.0),0},
-                        {80,80},{10,0},15000000+n*10000,.01);
-    check(offset.norm()==0, "alternating zero-mean noise does not build correction");
+        c.update({-200,0},{416,416},{0,0},11010000,.001);
+    check(c.errorRate().x==rate, "duplicate image cannot manufacture an error-rate reversal");
+    for (int n=2; n<102; ++n)
+        c.update({21,0},{416,416},{0,0},11000000+n*10000,.01);
+    check(std::abs(c.errorRate().x)<1e-6, "constant lag has zero diagnostic error rate");
 
-    // Motion and point error deliberately vary independently: crossing the
-    // point must never masquerade as a turn, at any tested target speed.
-    for (double speed : {2.0, 30.0, 300.0}) {
-        FollowCompensator moving;
-        double position=0;
-        int64_t stamp=40000000;
-        auto tick=[&](double e, double v, bool valid=true) {
-            position+=v*.01;
-            stamp+=10000;
-            return moving.update({e,0},{416,416},{10,0},stamp,.01,
-                                  FollowMotion{{position,0},{},valid});
-        };
-        for (int n=0; n<100; ++n) offset=tick(8,speed);
-        for (int n=0; n<100; ++n) offset=tick(0,speed);
-        check(moving.stateX()==FollowCompensator::Remembered,
-              "a settled correction is remembered across slow, medium and fast motion");
-        const double stored=offset.x;
-        offset=tick(-8,speed);
-        check(offset.x>stored*.9 && moving.stateX()!=FollowCompensator::Reversed,
-              "error crossing with unchanged target motion retains correction");
-        offset=tick(0,0);
-        check(offset.x>stored*.9 && moving.stateX()!=FollowCompensator::Stopped,
-              "one zero velocity sample cannot declare a stop");
-        for (int n=0; n<80; ++n) offset=tick(0,speed);
-        bool preset=false;
-        for (int n=0; n<40; ++n) {
-            offset=tick(0,-speed);
-            preset |= moving.stateX()==FollowCompensator::Preset && moving.presetAmount().x<0;
-        }
-        check(preset && offset.x<0,
-              "confirmed reversal reuses a recent settled correction without waiting for error buildup");
-        check(std::abs(offset.x)<=stored*1.1,
-              "preset magnitude stays bounded by the previous settled correction");
-        for (int n=0; n<80; ++n) offset=tick(0,-speed);
-        bool stopped=false;
-        for (int n=0; n<200; ++n) {
-            offset=tick(0,0);
-            stopped |= moving.stateX()==FollowCompensator::Stopped;
-        }
-        check(stopped && std::abs(offset.x)<.01,
-              "sustained zero motion eventually confirms stopping at every speed");
+    for (double dt : {.005, .01, .02}) {
+        c.reset();
+        const int count=int(2.0/dt);
+        for (int n=0; n<=count; ++n)
+            offset=c.update({4,0},{416,416},{10,0},20000000+int64_t(n*dt*1e6),dt);
+        check(offset.x>18 && offset.x<21, "error integration scales with time across capture rates");
+        c.reset();
+        for (int n=0; n<100; ++n)
+            offset=c.update({n%2 ? 1.0:-1.0,0},{416,416},{10,0},
+                            24000000+int64_t(n*dt*1e6),dt);
+        check(offset.x==0, "alternating sign noise cannot build stored compensation");
     }
 
-    FollowCompensator uncertain;
-    for (int n=0; n<200; ++n)
-        offset=uncertain.update({8,0},{416,416},{10,0},50000000+n*10000,.01,
-            FollowMotion{{double(n),0},{},true});
-    const double retained=offset.x;
-    offset=uncertain.update({-8,0},{416,416},{10,0},52000000,.01);
-    check(offset.x>retained*.9 && uncertain.stateX()==FollowCompensator::Uncertain,
-          "unavailable motion evidence never hard-clears compensation");
-    offset=uncertain.update({-8,0},{416,416},{10,0},52000000,.01,
-                            FollowMotion{{-100,0},{},true});
-    check(offset.x>retained*.9 && uncertain.stateX()==FollowCompensator::Uncertain,
-          "duplicate image cannot confirm a turn or apply a preset");
+    // Velocity FF must not manufacture target motion from crosshair movement.
+    {
+        ControllerConfig cfg;
+        cfg.frameWidth=cfg.frameHeight=640;
+        cfg.buckets.byClassId={Bucket::Aim};
+        RecoveredPidConfig p;
+        p.kpX=p.kpY=p.kiX=p.kiY=p.kdX=p.kdY=0;
+        p.feedforwardX=.05f; p.smoothMaxPixel=1000;
+        RecoveredAimController ctrl;
+        ctrl.setConfig(cfg,p);
+        ControlInput in;
+        in.candidates={Candidate{{300,300,40,40},0,.9}};
+        in.cross={310,320}; in.dtSec=.01; in.observationTimeUs=30000000;
+        check(ctrl.update(in).counts.x==0, "FF-only acquisition emits no movement");
+        in.cross.x=300; in.observationTimeUs+=10000;
+        auto out=ctrl.update(in);
+        check(out.counts.x==0 && out.trackedVelocity.x==0 && out.followMotion.x>0,
+              "moving only the crosshair changes error telemetry but not velocity FF");
+        in.detectionFresh=false; ctrl.update(in);
+        in.detectionFresh=true; in.cross.x=290; in.observationTimeUs+=10000;
+        out=ctrl.update(in);
+        check(out.followMotion.norm()==0 && out.counts.x==0,
+              "stationary target reacquisition cannot create FF from a crosshair jump");
+
+        RecoveredAimController fixedCross,movingCross;
+        fixedCross.setConfig(cfg,p);movingCross.setConfig(cfg,p);
+        bool sawVelocityOutput=false, independent=true;
+        for(int n=0;n<40;++n) {
+            in.candidates={Candidate{{300+n*.5,300,40,40},0,.9}};
+            in.observationTimeUs=31000000+n*10000;
+            in.cross={310,320};
+            const auto a=fixedCross.update(in);
+            in.cross.x+=n*.5;
+            const auto b=movingCross.update(in);
+            independent &= a.counts.x==b.counts.x && a.trackedVelocity.x==b.trackedVelocity.x;
+            sawVelocityOutput |= a.counts.x>0 && a.trackedVelocity.x>0;
+        }
+        check(independent && sawVelocityOutput,
+              "moving target feeds FF independently of crosshair-relative error trend");
+    }
+
+    // End-to-end wiring: camera drift reverses screen velocity, but the
+    // corrected target direction stays positive. Crossing is not a reset.
+    {
+        ControllerConfig cfg; cfg.frameWidth=cfg.frameHeight=640; cfg.buckets.byClassId={Bucket::Aim};
+        RecoveredPidConfig p; p.kpX=p.kpY=.01f; p.kiX=p.kiY=p.kdX=p.kdY=0;
+        p.followX=p.followY=10; p.smoothMaxPixel=1000;
+        RecoveredAimController ctrl; ctrl.setConfig(cfg,p);
+        ControlInput in; in.dtSec=.01;
+        ControlOutput out;
+        for(int n=0;n<100;++n) {
+            in.observationTimeUs=40000000+n*10000;
+            const double center=400-n;
+            in.candidates={Candidate{{center-20,280,40,80},0,.95}};
+            in.cross={center-5,310};
+            in.backgroundMotion={{-2.0*n,0},n*.01,77,in.observationTimeUs,true};
+            out=ctrl.update(in);
+        }
+        check(out.controlAnchor.x-out.anchor.x>10,"controller learns lead while camera moves faster than target");
+        in.observationTimeUs+=10000; in.candidates={Candidate{{280,280,40,80},0,.95}};
+        in.cross.x=301; in.backgroundMotion={{-200,0},1,77,in.observationTimeUs,true};
+        out=ctrl.update(in);
+        check(out.error.x<0 && out.controlAnchor.x-out.anchor.x>10,
+              "controller preserves lead when crosshair overtakes a still-rightward target");
+        for(int n=101;n<=102;++n) {
+            in.observationTimeUs=40000000+n*10000;
+            in.candidates={Candidate{{280-3.0*(n-100),280,40,80},0,.95}};
+            in.backgroundMotion={{-2.0*n,0},n*.01,77,in.observationTimeUs,true};
+            out=ctrl.update(in);
+        }
+        check(out.followStateX==FollowCompensator::ErrorReversed && out.controlAnchor.x==out.anchor.x &&
+              out.controlAnchor.y>out.anchor.y,"controller immediately clears confirmed reversed axis only");
+    }
 
     ControllerConfig config;
     config.frameWidth=640; config.frameHeight=640;

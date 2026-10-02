@@ -76,6 +76,15 @@ QString ConfigManager::captureStreamUrl() const {
     return m_settings->value("Capture/capture_stream_url", "").toString();
 }
 
+QString ConfigManager::captureNdiSource() const {
+    return m_settings->value("Capture/capture_ndi_source", "").toString();
+}
+
+void ConfigManager::setCaptureNdiSource(const QString& v) {
+    m_settings->setValue("Capture/capture_ndi_source", v);
+    emit configChanged();
+}
+
 void ConfigManager::setCaptureStreamUrl(const QString& v) {
     m_settings->setValue("Capture/capture_stream_url", v);
     emit configChanged();
@@ -481,6 +490,14 @@ void ConfigManager::setCrosshairMinPixelCount(int v) {
     emit configChanged();
 }
 
+int ConfigManager::crosshairAlgorithm() const {
+    return std::clamp(m_settings->value("Crosshair/crosshair_algorithm", 0).toInt(), 0, 1);
+}
+void ConfigManager::setCrosshairAlgorithm(int v) {
+    m_settings->setValue("Crosshair/crosshair_algorithm", std::clamp(v, 0, 1));
+    emit configChanged();
+}
+
 int ConfigManager::crosshairCloseRadius() const {
     return m_settings->value("Crosshair/crosshair_close_radius", 1).toInt();
 }
@@ -499,6 +516,7 @@ QList<ConfigManager::ColorProfile> ConfigManager::crosshairColors() const {
         ColorProfile c;
         c.name    = m_settings->value(prefix + "name", "Color").toString();
         c.enabled = m_settings->value(prefix + "enabled", true).toBool();
+        c.exactHsv = m_settings->value(prefix + "exact_hsv", false).toBool();
         c.hLow    = m_settings->value(prefix + "h_low", 0).toInt();
         c.hHigh   = m_settings->value(prefix + "h_high", 10).toInt();
         c.sMin    = m_settings->value(prefix + "s_min", 120).toInt();
@@ -531,6 +549,7 @@ void ConfigManager::setCrosshairColors(const QList<ColorProfile>& colors) {
         const auto& c = colors[i];
         m_settings->setValue(prefix + "name",    c.name);
         m_settings->setValue(prefix + "enabled", c.enabled);
+        m_settings->setValue(prefix + "exact_hsv", c.exactHsv);
         m_settings->setValue(prefix + "h_low",   c.hLow);
         m_settings->setValue(prefix + "h_high",  c.hHigh);
         m_settings->setValue(prefix + "s_min",   c.sMin);
@@ -567,6 +586,7 @@ QList<ConfigManager::ColorProfile> ConfigManager::laserColors() const {
         ColorProfile c;
         c.name = m_settings->value(prefix + "name", "Laser").toString();
         c.enabled = m_settings->value(prefix + "enabled", true).toBool();
+        c.exactHsv = m_settings->value(prefix + "exact_hsv", false).toBool();
         c.hLow = m_settings->value(prefix + "h_low", 0).toInt();
         c.hHigh = m_settings->value(prefix + "h_high", 10).toInt();
         c.sMin = m_settings->value(prefix + "s_min", 120).toInt();
@@ -591,6 +611,7 @@ void ConfigManager::setLaserColors(const QList<ColorProfile>& colors) {
         const auto& c = colors[i];
         m_settings->setValue(prefix + "name", c.name);
         m_settings->setValue(prefix + "enabled", c.enabled);
+        m_settings->setValue(prefix + "exact_hsv", c.exactHsv);
         m_settings->setValue(prefix + "h_low", c.hLow);
         m_settings->setValue(prefix + "h_high", c.hHigh);
         m_settings->setValue(prefix + "s_min", c.sMin);
@@ -615,42 +636,6 @@ void ConfigManager::setTargetMaxDistancePx(double v) {
     if (m_settings) m_settings->setValue("target_stabilizer/target_max_distance_px", v);
     emit configChanged();
 }
-double ConfigManager::targetMatchCenterRatio() const {
-    return m_settings ? m_settings->value("target_stabilizer/target_match_center_ratio", 0.5).toDouble() : 0.5;
-}
-void ConfigManager::setTargetMatchCenterRatio(double v) {
-    if (m_settings) m_settings->setValue("target_stabilizer/target_match_center_ratio", v);
-    emit configChanged();
-}
-double ConfigManager::targetAreaRatioTol() const {
-    return m_settings ? m_settings->value("target_stabilizer/target_area_ratio_tol", 2.0).toDouble() : 2.0;
-}
-void ConfigManager::setTargetAreaRatioTol(double v) {
-    if (m_settings) m_settings->setValue("target_stabilizer/target_area_ratio_tol", v);
-    emit configChanged();
-}
-double ConfigManager::targetKSnapMult() const {
-    return m_settings ? m_settings->value("target_stabilizer/target_k_snap_mult", 1.15).toDouble() : 1.15;
-}
-void ConfigManager::setTargetKSnapMult(double v) {
-    if (m_settings) m_settings->setValue("target_stabilizer/target_k_snap_mult", v);
-    emit configChanged();
-}
-double ConfigManager::targetMinAspect() const {
-    return m_settings ? m_settings->value("target_stabilizer/target_min_aspect", 0.2).toDouble() : 0.2;
-}
-void ConfigManager::setTargetMinAspect(double v) {
-    if (m_settings) m_settings->setValue("target_stabilizer/target_min_aspect", v);
-    emit configChanged();
-}
-double ConfigManager::targetMaxAspect() const {
-    return m_settings ? m_settings->value("target_stabilizer/target_max_aspect", 5.0).toDouble() : 5.0;
-}
-void ConfigManager::setTargetMaxAspect(double v) {
-    if (m_settings) m_settings->setValue("target_stabilizer/target_max_aspect", v);
-    emit configChanged();
-}
-
 QString ConfigManager::activeHotkeyGroup() const {
     return m_settings ? m_settings->value("active_hotkey_group",
         QStringLiteral("\xe9\xbb\x98\xe8\xae\xa4")).toString() : QStringLiteral("\xe9\xbb\x98\xe8\xae\xa4");
@@ -695,35 +680,11 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "unlock_y_delay_ms", data.unlockYDelayMs);
     m_settings->setValue(prefix + "aim_delay_ms", data.aimDelayMs);
     m_settings->setValue(prefix + "ctl_enabled", data.ctlEnabled);
-    m_settings->setValue(prefix + "ctl_kp_x", static_cast<double>(data.ctlKpX));
-    m_settings->setValue(prefix + "ctl_kp_y", static_cast<double>(data.ctlKpY));
-    m_settings->setValue(prefix + "ctl_ki_x", static_cast<double>(data.ctlKiX));
-    m_settings->setValue(prefix + "ctl_ki_y", static_cast<double>(data.ctlKiY));
-    m_settings->setValue(prefix + "ctl_kd_x", static_cast<double>(data.ctlKdX));
-    m_settings->setValue(prefix + "ctl_kd_y", static_cast<double>(data.ctlKdY));
-    m_settings->setValue(prefix + "ctl_tau_unwind_sec", static_cast<double>(data.ctlTauUnwindSec));
-    m_settings->setValue(prefix + "ctl_tau_deriv_sec", static_cast<double>(data.ctlTauDerivSec));
-    m_settings->setValue(prefix + "ctl_i_max", static_cast<double>(data.ctlIMax));
-    m_settings->setValue(prefix + "ctl_max_output_counts", data.ctlMaxOutputCounts);
-    m_settings->setValue(prefix + "ctl_p_full_scale_px", static_cast<double>(data.ctlPFullScalePx));
-    m_settings->setValue(prefix + "ctl_predict_lead_ms", static_cast<double>(data.ctlPredictLeadMs));
-    m_settings->setValue(prefix + "ctl_predict_max_velocity_px_s", static_cast<double>(data.ctlPredictMaxVelocityPxPerSec));
-    m_settings->setValue(prefix + "ctl_predict_max_lead_ratio", static_cast<double>(data.ctlPredictMaxLeadRatio));
-    m_settings->setValue(prefix + "ctl_k_px_per_count", static_cast<double>(data.ctlKPxPerCount));
-    m_settings->setValue(prefix + "ctl_inflight_beta", static_cast<double>(data.ctlInflightBeta));
-    m_settings->setValue(prefix + "ctl_inflight_dead_time_ms", static_cast<double>(data.ctlInflightDeadTimeMs));
     m_settings->setValue(prefix + "ctl_y_offset", static_cast<double>(data.ctlYOffset));
     m_settings->setValue(prefix + "ctl_y_offset_max", static_cast<double>(data.ctlYOffsetMax));
     m_settings->setValue(prefix + "ctl_x_offset", static_cast<double>(data.ctlXOffset));
     m_settings->setValue(prefix + "ctl_x_offset_max", static_cast<double>(data.ctlXOffsetMax));
-    m_settings->setValue(prefix + "ctl_hysteresis_ratio", static_cast<double>(data.ctlHysteresisRatio));
-    m_settings->setValue(prefix + "ctl_max_distance_px", static_cast<double>(data.ctlMaxDistancePx));
     m_settings->setValue(prefix + "ctl_random_seed", data.ctlRandomSeed);
-    m_settings->setValue(prefix + "ctl_match_center_ratio", static_cast<double>(data.ctlMatchCenterRatio));
-    m_settings->setValue(prefix + "ctl_area_ratio_tol", static_cast<double>(data.ctlAreaRatioTol));
-    m_settings->setValue(prefix + "ctl_k_snap_mult", static_cast<double>(data.ctlKSnapMult));
-    m_settings->setValue(prefix + "ctl_min_aspect", static_cast<double>(data.ctlMinAspect));
-    m_settings->setValue(prefix + "ctl_max_aspect", static_cast<double>(data.ctlMaxAspect));
 }
 
 ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const {
@@ -751,37 +712,11 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.unlockYDelayMs = std::clamp(m_settings->value(prefix + "unlock_y_delay_ms", 0).toInt(), 0, 5000);
     data.aimDelayMs = std::clamp(m_settings->value(prefix + "aim_delay_ms", 0).toInt(), 0, 2000);
     data.ctlEnabled = m_settings->value(prefix + "ctl_enabled", false).toBool();
-    data.ctlKpX = m_settings->value(prefix + "ctl_kp_x", 35.0).toDouble();
-    data.ctlKpY = m_settings->value(prefix + "ctl_kp_y", 35.0).toDouble();
-    data.ctlKiX = m_settings->value(prefix + "ctl_ki_x", 0.0).toDouble();
-    data.ctlKiY = m_settings->value(prefix + "ctl_ki_y", 0.0).toDouble();
-    data.ctlKdX = m_settings->value(prefix + "ctl_kd_x", 0.0).toDouble();
-    data.ctlKdY = m_settings->value(prefix + "ctl_kd_y", 0.0).toDouble();
-    data.ctlTauUnwindSec = m_settings->value(prefix + "ctl_tau_unwind_sec", 0.030).toDouble();
-    data.ctlTauDerivSec = m_settings->value(prefix + "ctl_tau_deriv_sec", 0.020).toDouble();
-    data.ctlIMax = m_settings->value(prefix + "ctl_i_max", 0.0).toDouble();
-    data.ctlMaxOutputCounts = m_settings->value(prefix + "ctl_max_output_counts", 200).toInt();
-    data.ctlPFullScalePx = m_settings->value(prefix + "ctl_p_full_scale_px", 0.0).toDouble();
-    data.ctlPredictLeadMs = m_settings->value(prefix + "ctl_predict_lead_ms", 0.0).toDouble();
-    data.ctlPredictMaxVelocityPxPerSec =
-        m_settings->value(prefix + "ctl_predict_max_velocity_px_s", 0.0).toDouble();
-    data.ctlPredictMaxLeadRatio =
-        m_settings->value(prefix + "ctl_predict_max_lead_ratio", 0.0).toDouble();
-    data.ctlKPxPerCount = m_settings->value(prefix + "ctl_k_px_per_count", 0.0).toDouble();
-    data.ctlInflightBeta = m_settings->value(prefix + "ctl_inflight_beta", 1.6).toDouble();
-    data.ctlInflightDeadTimeMs = m_settings->value(prefix + "ctl_inflight_dead_time_ms", 46.0).toDouble();
     data.ctlYOffset = m_settings->value(prefix + "ctl_y_offset", 0.5).toDouble();
     data.ctlYOffsetMax = m_settings->value(prefix + "ctl_y_offset_max", 0.5).toDouble();
     data.ctlXOffset = m_settings->value(prefix + "ctl_x_offset", 0.5).toDouble();
     data.ctlXOffsetMax = m_settings->value(prefix + "ctl_x_offset_max", 0.5).toDouble();
-    data.ctlHysteresisRatio = m_settings->value(prefix + "ctl_hysteresis_ratio", 1.3).toDouble();
-    data.ctlMaxDistancePx = m_settings->value(prefix + "ctl_max_distance_px", 0.0).toDouble();
     data.ctlRandomSeed = m_settings->value(prefix + "ctl_random_seed", 0).toInt();
-    data.ctlMatchCenterRatio = m_settings->value(prefix + "ctl_match_center_ratio", 0.5).toDouble();
-    data.ctlAreaRatioTol = m_settings->value(prefix + "ctl_area_ratio_tol", 2.0).toDouble();
-    data.ctlKSnapMult = m_settings->value(prefix + "ctl_k_snap_mult", 1.15).toDouble();
-    data.ctlMinAspect = m_settings->value(prefix + "ctl_min_aspect", 0.2).toDouble();
-    data.ctlMaxAspect = m_settings->value(prefix + "ctl_max_aspect", 5.0).toDouble();
 
     return data;
 }

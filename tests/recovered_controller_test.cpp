@@ -3,6 +3,7 @@
 #include "control/recovered_aim_controller.h"
 #include "runtime/aim_loop.h"
 #include "runtime/aimpoint_recoil.h"
+#include "config/config.h"
 
 #include <algorithm>
 #include <cmath>
@@ -130,6 +131,60 @@ int main()
     }
 
     RecoveredPid pid;
+    // Source reports 166/513: crosshair enable controls the base Ki reversal
+    // gate in every parameter bank, independently of the following offset.
+    for (bool enabled : {false,true}) {
+        HotkeyProfile hk;
+        hk.crosshair_detect_enabled=enabled;
+        hk.recovered_pid.kiX=1;
+        hk.recovered_secondary_pid.kiX=2;
+        hk.recovered_scope_pid.kiX=3;
+        for(int bank=0;bank<3;++bank) {
+            const auto mapped=runtime::aim_loop::pidForProfile(hk,bank==2,bank==1);
+            check(mapped.preserveIntegralOnReverse==enabled && mapped.kiX==bank+1,
+                  "crosshair reversal flag reaches all three selected PID banks");
+        }
+        RecoveredPidConfig c;
+        c.kpX=c.kiX=c.kdX=0;
+        c.kpY=1.41f;c.kiY=.001f;c.kdY=.002f;
+        c.smoothMaxPixel=80;
+        c.preserveIntegralOnReverse=enabled;
+        RecoveredPid replay;replay.setConfig(c);
+        const auto a=replay.update({0,49.649238586},{},.1);
+        const auto b=replay.update({0,-50},{},.001);
+        const auto end=replay.update({0,-50},{},.001);
+        check(a.counts.y==24 && b.counts.y==-27 && end.counts.y==(enabled?-23:-24),
+              "source 513 three-frame reversal reproduces the integer branch difference");
+    }
+    for (float nextKi : {2.0f,.5f}) {
+        RecoveredPid p;RecoveredPidConfig c;
+        c.kpX=c.kpY=c.kdX=c.kdY=0;c.kiX=c.kiY=1;
+        c.preserveIntegralOnReverse=true;p.setConfig(c);
+        p.update({2,3},{},.1);
+        c.kiX=nextKi;p.setConfig(c);
+        const auto step=p.update({0,0},{},.01);
+        check(std::abs(step.integral.x-(nextKi>1?.2:0))<1e-6 &&
+              std::abs(step.integral.y-(nextKi>1?.3:0))<1e-6,
+              "source 121 increasing Ki preserves both integrals; decreasing clears both");
+    }
+    {
+        RecoveredPid p;RecoveredPidConfig c;
+        c.kpX=c.kpY=1;c.kiX=c.kiY=c.kdX=c.kdY=0;
+        c.deadzoneX=c.deadzoneY=0;p.setConfig(c);
+        p.update({1,0},{},.01); // Stores one-third count.
+        c.feedforwardX=.1f;p.setConfig(c);
+        check(p.update({1,0},{},.01).counts.x==1,
+              "FF-only edits preserve integer carry");
+        c.kpX=2;p.setConfig(c);
+        check(p.update({1,0},{},.01).counts.x==1,
+              "ordinary Kp update clears carry but does not skip the send");
+        c.segmentEnabled=true;c.segment=3;p.setConfig(c);
+        check(p.update({3,0},{},.01).counts.x!=0,
+              "same effective segment toggle does not skip the send");
+        c.kiX=40;c.feedforwardX=15;p.setConfig(c);
+        check(p.config().kiX==40 && p.config().feedforwardX==15,
+              "Ki and FF support the recovered UI ranges");
+    }
     RecoveredPidConfig config;
     config.kpX = config.kpY = 0.5f;
     config.kiX = config.kiY = 0.5f;
@@ -207,14 +262,6 @@ int main()
     check(dualSecond.size() == 1 &&
           std::abs(dualSecond[0].velocity.x - 23.2624) < 0.12,
           "dual join exposes E8 velocity from selected state row (183)");
-    RecoveredDualTracker withEvent;
-    withEvent.setFrameSize(256, 256);
-    withEvent.update({ row0, row1 }, 0.01);
-    const auto eventSecond = withEvent.update({ moved0, moved1 }, 0.01, { 5, -1 });
-    check(eventSecond.size() == 1 &&
-          std::abs(eventSecond[0].velocity.x - 129.1065) < 0.2 &&
-          std::abs(eventSecond[0].velocity.y + 21.1688) < 0.2,
-          "successful-move event changes both feedforward axes (186)");
     RecoveredDualTracker reversedOrder;
     reversedOrder.setFrameSize(256, 256);
     const auto reversedFirst = reversedOrder.update({ row1, row0 }, 0.01);
@@ -255,12 +302,11 @@ int main()
     eventInput.dtSec = 0.01;
     eventController.update(eventInput);
     eventInput.candidates = { moved0, moved1 };
-    eventInput.motionEventSum = { 5, -1 };
     const auto eventSelected = eventController.update(eventInput);
     check(eventSelected.engaged &&
-          std::abs(eventSelected.trackedVelocity.x - 129.1065) < 0.2 &&
-          std::abs(eventSelected.trackedVelocity.y + 21.1688) < 0.2,
-          "successful movement feedback reaches selected feedforward (91/186)");
+          std::abs(eventSelected.trackedVelocity.x - 23.2624) < 0.2 &&
+          eventSelected.trackedVelocity.y == 0,
+          "selected diagnostic velocity comes only from observed image motion");
 
     RecoveredAimController switching;
     ControllerConfig switchConfig = eventConfig;
@@ -413,5 +459,25 @@ int main()
           restoredPoint.anchor.y == lowPoint.anchor.y,
           "held recoil offset grows and resets without switching target");
 
+    {
+        ControllerConfig cc;cc.frameWidth=cc.frameHeight=320;cc.fovWidth=cc.fovHeight=320;cc.buckets.byClassId={Bucket::Aim,Bucket::Delete};
+        RecoveredPidConfig pid;pid.kpX=pid.kpY=1;
+        RecoveredAimController controller;controller.setConfig(cc,pid);
+        ControlInput in;in.dtSec=.01;in.cross={160,160};in.candidates={{{180,140,20,40},0,.9},{{230,140,20,40},1,.8}};
+        in.macro.classId=1;auto selected=controller.update(in);check(selected.hasTarget&&selected.targetClassId==1,"macro class selects requested class without mutating profile");
+        in.macro.partX=0;in.macro.partY=0;selected=controller.update(in);check(selected.anchor.x==selected.targetBox.x&&selected.anchor.y==selected.targetBox.y,"macro aim point applies within selected box");
+        in.macro.classId=-1;in.macro.command=1;in.macro.commandSerial=1;in.macro.x=190;in.macro.y=160;selected=controller.update(in);const int locked=selected.targetId;
+        in.candidates.push_back({{159,140,20,40},0,1});selected=controller.update(in);check(selected.targetId==locked,"macro target lock survives nearer candidate");
+        in.macro.speed=100;in.macro.smoothing=.5;selected=controller.update(in);check(std::hypot(selected.counts.x,selected.counts.y)<=2,"macro speed limit bounds output with integer carry");
+        in.macro.command=4;in.macro.commandSerial=2;selected=controller.update(in);check(!selected.hasTarget&&!selected.engaged,"macro clear target releases current frame");
+    }
+    {
+        ControllerConfig cc;cc.frameWidth=cc.frameHeight=320;cc.fovWidth=cc.fovHeight=320;
+        cc.buckets.byClassId={Bucket::Aim,Bucket::Aim};cc.classPriorityById={1,0};
+        RecoveredAimController controller;controller.setConfig(cc,RecoveredPidConfig{});
+        ControlInput in;in.dtSec=.01;in.cross={160,160};in.candidates={{{155,140,20,40},0,.9},{{220,140,20,40},1,.8}};
+        in.macro.command=2;in.macro.commandSerial=1;const auto out=controller.update(in);
+        check(out.targetClassId==1,"clearing macro overrides preserves configured class priority on first frame");
+    }
     return failures ? 1 : 0;
 }

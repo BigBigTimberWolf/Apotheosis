@@ -43,6 +43,14 @@ cv::Mat    g_clean_frame;
 int        g_pick_cursor_x = -1;
 int        g_pick_cursor_y = -1;
 bool       g_pick_cursor_inside = false;
+bool       g_pick_locked = false;
+int        g_pick_active_token = 0;
+int        g_pick_selected_x = -1;
+int        g_pick_selected_y = -1;
+cv::Rect   g_pick_magnifier_grid;
+int        g_pick_magnifier_cell = 0;
+int        g_pick_magnifier_origin_x = 0;
+int        g_pick_magnifier_origin_y = 0;
 cv::Rect   g_display_content;
 std::string g_preview_title;
 cv::Size g_view_source_size;
@@ -153,6 +161,11 @@ const char* followStateText(int state)
     case F::Remembered: return "READY";
     case F::Uncertain: return "UNKNOWN";
     case F::Burst: return "BURST";
+    case F::ErrorLearning: return "ERR-LEARN";
+    case F::ErrorHolding: return "ERR-HOLD";
+    case F::ErrorUnwinding: return "ERR-REDUCE";
+    case F::ErrorDisabled: return "OFF";
+    case F::ErrorReversed: return "ERR-RESET";
     default: return "LEARN";
     }
 }
@@ -441,7 +454,7 @@ void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
                 char line[240];
                 if (ov.engaged)
                 {
-                    std::snprintf(line, sizeof(line), "Motion(est) X/Y: %+.1f / %+.1f",
+                    std::snprintf(line, sizeof(line), "Error rate(px/s) X/Y: %+.1f / %+.1f",
                                   ov.follow_motion_x, ov.follow_motion_y);
                     draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 138),
                                       bgr(245, 245, 245), bgr(0, 0, 0));
@@ -449,8 +462,7 @@ void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
                                   followStateText(ov.follow_state_x), followStateText(ov.follow_state_y));
                     draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 120),
                                       bgr(100, 255, 180), bgr(0, 0, 0));
-                    std::snprintf(line, sizeof(line), "Seed(px) X/Y: %+.1f / %+.1f",
-                                  ov.follow_preset_x, ov.follow_preset_y);
+                    std::snprintf(line, sizeof(line), "Follow mode: error only");
                     draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 102),
                                       bgr(100, 255, 180), bgr(0, 0, 0));
                     std::snprintf(line, sizeof(line), "Follow gain X/Y: %.1f / %.1f",
@@ -632,6 +644,14 @@ void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
 
 void on_mouse(int event, int x, int y, int  , void*  )
 {
+    const int pickToken = crosshair::ArmedToken();
+    if (pickToken != g_pick_active_token) {
+        g_pick_active_token = pickToken;
+        g_pick_locked = false;
+        g_pick_cursor_inside = false;
+        g_pick_magnifier_grid = {};
+        g_pick_magnifier_cell = 0;
+    }
     if (event == cv::EVENT_LBUTTONDBLCLK && !crosshair::IsColorPickArmed() &&
         g_view_source_size.width > 0 && g_view_source_size.height > 0) {
         cv::resizeWindow(kWindowName, g_view_source_size.width, g_view_source_size.height);
@@ -641,23 +661,43 @@ void on_mouse(int event, int x, int y, int  , void*  )
         crosshair::CancelColorPick();
         return;
     }
+    int sourceX = -1;
+    int sourceY = -1;
+    bool overMagnifier = false;
     {
         std::lock_guard<std::mutex> lk(g_clean_mutex);
         if (g_clean_frame.empty() || g_display_content.width <= 0 || g_display_content.height <= 0) {
             g_pick_cursor_inside = false;
             return;
         }
-        x = cvFloor(double(x - g_display_content.x) * g_clean_frame.cols / g_display_content.width);
-        y = cvFloor(double(y - g_display_content.y) * g_clean_frame.rows / g_display_content.height);
-        if (x < 0 || y < 0 || x >= g_clean_frame.cols || y >= g_clean_frame.rows) {
+        overMagnifier = crosshair::IsColorPickArmed() &&
+            g_pick_magnifier_cell > 0 &&
+            g_pick_magnifier_grid.contains(cv::Point(x, y));
+        if (overMagnifier) {
+            const int cellX = (x - g_pick_magnifier_grid.x) / g_pick_magnifier_cell;
+            const int cellY = (y - g_pick_magnifier_grid.y) / g_pick_magnifier_cell;
+            sourceX = std::clamp(g_pick_magnifier_origin_x + cellX, 0, g_clean_frame.cols - 1);
+            sourceY = std::clamp(g_pick_magnifier_origin_y + cellY, 0, g_clean_frame.rows - 1);
+        } else {
+            sourceX = cvFloor(double(x - g_display_content.x) * g_clean_frame.cols / g_display_content.width);
+            sourceY = cvFloor(double(y - g_display_content.y) * g_clean_frame.rows / g_display_content.height);
+        }
+        if (sourceX < 0 || sourceY < 0 ||
+            sourceX >= g_clean_frame.cols || sourceY >= g_clean_frame.rows) {
             g_pick_cursor_inside = false;
             return;
         }
     }
     if (event == cv::EVENT_MOUSEMOVE)
     {
-        g_pick_cursor_x = x;
-        g_pick_cursor_y = y;
+        if (!overMagnifier && !g_pick_locked) {
+            g_pick_cursor_x = sourceX;
+            g_pick_cursor_y = sourceY;
+        }
+        if (overMagnifier || !g_pick_locked) {
+            g_pick_selected_x = sourceX;
+            g_pick_selected_y = sourceY;
+        }
         g_pick_cursor_inside = true;
         return;
     }
@@ -673,13 +713,25 @@ void on_mouse(int event, int x, int y, int  , void*  )
 
     if (event == cv::EVENT_LBUTTONDOWN)
     {
+        if (!overMagnifier) {
+            g_pick_cursor_x = sourceX;
+            g_pick_cursor_y = sourceY;
+            g_pick_selected_x = sourceX;
+            g_pick_selected_y = sourceY;
+            g_pick_cursor_inside = true;
+            g_pick_locked = true;
+            return;
+        }
+        if (!g_pick_locked) return;
+        g_pick_selected_x = sourceX;
+        g_pick_selected_y = sourceY;
         cv::Mat clean;
         {
             std::lock_guard<std::mutex> lk(g_clean_mutex);
             if (!g_clean_frame.empty()) g_clean_frame.copyTo(clean);
         }
         int h = 0, s = 0, v = 0;
-        if (crosshair::SampleRegionHSV(clean, x, y, crosshair::PickHalf(), h, s, v))
+        if (crosshair::SampleRegionHSV(clean, sourceX, sourceY, 0, h, s, v))
             crosshair::SubmitPickedColor(h, s, v);
     }
 }
@@ -687,38 +739,102 @@ void on_mouse(int event, int x, int y, int  , void*  )
 void draw_pick_overlay(PreviewCanvas& canvas)
 {
     if (canvas.empty() || canvas.type() != CV_8UC3) return;
-    if (!crosshair::IsColorPickArmed()) return;
+    if (!crosshair::IsColorPickArmed()) {
+        std::lock_guard<std::mutex> lk(g_clean_mutex);
+        g_pick_active_token = 0;
+        g_pick_locked = false;
+        g_pick_magnifier_grid = {};
+        g_pick_magnifier_cell = 0;
+        return;
+    }
 
-    draw_text_with_bg(canvas, "PICK: click=sample  right-click=cancel",
+    if (g_pick_active_token != crosshair::ArmedToken()) {
+        g_pick_active_token = crosshair::ArmedToken();
+        g_pick_locked = false;
+        g_pick_cursor_inside = false;
+        g_pick_magnifier_grid = {};
+        g_pick_magnifier_cell = 0;
+    }
+
+    draw_text_with_bg(canvas, "PICK: click image to lock; right-click cancel",
                       cv::Point(6, canvas.rows - 8), bgr(245, 245, 245), bgr(0, 0, 0));
 
-    if (!g_pick_cursor_inside) return;
+    if (!g_pick_cursor_inside) {
+        std::lock_guard<std::mutex> lk(g_clean_mutex);
+        g_pick_magnifier_grid = {};
+        g_pick_magnifier_cell = 0;
+        return;
+    }
 
     const int cx = g_pick_cursor_x;
     const int cy = g_pick_cursor_y;
-    const int half = crosshair::PickHalf();
-    const int ringR = half + 4;
+    preview_draw::rectangle(canvas, cv::Rect(cx, cy, 1, 1), bgr(0, 220, 255), 1, cv::LINE_8);
 
-    cv::Rect rr(cx - ringR, cy - ringR, 2 * ringR + 1, 2 * ringR + 1);
-    rr &= cv::Rect(0, 0, canvas.cols, canvas.rows);
-    if (rr.area() > 0)
+    constexpr int kPixels = 11;
+    constexpr int kHalf = kPixels / 2;
+    const int cell = std::clamp((std::min(canvas.image.cols, canvas.image.rows) - 48) / kPixels, 6, 16);
+    const int gridSize = cell * kPixels;
+    const cv::Rect grid(canvas.image.cols - gridSize - 8, 24, gridSize, gridSize);
+    if (grid.x < 2 || grid.y + grid.height + 20 >= canvas.image.rows) return;
+
+    cv::Mat pixels(kPixels, kPixels, CV_8UC3);
     {
-        const auto displayRoi = canvas.rect(rr) & cv::Rect(0, 0, canvas.image.cols, canvas.image.rows);
-        if (displayRoi.area() > 0) {
-            cv::Mat patch = canvas.image(displayRoi).clone();
-            cv::circle(patch, canvas.point(cv::Point(cx, cy)) - displayRoi.tl(), canvas.length(ringR),
-                       bgr(0, 220, 255), cv::FILLED, cv::LINE_AA);
-            cv::addWeighted(patch, 0.25, canvas.image(displayRoi), 0.75, 0.0, canvas.image(displayRoi));
+        std::lock_guard<std::mutex> lk(g_clean_mutex);
+        if (g_clean_frame.empty() || cx < 0 || cy < 0 ||
+            cx >= g_clean_frame.cols || cy >= g_clean_frame.rows) return;
+        for (int py = 0; py < kPixels; ++py) {
+            const int sy = std::clamp(cy + py - kHalf, 0, g_clean_frame.rows - 1);
+            for (int px = 0; px < kPixels; ++px) {
+                const int sx = std::clamp(cx + px - kHalf, 0, g_clean_frame.cols - 1);
+                pixels.at<cv::Vec3b>(py, px) = g_clean_frame.at<cv::Vec3b>(sy, sx);
+            }
         }
+        g_pick_magnifier_grid = grid;
+        g_pick_magnifier_cell = cell;
+        g_pick_magnifier_origin_x = cx - kHalf;
+        g_pick_magnifier_origin_y = cy - kHalf;
     }
 
-    preview_draw::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 0, 0), 2, cv::LINE_AA);
-    preview_draw::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 220, 255), 1, cv::LINE_AA);
+    cv::Mat gridView = canvas.image(grid);
+    cv::resize(pixels, gridView, grid.size(), 0, 0, cv::INTER_NEAREST);
+    for (int i = 1; i < kPixels; ++i) {
+        cv::line(canvas.image, {grid.x + i * cell, grid.y},
+                 {grid.x + i * cell, grid.y + gridSize}, bgr(75, 75, 75), 1);
+        cv::line(canvas.image, {grid.x, grid.y + i * cell},
+                 {grid.x + gridSize, grid.y + i * cell}, bgr(75, 75, 75), 1);
+    }
+    cv::rectangle(canvas.image, grid, bgr(255, 255, 255), 2);
+    const int selectedX = g_pick_selected_x - (cx - kHalf);
+    const int selectedY = g_pick_selected_y - (cy - kHalf);
+    if (selectedX >= 0 && selectedX < kPixels && selectedY >= 0 && selectedY < kPixels) {
+        const cv::Rect selected(grid.x + selectedX * cell, grid.y + selectedY * cell, cell, cell);
+        cv::rectangle(canvas.image, selected, bgr(0, 220, 255), 2);
+    }
+    draw_text_with_bg(canvas, "11x 1-pixel picker", {grid.x, grid.y - 5},
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+    draw_text_with_bg(canvas, g_pick_locked ? "Click a square to sample" : "Click image to lock view",
+                      {grid.x, grid.y + gridSize + 15},
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+}
 
-    cv::Rect foot(cx - half, cy - half, 2 * half + 1, 2 * half + 1);
-    foot &= cv::Rect(0, 0, canvas.cols, canvas.rows);
-    if (foot.area() > 0)
-        preview_draw::rectangle(canvas, foot, bgr(255, 255, 255), 1, cv::LINE_AA);
+void draw_color_lab_preview(PreviewCanvas& canvas)
+{
+    const auto bands = crosshair::ColorLabPreviewBands();
+    if (bands.empty() || canvas.empty() || canvas.type() != CV_8UC3) return;
+    cv::Mat background = canvas.image(canvas.content);
+    cv::Mat hsv, combined = cv::Mat::zeros(background.size(), CV_8UC1);
+    cv::cvtColor(background, hsv, cv::COLOR_BGR2HSV);
+    for (const auto& band : bands) {
+        cv::Mat match;
+        cv::inRange(hsv, cv::Scalar(band.h_low, band.s_min, band.v_min),
+                    cv::Scalar(band.h_high, band.s_max, band.v_max), match);
+        cv::bitwise_or(combined, match, combined);
+    }
+    cv::Mat highlighted = background.clone();
+    highlighted.setTo(bgr(45, 220, 70), combined);
+    cv::addWeighted(background, 0.55, highlighted, 0.45, 0, background);
+    draw_text_with_bg(canvas, "COLOR LAB: green = matched pixel", {6, canvas.rows - 28},
+                      bgr(120, 255, 140), bgr(0, 0, 0));
 }
 
 void render_replay_frame(PreviewCanvas& canvas,
@@ -822,7 +938,10 @@ void render_replay_frame(PreviewCanvas& canvas,
     {
         // All values come from this recorded frame, never the live overlay or
         // current settings (which may have changed since recording).
-        std::snprintf(diagnostics, sizeof(diagnostics), "Motion(est) X/Y: %+.1f / %+.1f",
+        const bool errorOnly = frame.follow_state_x >= control::FollowCompensator::ErrorLearning;
+        std::snprintf(diagnostics, sizeof(diagnostics), errorOnly
+                      ? "Error rate(px/s) X/Y: %+.1f / %+.1f"
+                      : "Motion(est) X/Y: %+.1f / %+.1f",
                       frame.follow_motion_x, frame.follow_motion_y);
         draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 138),
                           bgr(245, 245, 245), bgr(0, 0, 0));
@@ -830,7 +949,8 @@ void render_replay_frame(PreviewCanvas& canvas,
                       followStateText(frame.follow_state_x), followStateText(frame.follow_state_y));
         draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 120),
                           bgr(100, 255, 180), bgr(0, 0, 0));
-        std::snprintf(diagnostics, sizeof(diagnostics), "Seed(px) X/Y: %+.1f / %+.1f",
+        std::snprintf(diagnostics, sizeof(diagnostics), errorOnly
+                      ? "Follow mode: error only" : "Seed(px) X/Y: %+.1f / %+.1f",
                       frame.follow_preset_x, frame.follow_preset_y);
         draw_text_with_bg(canvas, diagnostics, cv::Point(6, canvas.rows - 102),
                           bgr(100, 255, 180), bgr(0, 0, 0));
@@ -1003,6 +1123,7 @@ void preview_loop()
                 frameCopy.copyTo(g_clean_frame);
                 g_display_content = canvas.content;
             }
+            draw_color_lab_preview(canvas);
             render_overlays(canvas, cfg);
             draw_pick_overlay(canvas);
             show_preview(canvas);

@@ -142,7 +142,7 @@ QWidget* PreviewWindow::makePlaceholder(const QString& title, const QString& ico
 
     auto* name = new QLabel(title);
     name->setAlignment(Qt::AlignCenter);
-    name->setStyleSheet(QStringLiteral("font-size:16px; font-weight:500; color:#52525B;"));
+    name->setStyleSheet(QStringLiteral("font-size:16px; font-weight:500; color:#BCB7AA;"));
     box->addWidget(name);
 
     auto* hint = new QLabel(QString::fromUtf8(u8"「%1」的真实内容将在完整版接入 —— 当前为新外壳预览").arg(title));

@@ -180,7 +180,7 @@ std::vector<TriggerAimClass> parse_trigger_classes(const std::string& raw)
 //   32768 个点, 写成 "-0.1234" 是 8 字符/点 ≈ 256KB, 写成整数 "1234" 是 5 字符
 //   ≈ 160KB, 且没有小数点解析开销。精度 1e-4 对"手绘路径"完全够 ——
 //   曲线的 Y 是【横向偏移比例】, 1e-4 远小于一个像素在框上的比例。
-// ★ 存到 ini 时走 SimpleIni 的多行值 (见 Config::save), 不让单行超长。
+// 存到 ini 时使用有起止标记的 SimpleIni 多行值。
 std::string serialize_custom_samples(const std::vector<float>& samples)
 {
     std::string out;
@@ -232,6 +232,46 @@ std::vector<float> parse_custom_samples(const std::string& raw)
     return out;
 }
 
+// Older versions wrapped this one INI value using indentation alone. SimpleIni
+// reads only the first line. Recover numeric continuation lines when they are
+// still present; subsequent saves write a proper delimited multiline value.
+std::unordered_map<std::string, std::string> legacy_custom_curves(
+    const std::filesystem::path& path)
+{
+    std::unordered_map<std::string, std::string> curves;
+    std::ifstream file(path);
+    std::string line, section;
+    bool collecting = false;
+    const auto trim = [](const std::string& text) {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{} :
+            text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    const auto numeric = [](const std::string& text) {
+        return !text.empty() && text.find_first_not_of("0123456789,+- \t\r") == std::string::npos;
+    };
+    while (std::getline(file, line)) {
+        const std::string text = trim(line);
+        if (text.size() >= 2 && text.front() == '[' && text.back() == ']') {
+            section = trim(text.substr(1, text.size() - 2));
+            collecting = false;
+            continue;
+        }
+        const auto equals = text.find('=');
+        if (equals != std::string::npos &&
+            trim(text.substr(0, equals)) == "aim_path_custom_samples") {
+            const std::string value = trim(text.substr(equals + 1));
+            collecting = numeric(value);
+            if (collecting) curves[section] = value;
+            else curves.erase(section);
+        } else if (collecting && !line.empty() &&
+                   (line.front() == ' ' || line.front() == '\t') && numeric(text)) {
+            curves[section] += "," + text;
+        } else collecting = false;
+    }
+    return curves;
+}
+
 }
 
 std::vector<std::string> Config::splitString(const std::string& str, char delimiter) const
@@ -267,6 +307,7 @@ void Config::writeDefaultsInPlace()
     capture_device = "";
     capture_source = "device";
     capture_stream_url.clear();
+    capture_ndi_source.clear();
     capture_format = "";
     capture_width = 0;
     capture_height = 0;
@@ -338,12 +379,14 @@ bool Config::loadConfig(const std::string& filename)
     }
 
     CSimpleIniA ini;
+    ini.SetMultiLine(true);
     SI_Error rc = ini.LoadFile(std::filesystem::u8path(target).wstring().c_str());
     if (rc < 0)
     {
         std::cerr << "[Config] Error parsing INI file: " << target << std::endl;
         return false;
     }
+    const auto legacyCurves = legacy_custom_curves(std::filesystem::u8path(target));
 
     auto get_string = [&](const char* section, const char* key, const std::string& defval) {
         const char* val = ini.GetValue(section, key, defval.c_str());
@@ -365,9 +408,10 @@ bool Config::loadConfig(const std::string& filename)
 
     capture_device = get_string("", "capture_device", "");
     capture_source = get_string("", "capture_source", "device");
-    if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp")
+    if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp" && capture_source != "ndi")
         capture_source = "device";
     capture_stream_url = get_string("", "capture_stream_url", "");
+    capture_ndi_source = get_string("", "capture_ndi_source", "");
     capture_format = get_string("", "capture_format", "");
     capture_width  = static_cast<int>(get_long("", "capture_width", 0));
     capture_height = static_cast<int>(get_long("", "capture_height", 0));
@@ -475,6 +519,7 @@ bool Config::loadConfig(const std::string& filename)
     auto_flash_area_percent = finiteSetting("auto_flash_area_percent", 5.0, 0.1, 100.0);
     auto_flash_key = get_string("", "auto_flash_key", "");
 
+    crosshair_algorithm = std::clamp(get_long("", "crosshair_algorithm", 0), 0, 1);
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
     crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
     crosshair_offset_y         = std::clamp(get_long("", "crosshair_offset_y", 0), -2048, 2048);
@@ -527,6 +572,7 @@ bool Config::loadConfig(const std::string& filename)
             CrosshairColorProfileConfig c;
             c.name    = get_string(sec, "name", "Color");
             c.enabled = get_bool(sec, "enabled", true);
+            c.exact_hsv = get_bool(sec, "exact_hsv", false);
             c.h_low   = std::clamp(get_long(sec, "h_low",   0),   0, 179);
             c.h_high  = std::clamp(get_long(sec, "h_high",  10),  0, 179);
             c.s_min   = std::clamp(get_long(sec, "s_min",   120), 0, 255);
@@ -564,6 +610,7 @@ bool Config::loadConfig(const std::string& filename)
             CrosshairColorProfileConfig c;
             c.name = get_string(sec, "name", "Laser");
             c.enabled = get_bool(sec, "enabled", true);
+            c.exact_hsv = get_bool(sec, "exact_hsv", false);
             c.h_low = std::clamp(get_long(sec, "h_low", 0), 0, 179);
             c.h_high = std::clamp(get_long(sec, "h_high", 10), 0, 179);
             c.s_min = std::clamp(get_long(sec, "s_min", 120), 0, 255);
@@ -602,6 +649,26 @@ bool Config::loadConfig(const std::string& filename)
         p.loopIntervalMs=get_long(s,"loop_interval_ms",20);
         std::istringstream ids(get_string(s,"classes",""));
         int classId; while(ids>>classId) if(classId>=0) p.classes.push_back(classId);
+        const int options=std::clamp(get_long(s,"option_count",0),0,64);
+        for(int j=0;j<options;++j) {
+            const auto prefix="option."+std::to_string(j)+".";
+            const auto key=macros::decodeText(get_string(s,(prefix+"key_hex").c_str(),"!"),get_string(s,(prefix+"key").c_str(),""));
+            if(!key.empty())p.options[key]=macros::decodeText(get_string(s,(prefix+"value_hex").c_str(),"!"),get_string(s,(prefix+"value").c_str(),""));
+        }
+        const int conditions=std::clamp(get_long(s,"condition_count",0),0,macros::maxConditions);
+        for(int j=0;j<conditions;++j) {
+            const auto prefix="condition."+std::to_string(j)+".";
+            macros::Condition c;
+            c.metric=get_string(s,(prefix+"metric").c_str(),"target.exists");
+            c.comparison=get_string(s,(prefix+"comparison").c_str(),"==");
+            c.text=macros::decodeText(get_string(s,(prefix+"text_hex").c_str(),"!"),get_string(s,(prefix+"text").c_str(),""));
+            c.value=get_double(s,(prefix+"value").c_str(),1);
+            c.upper=get_double(s,(prefix+"upper").c_str(),1);
+            c.classId=get_long(s,(prefix+"class").c_str(),-1);
+            c.parent=get_long(s,(prefix+"parent").c_str(),-1);
+            for(int k=0;k<4;++k)c.region[k]=get_long(s,(prefix+"region"+std::to_string(k)).c_str(),0);
+            p.conditions.push_back(c);
+        }
         const int count=std::clamp(get_long(s,"action_count",0),0,macros::maxActions);
         for(int j=0;j<count;++j) {
             const std::string prefix="action."+std::to_string(j)+".";
@@ -609,6 +676,8 @@ bool Config::loadConfig(const std::string& filename)
             a.type=static_cast<macros::ActionType>(get_long(s,(prefix+"type").c_str(),0));
             a.key=get_string(s,(prefix+"key").c_str(),"Key1");
             a.a=get_long(s,(prefix+"a").c_str(),100); a.b=get_long(s,(prefix+"b").c_str(),100);
+            a.c=get_long(s,(prefix+"c").c_str(),0); a.d=get_long(s,(prefix+"d").c_str(),0);
+            a.value=get_double(s,(prefix+"value").c_str(),0); a.text=macros::decodeText(get_string(s,(prefix+"text_hex").c_str(),"!"),get_string(s,(prefix+"text").c_str(),""));
             p.actions.push_back(a);
         }
         macros::normalize(p);
@@ -652,18 +721,8 @@ bool Config::loadConfig(const std::string& filename)
     // 全局选靶与稳定器
     target_hysteresis_ratio   = get_double("target_stabilizer", "target_hysteresis_ratio",   target_hysteresis_ratio);
     target_max_distance_px    = get_double("target_stabilizer", "target_max_distance_px",    target_max_distance_px);
-    target_match_center_ratio = get_double("target_stabilizer", "target_match_center_ratio", target_match_center_ratio);
-    target_area_ratio_tol     = get_double("target_stabilizer", "target_area_ratio_tol",     target_area_ratio_tol);
-    target_k_snap_mult        = get_double("target_stabilizer", "target_k_snap_mult",        target_k_snap_mult);
-    target_min_aspect         = get_double("target_stabilizer", "target_min_aspect",         target_min_aspect);
-    target_max_aspect         = get_double("target_stabilizer", "target_max_aspect",         target_max_aspect);
     target_hysteresis_ratio   = std::clamp(target_hysteresis_ratio, 1.0, 10.0);
     target_max_distance_px    = std::max(0.0, target_max_distance_px);
-    target_match_center_ratio = std::clamp(target_match_center_ratio, 1e-3, 10.0);
-    target_area_ratio_tol     = std::clamp(target_area_ratio_tol, 1.0, 100.0);
-    target_k_snap_mult        = std::clamp(target_k_snap_mult, 1e-3, 100.0);
-    target_min_aspect         = std::clamp(target_min_aspect, 1e-3, 100.0);
-    target_max_aspect         = std::clamp(target_max_aspect, 1e-3, 100.0);
 
     hotkeys.clear();
     bool migratedRecoilSpeed = false;
@@ -772,7 +831,6 @@ bool Config::loadConfig(const std::string& filename)
                 // be converted to a fixed diameter. Missing new fields use defaults.
             }
 
-            hk.ctl_kp_x = get_double(sec, "ctl_kp_x", hk.ctl_kp_x);
             hk.recovered_pid.kpX = static_cast<float>(get_double(sec, "recovered_pid_kp_x", hk.recovered_pid.kpX));
             hk.recovered_pid.kiX = static_cast<float>(get_double(sec, "recovered_pid_ki_x", hk.recovered_pid.kiX));
             hk.recovered_pid.kdX = static_cast<float>(get_double(sec, "recovered_pid_kd_x", hk.recovered_pid.kdX));
@@ -831,79 +889,16 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_scope_pid.followY = get_follow_strength(sec, "recovered_scope_pid_follow_y");
             hk.recovered_scope_pid.segmentEnabled = get_bool(sec, "recovered_scope_pid_segment_enabled", hk.recovered_scope_pid.segmentEnabled);
             hk.recovered_scope_pid.segment = static_cast<float>(get_double(sec, "recovered_scope_pid_segment", hk.recovered_scope_pid.segment));
-            hk.ctl_kp_y = get_double(sec, "ctl_kp_y", hk.ctl_kp_y);
-            hk.ctl_ki_x = get_double(sec, "ctl_ki_x", hk.ctl_ki_x);
-            hk.ctl_ki_y = get_double(sec, "ctl_ki_y", hk.ctl_ki_y);
-            hk.ctl_kd_x = get_double(sec, "ctl_kd_x", hk.ctl_kd_x);
-            hk.ctl_kd_y = get_double(sec, "ctl_kd_y", hk.ctl_kd_y);
-            hk.ctl_tau_unwind_sec = get_double(sec, "ctl_tau_unwind_sec", hk.ctl_tau_unwind_sec);
-            hk.ctl_tau_deriv_sec  = get_double(sec, "ctl_tau_deriv_sec",  hk.ctl_tau_deriv_sec);
-            hk.ctl_i_max          = get_double(sec, "ctl_i_max",          hk.ctl_i_max);
-            hk.ctl_max_output_counts =
-                static_cast<int>(get_double(sec, "ctl_max_output_counts", hk.ctl_max_output_counts));
-            hk.ctl_p_full_scale_px = get_double(sec, "ctl_p_full_scale_px", hk.ctl_p_full_scale_px);
-            hk.ctl_predict_lead_ms =
-                get_double(sec, "ctl_predict_lead_ms", hk.ctl_predict_lead_ms);
-            hk.ctl_predict_max_velocity_px_s =
-                get_double(sec, "ctl_predict_max_velocity_px_s", hk.ctl_predict_max_velocity_px_s);
-            hk.ctl_predict_max_lead_ratio =
-                get_double(sec, "ctl_predict_max_lead_ratio", hk.ctl_predict_max_lead_ratio);
-            hk.ctl_k_px_per_count =
-                get_double(sec, "ctl_k_px_per_count", hk.ctl_k_px_per_count);
-            hk.ctl_inflight_beta =
-                get_double(sec, "ctl_inflight_beta", hk.ctl_inflight_beta);
-            hk.ctl_inflight_dead_time_ms =
-                get_double(sec, "ctl_inflight_dead_time_ms", hk.ctl_inflight_dead_time_ms);
             hk.ctl_y_offset     = get_double(sec, "ctl_y_offset",     hk.ctl_y_offset);
             hk.ctl_y_offset_max = get_double(sec, "ctl_y_offset_max", hk.ctl_y_offset_max);
             hk.ctl_x_offset     = get_double(sec, "ctl_x_offset",     hk.ctl_x_offset);
             hk.ctl_x_offset_max = get_double(sec, "ctl_x_offset_max", hk.ctl_x_offset_max);
-            hk.ctl_hysteresis_ratio = get_double(sec, "ctl_hysteresis_ratio", hk.ctl_hysteresis_ratio);
             hk.ctl_enabled = get_bool(sec, "ctl_enabled", false);
-            hk.ctl_max_distance_px = get_double(sec, "ctl_max_distance_px", hk.ctl_max_distance_px);
-            hk.ctl_match_center_ratio = get_double(sec, "ctl_match_center_ratio", hk.ctl_match_center_ratio);
-            hk.ctl_area_ratio_tol = get_double(sec, "ctl_area_ratio_tol", hk.ctl_area_ratio_tol);
-            hk.ctl_k_snap_mult = get_double(sec, "ctl_k_snap_mult", hk.ctl_k_snap_mult);
-            hk.ctl_min_aspect = get_double(sec, "ctl_min_aspect", hk.ctl_min_aspect);
-            hk.ctl_max_aspect = get_double(sec, "ctl_max_aspect", hk.ctl_max_aspect);
             hk.ctl_random_seed =
                 static_cast<int>(get_double(sec, "ctl_random_seed", hk.ctl_random_seed));
 
-            // ── 开镜档 (自动开镜生效期间取代上面的默认档) ──────────────────
-            // ★ 缺键一律取结构体默认值(= 默认档的默认值), 所以老配置读进来
-            //   即使把开关打开, 也不会突然变成另一套参数。
             hk.scope_ctl_enabled = static_cast<int>(
                 get_double(sec, "ctl_scope_enabled", hk.scope_ctl_enabled));
-            hk.ctl_scope.kp_x = get_double(sec, "ctl_scope_kp_x", hk.ctl_scope.kp_x);
-            hk.ctl_scope.kp_y = get_double(sec, "ctl_scope_kp_y", hk.ctl_scope.kp_y);
-            hk.ctl_scope.ki_x = get_double(sec, "ctl_scope_ki_x", hk.ctl_scope.ki_x);
-            hk.ctl_scope.ki_y = get_double(sec, "ctl_scope_ki_y", hk.ctl_scope.ki_y);
-            hk.ctl_scope.kd_x = get_double(sec, "ctl_scope_kd_x", hk.ctl_scope.kd_x);
-            hk.ctl_scope.kd_y = get_double(sec, "ctl_scope_kd_y", hk.ctl_scope.kd_y);
-            hk.ctl_scope.tau_unwind_sec =
-                get_double(sec, "ctl_scope_tau_unwind_sec", hk.ctl_scope.tau_unwind_sec);
-            hk.ctl_scope.tau_deriv_sec =
-                get_double(sec, "ctl_scope_tau_deriv_sec", hk.ctl_scope.tau_deriv_sec);
-            hk.ctl_scope.i_max = get_double(sec, "ctl_scope_i_max", hk.ctl_scope.i_max);
-            hk.ctl_scope.max_output_counts = static_cast<int>(get_double(
-                sec, "ctl_scope_max_output_counts", hk.ctl_scope.max_output_counts));
-            hk.ctl_scope.p_full_scale_px =
-                get_double(sec, "ctl_scope_p_full_scale_px", hk.ctl_scope.p_full_scale_px);
-            hk.ctl_scope.predict_lead_ms =
-                get_double(sec, "ctl_scope_predict_lead_ms", hk.ctl_scope.predict_lead_ms);
-            hk.ctl_scope.predict_max_velocity_px_s = get_double(
-                sec, "ctl_scope_predict_max_velocity_px_s",
-                hk.ctl_scope.predict_max_velocity_px_s);
-            hk.ctl_scope.predict_max_lead_ratio = get_double(
-                sec, "ctl_scope_predict_max_lead_ratio", hk.ctl_scope.predict_max_lead_ratio);
-            hk.ctl_scope.k_px_per_count = get_double(
-                sec, "ctl_scope_k_px_per_count", hk.ctl_scope.k_px_per_count);
-            hk.ctl_scope.inflight_beta = get_double(
-                sec, "ctl_scope_inflight_beta", hk.ctl_scope.inflight_beta);
-            hk.ctl_scope.inflight_dead_time_ms = get_double(
-                sec, "ctl_scope_inflight_dead_time_ms", hk.ctl_scope.inflight_dead_time_ms);
-            hk.ctl_scope.random_seed = static_cast<int>(
-                get_double(sec, "ctl_scope_random_seed", hk.ctl_scope.random_seed));
 
             hk.trigger_enabled = get_bool(sec, "trigger_enabled", false);
             hk.trigger_mode = static_cast<int>(get_double(sec, "trigger_mode", 0));
@@ -925,7 +920,10 @@ bool Config::loadConfig(const std::string& filename)
             hk.trigger_classes = parse_trigger_classes(get_string(sec, "trigger_classes", ""));
             hk.trigger_loss_delay_ms = static_cast<int>(get_double(sec, "trigger_loss_delay_ms", hk.trigger_loss_delay_ms));
             hk.trigger_fire_delay = static_cast<int>(get_double(sec, "trigger_fire_delay", hk.trigger_fire_delay));
+            hk.trigger_prearm_enabled = get_bool(sec, "trigger_prearm_enabled", hk.trigger_prearm_enabled);
+            hk.trigger_prearm_expand_percent = static_cast<int>(get_double(sec, "trigger_prearm_expand_percent", hk.trigger_prearm_expand_percent));
             hk.trigger_fire_duration = static_cast<int>(get_double(sec, "trigger_fire_duration", hk.trigger_fire_duration));
+            hk.trigger_fire_mode = std::clamp(static_cast<int>(get_double(sec, "trigger_fire_mode", hk.trigger_fire_duration > 0 ? 0 : 3)), -1, 3);
             hk.trigger_fire_interval = static_cast<int>(get_double(sec, "trigger_fire_interval", hk.trigger_fire_interval));
             hk.trigger_y_percent = static_cast<int>(get_double(sec, "trigger_y_percent", hk.trigger_y_percent));
             hk.trigger_delay_jitter_ms = static_cast<int>(get_double(sec, "trigger_delay_jitter_ms", hk.trigger_delay_jitter_ms));
@@ -971,7 +969,10 @@ bool Config::loadConfig(const std::string& filename)
                 t.trigger_flash_disappear_ms = static_cast<int>(get_double(sec, "secondary_trigger_flash_disappear_ms", t.trigger_flash_disappear_ms));
                 t.trigger_loss_delay_ms = static_cast<int>(get_double(sec, "secondary_trigger_loss_delay_ms", t.trigger_loss_delay_ms));
                 t.trigger_fire_delay = static_cast<int>(get_double(sec, "secondary_trigger_fire_delay", t.trigger_fire_delay));
+                t.trigger_prearm_enabled = get_bool(sec, "secondary_trigger_prearm_enabled", t.trigger_prearm_enabled);
+                t.trigger_prearm_expand_percent = static_cast<int>(get_double(sec, "secondary_trigger_prearm_expand_percent", t.trigger_prearm_expand_percent));
                 t.trigger_fire_duration = static_cast<int>(get_double(sec, "secondary_trigger_fire_duration", t.trigger_fire_duration));
+                t.trigger_fire_mode = std::clamp(static_cast<int>(get_double(sec, "secondary_trigger_fire_mode", t.trigger_fire_duration > 0 ? 0 : 3)), -1, 3);
                 t.trigger_fire_interval = static_cast<int>(get_double(sec, "secondary_trigger_fire_interval", t.trigger_fire_interval));
                 t.trigger_y_percent = static_cast<int>(get_double(sec, "secondary_trigger_y_percent", t.trigger_y_percent));
                 t.trigger_delay_jitter_ms = static_cast<int>(get_double(sec, "secondary_trigger_delay_jitter_ms", t.trigger_delay_jitter_ms));
@@ -1001,7 +1002,9 @@ bool Config::loadConfig(const std::string& filename)
             hk.aim_path_wind_threshold = static_cast<int>(get_double(sec, "aim_path_wind_threshold", hk.aim_path_wind_threshold));
             {
                 // 手绘曲线采样点。★ 空值/缺失 ⇒ 保持 nullptr (模式 2 会退化成直线)。
-                const std::string cs = get_string(sec, "aim_path_custom_samples", "");
+                const auto legacy = legacyCurves.find(sec);
+                const std::string cs = legacy != legacyCurves.end() ? legacy->second :
+                    get_string(sec, "aim_path_custom_samples", "");
                 if (!cs.empty())
                 {
                     auto samples = parse_custom_samples(cs);
@@ -1087,16 +1090,6 @@ bool Config::loadConfig(const std::string& filename)
             ac.min_conf = std::clamp(ac.min_conf, 0.0f, 1.0f);
         }
 
-        // ── 瞄准控制器参数组 (默认档) ─────────────────────────────────────
-        // ★ 借道 AimCtlParams::clamp(): 默认档与开镜档共用【同一份】夹取规则,
-        //   不给同一组参数留两处会漂移的规则。
-        {
-            AimCtlParams p = ctlParamsOf(hk);
-            p.clamp();
-            applyCtlParams(hk, p);
-        }
-        // ── 瞄准控制器参数组 (开镜档) ─────────────────────────────────────
-        hk.ctl_scope.clamp();
         hk.scope_ctl_enabled = std::clamp(hk.scope_ctl_enabled, 0, 1);
 
         hk.ctl_y_offset = std::clamp(hk.ctl_y_offset, 0.0, 1.0);
@@ -1107,16 +1100,7 @@ bool Config::loadConfig(const std::string& filename)
         hk.ctl_x_offset_max = std::clamp(hk.ctl_x_offset_max, 0.0, 1.0);
         if (hk.ctl_x_offset > hk.ctl_x_offset_max)
             std::swap(hk.ctl_x_offset, hk.ctl_x_offset_max);
-        hk.ctl_hysteresis_ratio = std::clamp(hk.ctl_hysteresis_ratio, 1.0, 10.0);
 
-        hk.ctl_max_distance_px = std::max(0.0, hk.ctl_max_distance_px);
-        hk.ctl_match_center_ratio = std::clamp(hk.ctl_match_center_ratio, 1e-3, 10.0);
-        hk.ctl_area_ratio_tol = std::clamp(hk.ctl_area_ratio_tol, 1.0, 100.0);
-        hk.ctl_k_snap_mult = std::clamp(hk.ctl_k_snap_mult, 1e-3, 100.0);
-        hk.ctl_min_aspect = std::clamp(hk.ctl_min_aspect, 1e-3, 100.0);
-        hk.ctl_max_aspect = std::clamp(hk.ctl_max_aspect, 1e-3, 100.0);
-        if (hk.ctl_min_aspect > hk.ctl_max_aspect)
-            std::swap(hk.ctl_min_aspect, hk.ctl_max_aspect);
 
         auto clampTrigger = [](TriggerParams& t) {
             t.trigger_mode = std::clamp(t.trigger_mode, 0, 2);
@@ -1138,13 +1122,15 @@ bool Config::loadConfig(const std::string& filename)
             t.trigger_snap_cooldown_ms = std::clamp(t.trigger_snap_cooldown_ms, 1, 2000);
             t.trigger_flash_disappear_ms = std::clamp(t.trigger_flash_disappear_ms, 0, 2000);
             t.trigger_fire_delay = std::max(0, t.trigger_fire_delay);
+            t.trigger_prearm_expand_percent = std::clamp(t.trigger_prearm_expand_percent, 0, 300);
             t.trigger_fire_duration = std::max(0, t.trigger_fire_duration);
-            t.trigger_fire_interval = std::max(1, t.trigger_fire_interval);
+            t.trigger_fire_mode = std::clamp(t.trigger_fire_mode, -1, 3);
+            t.trigger_fire_interval = std::max(0, t.trigger_fire_interval);
             t.trigger_delay_jitter_ms = std::max(0, t.trigger_delay_jitter_ms);
             t.trigger_duration_jitter_ms = std::max(0, t.trigger_duration_jitter_ms);
             t.trigger_interval_jitter_ms = std::max(0, t.trigger_interval_jitter_ms);
             t.trigger_switch_cooldown_ms = std::max(0, t.trigger_switch_cooldown_ms);
-            t.trigger_loss_delay_ms = std::clamp(t.trigger_loss_delay_ms, 0, 2000);
+            t.trigger_loss_delay_ms = std::clamp(t.trigger_loss_delay_ms, 0, 1000);
             t.trigger_scope_delay_ms = std::max(0, t.trigger_scope_delay_ms);
             t.trigger_y_percent = std::clamp(t.trigger_y_percent, 10, 1000);
             if (t.trigger_auto_scope == 3) t.trigger_auto_scope = 0;
@@ -1270,6 +1256,7 @@ bool Config::saveConfig(const std::string& filename)
         << "capture_device = " << capture_device << "\n"
         << "capture_source = " << capture_source << "\n"
         << "capture_stream_url = " << capture_stream_url << "\n"
+        << "capture_ndi_source = " << capture_ndi_source << "\n"
         << "capture_format = " << capture_format << "\n"
         << "capture_width = " << capture_width << "\n"
         << "capture_height = " << capture_height << "\n"
@@ -1336,6 +1323,7 @@ bool Config::saveConfig(const std::string& filename)
         << "replay_playback_speed = " << replay_playback_speed << "\n\n";
 
     file << "# Crosshair color detector (palette + ROI; per-hotkey toggle lives on each [hotkey.N])\n"
+        << "crosshair_algorithm = " << crosshair_algorithm << "\n"
         << "crosshair_rect_w = "          << crosshair_rect_w          << "\n"
         << "crosshair_rect_h = "          << crosshair_rect_h          << "\n"
         << "crosshair_offset_y = "        << crosshair_offset_y        << "\n"
@@ -1438,36 +1426,12 @@ bool Config::saveConfig(const std::string& filename)
              << std::setprecision(4);
 
         file << std::fixed << std::setprecision(4)
-             << "ctl_enabled = "          << to_bool_str(hk.ctl_enabled) << "\n"
-             << "ctl_kp_x = "             << hk.ctl_kp_x << "\n"
-             << "ctl_kp_y = "             << hk.ctl_kp_y << "\n"
-             << "ctl_ki_x = "             << hk.ctl_ki_x << "\n"
-             << "ctl_ki_y = "             << hk.ctl_ki_y << "\n"
-             << "ctl_kd_x = "             << hk.ctl_kd_x << "\n"
-             << "ctl_kd_y = "             << hk.ctl_kd_y << "\n"
-             << "ctl_tau_unwind_sec = "   << hk.ctl_tau_unwind_sec << "\n"
-             << "ctl_tau_deriv_sec = "    << hk.ctl_tau_deriv_sec << "\n"
-             << "ctl_i_max = "            << hk.ctl_i_max << "\n"
-             << "ctl_p_full_scale_px = "  << hk.ctl_p_full_scale_px << "\n"
-             << "ctl_predict_lead_ms = "  << hk.ctl_predict_lead_ms << "\n"
-             << "ctl_predict_max_velocity_px_s = " << hk.ctl_predict_max_velocity_px_s << "\n"
-             << "ctl_predict_max_lead_ratio = "    << hk.ctl_predict_max_lead_ratio << "\n"
-             << "ctl_k_px_per_count = "  << hk.ctl_k_px_per_count << "\n"
-             << "ctl_inflight_beta = "          << hk.ctl_inflight_beta << "\n"
-             << "ctl_inflight_dead_time_ms = "  << hk.ctl_inflight_dead_time_ms << "\n"
-             << "ctl_y_offset = "         << hk.ctl_y_offset << "\n"
-             << "ctl_y_offset_max = "     << hk.ctl_y_offset_max << "\n"
-             << "ctl_x_offset = "         << hk.ctl_x_offset << "\n"
-             << "ctl_x_offset_max = "     << hk.ctl_x_offset_max << "\n"
-             << "ctl_hysteresis_ratio = " << hk.ctl_hysteresis_ratio << "\n"
-             << "ctl_max_output_counts = " << hk.ctl_max_output_counts << "\n"
-             << "ctl_max_distance_px = "    << hk.ctl_max_distance_px << "\n"
-             << "ctl_match_center_ratio = " << hk.ctl_match_center_ratio << "\n"
-             << "ctl_area_ratio_tol = "     << hk.ctl_area_ratio_tol << "\n"
-             << "ctl_k_snap_mult = "        << hk.ctl_k_snap_mult << "\n"
-             << "ctl_min_aspect = "         << hk.ctl_min_aspect << "\n"
-             << "ctl_max_aspect = "         << hk.ctl_max_aspect << "\n"
-             << "ctl_random_seed = "        << hk.ctl_random_seed << "\n";
+             << "ctl_enabled = " << to_bool_str(hk.ctl_enabled) << "\n"
+             << "ctl_y_offset = " << hk.ctl_y_offset << "\n"
+             << "ctl_y_offset_max = " << hk.ctl_y_offset_max << "\n"
+             << "ctl_x_offset = " << hk.ctl_x_offset << "\n"
+             << "ctl_x_offset_max = " << hk.ctl_x_offset_max << "\n"
+             << "ctl_random_seed = " << hk.ctl_random_seed << "\n";
 
         const auto& recovered = hk.recovered_pid;
         file << "recovered_pid_kp_x = " << recovered.kpX << "\n"
@@ -1521,30 +1485,7 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_scope_pid_follow_y = " << recoveredScope.followY << "\n"
              << "recovered_scope_pid_segment_enabled = " << to_bool_str(recoveredScope.segmentEnabled) << "\n"
              << "recovered_scope_pid_segment = " << recoveredScope.segment << "\n";
-        // ── 开镜档 (自动开镜生效期间取代上面的默认档) ────────────────────
-        // ★ 键名 = 默认档的键名前缀 "ctl_scope_", 一一对应, 方便手改与对照。
-        file << std::fixed << std::setprecision(4)
-             << "ctl_scope_enabled = "          << hk.scope_ctl_enabled << "\n"
-             << "ctl_scope_kp_x = "             << hk.ctl_scope.kp_x << "\n"
-             << "ctl_scope_kp_y = "             << hk.ctl_scope.kp_y << "\n"
-             << "ctl_scope_ki_x = "             << hk.ctl_scope.ki_x << "\n"
-             << "ctl_scope_ki_y = "             << hk.ctl_scope.ki_y << "\n"
-             << "ctl_scope_kd_x = "             << hk.ctl_scope.kd_x << "\n"
-             << "ctl_scope_kd_y = "             << hk.ctl_scope.kd_y << "\n"
-             << "ctl_scope_tau_unwind_sec = "   << hk.ctl_scope.tau_unwind_sec << "\n"
-             << "ctl_scope_tau_deriv_sec = "    << hk.ctl_scope.tau_deriv_sec << "\n"
-             << "ctl_scope_i_max = "            << hk.ctl_scope.i_max << "\n"
-             << "ctl_scope_p_full_scale_px = "  << hk.ctl_scope.p_full_scale_px << "\n"
-             << "ctl_scope_predict_lead_ms = "  << hk.ctl_scope.predict_lead_ms << "\n"
-             << "ctl_scope_predict_max_velocity_px_s = "
-             << hk.ctl_scope.predict_max_velocity_px_s << "\n"
-             << "ctl_scope_predict_max_lead_ratio = "
-             << hk.ctl_scope.predict_max_lead_ratio << "\n"
-             << "ctl_scope_k_px_per_count = "  << hk.ctl_scope.k_px_per_count << "\n"
-             << "ctl_scope_inflight_beta = "          << hk.ctl_scope.inflight_beta << "\n"
-             << "ctl_scope_inflight_dead_time_ms = "  << hk.ctl_scope.inflight_dead_time_ms << "\n"
-             << "ctl_scope_max_output_counts = " << hk.ctl_scope.max_output_counts << "\n"
-             << "ctl_scope_random_seed = "       << hk.ctl_scope.random_seed << "\n";
+        file << "ctl_scope_enabled = " << hk.scope_ctl_enabled << "\n";
 
         file << "trigger_enabled = "        << to_bool_str(hk.trigger_enabled) << "\n"
              << "trigger_mode = " << hk.trigger_mode << "\n"
@@ -1565,6 +1506,9 @@ bool Config::saveConfig(const std::string& filename)
              << "trigger_flash_disappear_ms = " << hk.trigger_flash_disappear_ms << "\n"
              << "trigger_classes = " << serialize_trigger_classes(hk.trigger_classes) << "\n"
              << "trigger_fire_delay = "     << hk.trigger_fire_delay << "\n"
+             << "trigger_prearm_enabled = " << (hk.trigger_prearm_enabled ? "true" : "false") << "\n"
+             << "trigger_prearm_expand_percent = " << hk.trigger_prearm_expand_percent << "\n"
+             << "trigger_fire_mode = " << hk.trigger_fire_mode << "\n"
              << "trigger_fire_duration = "  << hk.trigger_fire_duration << "\n"
              << "trigger_fire_interval = "  << hk.trigger_fire_interval << "\n"
              << "trigger_y_percent = "      << hk.trigger_y_percent << "\n"
@@ -1602,6 +1546,9 @@ bool Config::saveConfig(const std::string& filename)
              << "secondary_trigger_snap_cooldown_ms = " << t.trigger_snap_cooldown_ms << "\n"
              << "secondary_trigger_flash_disappear_ms = " << t.trigger_flash_disappear_ms << "\n"
              << "secondary_trigger_fire_delay = " << t.trigger_fire_delay << "\n"
+             << "secondary_trigger_prearm_enabled = " << (t.trigger_prearm_enabled ? "true" : "false") << "\n"
+             << "secondary_trigger_prearm_expand_percent = " << t.trigger_prearm_expand_percent << "\n"
+             << "secondary_trigger_fire_mode = " << t.trigger_fire_mode << "\n"
              << "secondary_trigger_fire_duration = " << t.trigger_fire_duration << "\n"
              << "secondary_trigger_fire_interval = " << t.trigger_fire_interval << "\n"
              << "secondary_trigger_y_percent = " << t.trigger_y_percent << "\n"
@@ -1637,14 +1584,14 @@ bool Config::saveConfig(const std::string& filename)
         if (hk.aim_path_custom_samples && !hk.aim_path_custom_samples->empty())
         {
             const auto& s = *hk.aim_path_custom_samples;
-            file << "aim_path_custom_samples = ";
+            file << "aim_path_custom_samples = <<<APOTHEOSIS_CURVE_END\n";
             for (size_t i = 0; i < s.size(); ++i)
             {
                 if (i) { file << ","; if (i % 64 == 0) file << "\n    "; }
                 file << static_cast<int>(std::lround(
                     std::clamp(static_cast<double>(s[i]), -1.0, 1.0) * 10000.0));
             }
-            file << "\n";
+            file << "\nAPOTHEOSIS_CURVE_END\n";
         }
         file << "aim_path_neural_trained = " << to_bool_str(hk.aim_path_neural_trained) << "\n"
              << "aim_path_neural_examples = " << hk.aim_path_neural_examples << "\n"
@@ -1671,6 +1618,7 @@ bool Config::saveConfig(const std::string& filename)
         file << "[crosshair_color." << i << "]\n"
              << "name = "    << c.name    << "\n"
              << "enabled = " << to_bool_str(c.enabled) << "\n"
+             << "exact_hsv = " << to_bool_str(c.exact_hsv) << "\n"
              << "h_low = "   << c.h_low   << "\n"
              << "h_high = "  << c.h_high  << "\n"
              << "s_min = "   << c.s_min   << "\n"
@@ -1685,6 +1633,7 @@ bool Config::saveConfig(const std::string& filename)
         file << "[laser_color." << i << "]\n"
              << "name = " << c.name << "\n"
              << "enabled = " << to_bool_str(c.enabled) << "\n"
+             << "exact_hsv = " << to_bool_str(c.exact_hsv) << "\n"
              << "h_low = " << c.h_low << "\n"
              << "h_high = " << c.h_high << "\n"
              << "s_min = " << c.s_min << "\n"
@@ -1696,12 +1645,9 @@ bool Config::saveConfig(const std::string& filename)
     file << "[target_stabilizer]\n"
          << "target_hysteresis_ratio = "   << target_hysteresis_ratio << "\n"
          << "target_max_distance_px = "    << target_max_distance_px << "\n"
-         << "target_match_center_ratio = " << target_match_center_ratio << "\n"
-         << "target_area_ratio_tol = "     << target_area_ratio_tol << "\n"
-         << "target_k_snap_mult = "        << target_k_snap_mult << "\n"
-         << "target_min_aspect = "         << target_min_aspect << "\n"
-         << "target_max_aspect = "         << target_max_aspect << "\n\n";
+         << "\n";
 
+    file << std::defaultfloat << std::setprecision(17);
     file << "[macro_editor]\n" << "enabled = " << to_bool_str(macro_programs_enabled)
          << "\nstop_key = " << macro_stop_key << "\ncount = " << macro_programs.size() << "\n\n";
     for(size_t i=0;i<macro_programs.size();++i) {
@@ -1714,12 +1660,27 @@ bool Config::saveConfig(const std::string& filename)
              << "\nmin_height_percent = " << p.minHeightPercent << "\nmax_height_percent = " << p.maxHeightPercent
              << "\nclasses = ";
         for(int id:p.classes) file << id << ' ';
+        file << "\noption_count = " << p.options.size() << "\ncondition_count = " << p.conditions.size() << '\n';
+        size_t optionIndex=0;
+        for(const auto& entry:p.options) {
+            const auto prefix="option."+std::to_string(optionIndex++)+".";
+            file<<prefix<<"key_hex = "<<macros::encodeText(entry.first)<<'\n'<<prefix<<"value_hex = "<<macros::encodeText(entry.second)<<'\n';
+        }
+        for(size_t j=0;j<p.conditions.size();++j) {
+            const auto& c=p.conditions[j];const auto prefix="condition."+std::to_string(j)+".";
+            file<<prefix<<"metric = "<<c.metric<<'\n'<<prefix<<"comparison = "<<c.comparison<<'\n'
+                <<prefix<<"text_hex = "<<macros::encodeText(c.text)<<'\n'<<prefix<<"value = "<<c.value<<'\n'
+                <<prefix<<"upper = "<<c.upper<<'\n'<<prefix<<"class = "<<c.classId<<'\n'<<prefix<<"parent = "<<c.parent<<'\n';
+            for(int k=0;k<4;++k)file<<prefix<<"region"<<k<<" = "<<c.region[k]<<'\n';
+        }
         file << "\naction_count = " << p.actions.size() << '\n';
         for(size_t j=0;j<p.actions.size();++j) {
             const auto& a=p.actions[j]; const auto prefix="action."+std::to_string(j)+".";
             file << prefix << "type = " << static_cast<int>(a.type) << '\n'
                  << prefix << "key = " << a.key << '\n' << prefix << "a = " << a.a << '\n'
-                 << prefix << "b = " << a.b << '\n';
+                 << prefix << "b = " << a.b << '\n' << prefix << "c = " << a.c << '\n'
+                 << prefix << "d = " << a.d << '\n' << prefix << "value = " << a.value << '\n'
+                 << prefix << "text_hex = " << macros::encodeText(a.text) << '\n';
         }
         file << '\n';
     }

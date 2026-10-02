@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include <opencv2/imgproc.hpp>
@@ -22,6 +23,8 @@ int  g_result_token = 0;
 int  g_result_h = 0;
 int  g_result_s = 0;
 int  g_result_v = 0;
+std::mutex g_lab_mutex;
+std::vector<ColorLabBand> g_lab_bands;
 }
 
 int ArmColorPick(int sampleHalf)
@@ -139,6 +142,18 @@ bool SampleRegionHSV(const cv::Mat& bgr, int cx, int cy, int half,
     s = median(sVals);
     v = median(vVals);
     return true;
+}
+
+void SetColorLabPreview(std::vector<ColorLabBand> bands)
+{
+    std::lock_guard<std::mutex> lk(g_lab_mutex);
+    g_lab_bands = std::move(bands);
+}
+
+std::vector<ColorLabBand> ColorLabPreviewBands()
+{
+    std::lock_guard<std::mutex> lk(g_lab_mutex);
+    return g_lab_bands;
 }
 
 }

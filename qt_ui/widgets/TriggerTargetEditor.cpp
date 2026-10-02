@@ -31,7 +31,7 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.fillRect(rect(), QColor("#F8FAFD"));
+        p.fillRect(rect(), QColor("#151517"));
         const double px = 100.0 * rule_.x_offset;
         const double py = 160.0 * (1.0 - rule_.y_offset);
         const double halfX = rule_.range_x_percent * 0.5;
@@ -47,13 +47,13 @@ protected:
         const auto rectAt = [&](double x, double y, double w, double h) {
             return QRectF(ox + x * scale, oy + y * scale, w * scale, h * scale);
         };
-        p.setPen(QPen(QColor("#64748B"), 2));
-        p.setBrush(QColor("#FFFFFF"));
+        p.setPen(QPen(QColor("#ABA697"), 2));
+        p.setBrush(QColor("#19191C"));
         p.drawRect(rectAt(0, 0, 100, 160));
-        p.setPen(QPen(QColor("#D946A4"), 2));
-        p.setBrush(QColor(217, 70, 164, 48));
+        p.setPen(QPen(QColor("#D5B56B"), 2));
+        p.setBrush(QColor(213, 181, 107, 48));
         p.drawRect(rectAt(px - halfX, py - halfY, halfX * 2, halfY * 2));
-        p.setPen(QPen(QColor("#D946A4"), 2));
+        p.setPen(QPen(QColor("#D5B56B"), 2));
         p.drawLine(QPointF(ox + px * scale - 6, oy + py * scale),
                    QPointF(ox + px * scale + 6, oy + py * scale));
         p.drawLine(QPointF(ox + px * scale, oy + py * scale - 6),

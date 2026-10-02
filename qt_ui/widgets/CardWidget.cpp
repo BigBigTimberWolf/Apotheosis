@@ -8,7 +8,7 @@
 #include <QVBoxLayout>
 
 namespace {
-constexpr char kAccent[] = "#5865D8";
+constexpr char kAccent[] = "#D5B56B";
 }
 
 CardWidget::CardWidget(const QString& title, QWidget* parent)

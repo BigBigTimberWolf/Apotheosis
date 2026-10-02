@@ -1,6 +1,27 @@
 #include "gpu_color_ops.h"
+#include "crosshair/am_centroid.h"
+#include "crosshair/centroid_cluster.h"
 
 #include <cuda_runtime.h>
+
+static __device__ int motion_luma(const unsigned char* p, int channels) {
+    return channels==1 ? int(p[0]) : (29*p[0]+150*p[1]+77*p[2]+128)>>8;
+}
+static __global__ void motion_thumbnail_kernel(const unsigned char* src, size_t step,
+    int width, int height, int channels, unsigned char* dst, size_t dstStep, int outWidth, int outHeight) {
+    const int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y*blockDim.y+threadIdx.y;
+    if(x>=outWidth || y>=outHeight) return;
+    const int x0=x*width/outWidth,x1=(x+1)*width/outWidth-1;
+    const int y0=y*height/outHeight,y1=(y+1)*height/outHeight-1;
+    dst[y*dstStep+x]=(motion_luma(src+y0*step+x0*channels,channels)+
+        motion_luma(src+y0*step+x1*channels,channels)+motion_luma(src+y1*step+x0*channels,channels)+
+        motion_luma(src+y1*step+x1*channels,channels)+2)/4;
+}
+void launch_motion_thumbnail(const unsigned char* src, size_t step, int width, int height,
+    int channels, unsigned char* dst, size_t dstStep, int outWidth, int outHeight, cudaStream_t stream) {
+    const dim3 block(16,16),grid((outWidth+15)/16,(outHeight+15)/16);
+    motion_thumbnail_kernel<<<grid,block,0,stream>>>(src,step,width,height,channels,dst,dstStep,outWidth,outHeight);
+}
 
 static __global__ void bgra_to_bgr_u8_kernel(
     const unsigned char* __restrict__ src, int srcStep,
@@ -291,14 +312,22 @@ static __global__ void crosshair_hsv_mask_kernel(
     const unsigned char* __restrict__ img, int step,
     int roi_x, int roi_y, int roi_w, int roi_h,
     const GpuHsvBand* __restrict__ bands, int band_count,
-    unsigned char* __restrict__ mask)
+    unsigned char* __restrict__ mask, int algorithm)
 {
     const int lx = blockIdx.x * blockDim.x + threadIdx.x;
     const int ly = blockIdx.y * blockDim.y + threadIdx.y;
     if (lx >= roi_w || ly >= roi_h) return;
     const int x = roi_x + lx, y = roi_y + ly;
     const unsigned char* p = img + static_cast<size_t>(y) * step + x * 3;
-    mask[ly * roi_w + lx] = hsv_band_match_bgr(p, bands, band_count) ? 1 : 0;
+    if (algorithm == 1) {
+        const auto hsv = crosshair::amHsv(p[0], p[1], p[2]);
+        bool hit = false;
+        for (int i = 0; i < band_count; ++i)
+            if (crosshair::amHsvMatches(hsv, bands[i])) { hit = true; break; }
+        mask[ly * roi_w + lx] = hit ? 1 : 0;
+    } else {
+        mask[ly * roi_w + lx] = hsv_band_match_bgr(p, bands, band_count) ? 1 : 0;
+    }
 }
 
 static __global__ void crosshair_morph_kernel(
@@ -426,6 +455,65 @@ static __global__ void crosshair_hsv_selected_cluster_kernel(
     atomicAdd(result + 3, y);
 }
 
+static __global__ void centroid_init(const unsigned char* mask, int n, int* labels,
+    crosshair::CentroidComponent* components) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=n)return;
+    labels[i]=mask[i]?i:-1;
+    components[i]=crosshair::CentroidComponent{};
+}
+static __device__ int centroid_root_atomic(int* labels,int i) {
+    int next;
+    while((next=atomicAdd(labels+i,0))!=i)i=next;
+    return i;
+}
+static __device__ void centroid_union(int* labels,int a,int b) {
+    for (;;) {
+        a=centroid_root_atomic(labels,a); b=centroid_root_atomic(labels,b);
+        if(a==b)return;
+        const int hi=max(a,b),lo=min(a,b);
+        if(atomicCAS(labels+hi,hi,lo)==hi)return;
+    }
+}
+static __global__ void centroid_connect(const unsigned char* mask,int w,int h,int* labels) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=w*h || !mask[i])return;
+    const int x=i%w,y=i/w;
+    if(x && mask[i-1])centroid_union(labels,i,i-1);
+    if(y) for(int dx=-1;dx<=1;++dx)
+        if(x+dx>=0 && x+dx<w && mask[i-w+dx])centroid_union(labels,i,i-w+dx);
+}
+static __global__ void centroid_stats(const unsigned char* mask,int w,int h,
+    const int* labels,crosshair::CentroidComponent* components) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=w*h || !mask[i])return;
+    int root=i; while(labels[root]!=root)root=labels[root];
+    auto* c=components+root; const int x=i%w,y=i/w;
+    atomicAdd(&c->count,1); atomicAdd(&c->sumX,x); atomicAdd(&c->sumY,y);
+    atomicMin(&c->left,x); atomicMax(&c->right,x);
+    atomicMin(&c->top,y); atomicMax(&c->bottom,y);
+}
+static __global__ void centroid_select(int w,int h,int reference_x,int reference_y,
+    const crosshair::CentroidComponent* components,unsigned long long* key) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=w*h || !crosshair::centroidComponentValid(components[i],w,h))return;
+    atomicMax(key,crosshair::centroidComponentKey(components[i],i,reference_x,reference_y));
+}
+static __global__ void centroid_selected_sum(int rx,int ry,int w,int h,
+    const crosshair::CentroidComponent* components,const unsigned long long* key,int* result) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=w*h || !*key)return;
+    const unsigned int seed=0xffffffffu-static_cast<unsigned int>(*key);
+    if(seed>=static_cast<unsigned int>(w*h))return;
+    const auto c=components[i];
+    if(i!=seed && !crosshair::centroidSameCluster(c,components[seed],w,h))return;
+    atomicAdd(result+1,c.count);
+    atomicAdd(result+2,c.sumX+rx*c.count); atomicAdd(result+3,c.sumY+ry*c.count);
+}
+static __global__ void centroid_validate(int* result,int min_pixels) {
+    if(result[1]<max(2,min_pixels))result[1]=result[2]=result[3]=0;
+}
+
 void launch_crosshair_hsv_reduce_bgr_u8(
     const unsigned char* img, size_t step,
     int width, int height,
@@ -433,7 +521,8 @@ void launch_crosshair_hsv_reduce_bgr_u8(
     const GpuHsvBand* bands, int band_count,
     int* result, unsigned long long* candidate_key,
     unsigned char* mask, unsigned char* scratch,
-    int close_radius, int min_pixels, int reference_x, int reference_y,
+    int* component_labels, crosshair::CentroidComponent* components,
+    int close_radius, int min_pixels, int reference_x, int reference_y, int algorithm,
     cudaStream_t stream)
 {
     if (!img || !bands || !result || !candidate_key || !mask || !scratch
@@ -450,7 +539,18 @@ void launch_crosshair_hsv_reduce_bgr_u8(
                     (roi_h + block.y - 1) / block.y);
     crosshair_hsv_mask_kernel<<<grid, block, 0, stream>>>(
         img, static_cast<int>(step),
-        roi_x, roi_y, roi_w, roi_h, bands, band_count, mask);
+        roi_x, roi_y, roi_w, roi_h, bands, band_count, mask, algorithm);
+    if (algorithm == 1) {
+        if (!component_labels || !components) return;
+        const int n=roi_w*roi_h, blocks=(n+255)/256;
+        centroid_init<<<blocks,256,0,stream>>>(mask,n,component_labels,components);
+        centroid_connect<<<blocks,256,0,stream>>>(mask,roi_w,roi_h,component_labels);
+        centroid_stats<<<blocks,256,0,stream>>>(mask,roi_w,roi_h,component_labels,components);
+        centroid_select<<<blocks,256,0,stream>>>(roi_w,roi_h,reference_x-roi_x,reference_y-roi_y,components,candidate_key);
+        centroid_selected_sum<<<blocks,256,0,stream>>>(roi_x,roi_y,roi_w,roi_h,components,candidate_key,result);
+        centroid_validate<<<1,1,0,stream>>>(result,min_pixels);
+        return;
+    }
     if (close_radius > 0)
     {
         crosshair_morph_kernel<<<grid, block, 0, stream>>>(

@@ -1,4 +1,6 @@
 #include "crosshair_runtime.h"
+#include "am_centroid.h"
+#include "centroid_cluster.h"
 
 #include <algorithm>
 #include <chrono>
@@ -66,6 +68,8 @@ struct GpuDetectorState
     unsigned long long* device_key = nullptr;
     unsigned char* device_mask = nullptr;
     unsigned char* device_scratch = nullptr;
+    int* device_labels = nullptr;
+    crosshair::CentroidComponent* device_components = nullptr;
     int* host_result = nullptr;
     bool initialized = false;
 
@@ -80,6 +84,8 @@ struct GpuDetectorState
             || cudaMalloc(reinterpret_cast<void**>(&device_key), sizeof(unsigned long long)) != cudaSuccess
             || cudaMalloc(reinterpret_cast<void**>(&device_mask), 512 * 512) != cudaSuccess
             || cudaMalloc(reinterpret_cast<void**>(&device_scratch), 512 * 512) != cudaSuccess
+            || cudaMalloc(reinterpret_cast<void**>(&device_labels), 512 * 512 * sizeof(int)) != cudaSuccess
+            || cudaMalloc(reinterpret_cast<void**>(&device_components), 512 * 512 * sizeof(crosshair::CentroidComponent)) != cudaSuccess
             || cudaMallocHost(reinterpret_cast<void**>(&host_result), sizeof(int) * 4) != cudaSuccess)
             return false;
         initialized = true;
@@ -93,11 +99,6 @@ GpuDetectorState& gpu_state()
     return *state;
 }
 
-bool target_gate_open()
-{
-    std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
-    return !detectionBuffer.boxes.empty() && !detectionBuffer.staleLocked();
-}
 
 }
 
@@ -126,12 +127,12 @@ void publish_static_ref(const PivotSnapshot& ref)
     g_static_ref = ref;
 }
 
-void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
+PivotSnapshot process_frame(const cv::Mat& bgrFrame, int64_t captured_ns, bool crosshair_only)
 {
     if (bgrFrame.empty() || bgrFrame.type() != CV_8UC3)
     {
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
 
     const int active_idx = runtime::g_active_hotkey_index.load();
@@ -145,24 +146,7 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
     if (active_idx < 0)
     {
         publish(PivotSnapshot{});
-        return;
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
-        if (detectionBuffer.boxes.empty())
-        {
-            { std::lock_guard<std::mutex> lock(g_laser_mutex); g_laser_smoother.reset(); }
-            publish(PivotSnapshot{});
-            return;
-        }
-
-        if (detectionBuffer.staleLocked())
-        {
-            { std::lock_guard<std::mutex> lock(g_laser_mutex); g_laser_smoother.reset(); }
-            publish(PivotSnapshot{});
-            return;
-        }
+        return {};
     }
 
     bool cross_enabled = false;
@@ -180,15 +164,16 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         if (active_idx >= static_cast<int>(cfg.hotkeys.size()))
         {
             publish(PivotSnapshot{});
-            return;
+            return {};
         }
         const auto& hk = cfg.hotkeys[active_idx];
         cross_enabled = hk.crosshair_detect_enabled;
+        if (crosshair_only && !cross_enabled) return {};
         laser_enabled = hk.laser_detect_enabled && !cross_enabled;
         if (!cross_enabled && !laser_enabled)
         {
             publish(PivotSnapshot{});
-            return;
+            return {};
         }
 
         if (laser_enabled) {
@@ -208,6 +193,7 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
             for (const auto& c : cfg.laser_colors) {
                 crosshair::CrosshairColorBand b;
                 b.name = c.name; b.enabled = c.enabled;
+                b.exact_hsv = c.exact_hsv;
                 b.h_low = c.h_low; b.h_high = c.h_high;
                 b.s_min = c.s_min; b.s_max = c.s_max;
                 b.v_min = c.v_min; b.v_max = c.v_max;
@@ -217,6 +203,7 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         }
 
         cross_settings.enabled         = cross_enabled;
+        cross_settings.algorithm = cfg.crosshair_algorithm;
         cross_settings.rect_w          = cfg.crosshair_rect_w;
         cross_settings.rect_h          = cfg.crosshair_rect_h;
         cross_settings.offset_y        = cfg.crosshair_offset_y;
@@ -227,11 +214,23 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         {
             crosshair::CrosshairColorBand b;
             b.name = c.name; b.enabled = c.enabled;
+            b.exact_hsv = c.exact_hsv;
             b.h_low = c.h_low; b.h_high = c.h_high;
             b.s_min = c.s_min; b.s_max = c.s_max;
             b.v_min = c.v_min; b.v_max = c.v_max;
             cross_has_color = cross_has_color || b.enabled;
             cross_settings.colors.push_back(std::move(b));
+        }
+    }
+
+    // Only the legacy laser path depends on previous target visibility.
+    if (laser_enabled) {
+        std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
+        if (detectionBuffer.boxes.empty() || detectionBuffer.staleLocked()) {
+            std::lock_guard<std::mutex> laserLock(g_laser_mutex);
+            g_laser_smoother.reset();
+            publish(PivotSnapshot{});
+            return {};
         }
     }
 
@@ -251,6 +250,7 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
     }
 
     PivotSnapshot snap;
+    snap.active_hotkey = active_idx;
     snap.ts = captured_ns > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(captured_ns))
                               : std::chrono::steady_clock::now();
     if (hit)
@@ -260,9 +260,10 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         snap.valid = true;
     }
     publish(snap);
+    return snap;
 }
 
-bool gpu_path_active()
+bool same_frame_crosshair_active()
 {
     const int active_idx = runtime::g_active_hotkey_index.load();
     if (active_idx < 0) return false;
@@ -281,14 +282,13 @@ bool cpu_path_active()
     return hk.laser_detect_enabled && !hk.crosshair_detect_enabled;
 }
 
-void process_gpu_frame(const GpuImage& frame)
+PivotSnapshot process_gpu_frame(const GpuImage& frame)
 {
-    if (frame.empty() || frame.channels() != 3 || !gpu_path_active()
-        || !target_gate_open())
+    if (frame.empty() || frame.channels() != 3 || !same_frame_crosshair_active())
     {
         g_last_gpu_hotkey = -1;
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
 
     const int active_idx = runtime::g_active_hotkey_index.load();
@@ -296,7 +296,7 @@ void process_gpu_frame(const GpuImage& frame)
     if (active_idx < 0 || active_idx >= static_cast<int>(snapshot->hotkeys.size()))
     {
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
 
     std::vector<GpuHsvBand> bands;
@@ -312,7 +312,7 @@ void process_gpu_frame(const GpuImage& frame)
     if (bands.empty())
     {
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
 
     const int roi_w = std::min(frame.cols(), std::max(4, snapshot->crosshair_rect_w));
@@ -328,7 +328,7 @@ void process_gpu_frame(const GpuImage& frame)
         ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(frame.captureNs()))
         : std::chrono::steady_clock::now();
     const auto previous_age = frame_time - previous.ts;
-    if (g_last_gpu_hotkey == active_idx && previous.valid
+    if (snapshot->crosshair_algorithm == 0 && g_last_gpu_hotkey == active_idx && previous.valid
         && previous_age >= std::chrono::steady_clock::duration::zero()
         && previous_age <= std::chrono::milliseconds(kFreshnessMs)
         && previous.x >= roi_x && previous.x < roi_x + roi_w
@@ -343,7 +343,7 @@ void process_gpu_frame(const GpuImage& frame)
     if (!state.ensure())
     {
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
     if (frame.readyEvent())
         cudaStreamWaitEvent(state.stream, frame.readyEvent(), 0);
@@ -354,7 +354,7 @@ void process_gpu_frame(const GpuImage& frame)
         || cudaMemsetAsync(state.device_key, 0, sizeof(unsigned long long), state.stream) != cudaSuccess)
     {
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
 
     launch_crosshair_hsv_reduce_bgr_u8(
@@ -363,27 +363,33 @@ void process_gpu_frame(const GpuImage& frame)
         state.device_bands, static_cast<int>(bands.size()),
         state.device_result, state.device_key,
         state.device_mask, state.device_scratch,
+        state.device_labels, state.device_components,
         std::clamp(snapshot->crosshair_close_radius, 0, 7),
         std::max(1, snapshot->crosshair_min_pixel_count),
-        reference_x, reference_y, state.stream);
+        reference_x, reference_y, snapshot->crosshair_algorithm, state.stream);
     if (cudaGetLastError() != cudaSuccess
         || cudaMemcpyAsync(state.host_result, state.device_result, sizeof(int) * 4,
                            cudaMemcpyDeviceToHost, state.stream) != cudaSuccess
         || cudaStreamSynchronize(state.stream) != cudaSuccess)
     {
         publish(PivotSnapshot{});
-        return;
+        return {};
     }
 
     PivotSnapshot out;
+    out.active_hotkey = active_idx;
     out.ts = frame.captureNs() > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(frame.captureNs()))
                                   : std::chrono::steady_clock::now();
     const int count = state.host_result[1];
-    if (count >= std::max(1, snapshot->crosshair_min_pixel_count))
+    if (count >= std::max(snapshot->crosshair_algorithm == 1 ? 2 : 1, snapshot->crosshair_min_pixel_count))
     {
         cv::Point2f hit(
             static_cast<float>(state.host_result[2]) / static_cast<float>(count),
             static_cast<float>(state.host_result[3]) / static_cast<float>(count));
+        if (snapshot->crosshair_algorithm == 1) {
+            hit.x = static_cast<float>(crosshair::amCentroidCoordinate(state.host_result[2], count));
+            hit.y = static_cast<float>(crosshair::amCentroidCoordinate(state.host_result[3], count));
+        }
         const float roi_left   = static_cast<float>(roi_x);
         const float roi_top    = static_cast<float>(roi_y);
         const float roi_right  = roi_left + static_cast<float>(roi_w);
@@ -397,6 +403,7 @@ void process_gpu_frame(const GpuImage& frame)
         }
     }
     publish(out);
+    return out;
 }
 
 }

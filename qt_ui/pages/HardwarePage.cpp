@@ -797,7 +797,7 @@ void HardwarePage::refreshStatus()
         {
             m_kbdStatusDot->setStyleSheet("color:#9CA3AF; font-size:16px;");
             m_kbdStatusText->setText(zh(u8"未配置串口 — 勾选上面的开关并选串口"));
-            m_kbdStatusText->setStyleSheet("color:#6B7280; font-size:13px;");
+            m_kbdStatusText->setStyleSheet("color:#ABA697; font-size:13px;");
             m_connectKbdBtn->setText(zh(u8"连接键盘"));
             m_connectKbdBtn->setEnabled(false);
         }

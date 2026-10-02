@@ -63,7 +63,7 @@ TargetPage::TargetPage(QWidget* parent)
 
     card->setToolTip(flowHelp);
     m_statusLabel = new QLabel;
-    m_statusLabel->setStyleSheet("color:#A1A1AA; font-size:12px;");
+    m_statusLabel->setStyleSheet("color:#A49E90; font-size:12px;");
     card->contentLayout()->addWidget(m_statusLabel);
 
     m_tableWidget = new QWidget;
@@ -73,11 +73,6 @@ TargetPage::TargetPage(QWidget* parent)
     card->contentLayout()->addWidget(m_tableWidget);
 
     layout->addWidget(card);
-
-    // ★ 全局选靶与稳定器那 7 项已搬到【控制 → 稳定器】页 (StabilizerPage)。
-    //   它们作用于控制器之前(锁谁、锁不锁得住), 和「准星找色」是同一层的东西,
-    //   所以和它并列放在「控制」组; 顺手修掉了原来那张卡标签颜色写死成
-    //   #D4D4D8(浅色主题下几乎看不见)的问题。
 
     layout->addStretch();
 
@@ -146,7 +141,7 @@ void TargetPage::rebuildTable()
 
         auto* row = new QWidget;
         row->setStyleSheet(
-            "QWidget#classRow { background:#FAFAFA; border:1px solid #E8E8EC; border-radius:8px; }");
+            "QWidget#classRow { background:#202023; border:1px solid #35332D; border-radius:8px; }");
         row->setObjectName("classRow");
         auto* rowLay = new QHBoxLayout(row);
         rowLay->setContentsMargins(12, 8, 8, 8);
@@ -154,19 +149,19 @@ void TargetPage::rebuildTable()
 
         auto* idLabel = new QLabel(QStringLiteral("[%1]").arg(cf.class_id));
         idLabel->setFixedWidth(36);
-        idLabel->setStyleSheet("color:#71717A; font-size:12px; font-weight:600;");
+        idLabel->setStyleSheet("color:#ABA697; font-size:12px; font-weight:600;");
         rowLay->addWidget(idLabel);
 
         QString displayName = cf.class_name.empty()
             ? QStringLiteral("class_%1").arg(cf.class_id)
             : QString::fromUtf8(cf.class_name.c_str());
         auto* nameLabel = new QLabel(displayName);
-        nameLabel->setStyleSheet("color:#3C3C44; font-size:13px; font-weight:500;");
+        nameLabel->setStyleSheet("color:#DCD7CA; font-size:13px; font-weight:500;");
         rowLay->addWidget(nameLabel, 1);
 
         auto* segWidget = new QWidget;
         segWidget->setStyleSheet(
-            "QWidget#seg { background:#F0F0F3; border-radius:6px; }");
+            "QWidget#seg { background:#26262A; border-radius:6px; }");
         segWidget->setObjectName("seg");
         auto* segLay = new QHBoxLayout(segWidget);
         segLay->setContentsMargins(3, 3, 3, 3);
@@ -186,7 +181,7 @@ void TargetPage::rebuildTable()
             } else {
                 btn->setStyleSheet(
                     QStringLiteral(
-                        "QPushButton{background:transparent; color:#71717A; border:none;"
+                        "QPushButton{background:transparent; color:#ABA697; border:none;"
                         " border-radius:5px; font-size:12px; padding:2px 10px;}"
                         "QPushButton:hover{background:%1; color:%2;}")
                         .arg(kBucketStyles[bucketIdx].hoverBg)

@@ -13,6 +13,7 @@ struct RecoveredPidConfig
     float kpX = 0.4f, kiX = 0.02f, kdX = 0.12f;
     float kpY = 0.4f, kiY = 0.02f, kdY = 0.12f;
     float deadzoneX = 5.0f, deadzoneY = 5.0f;
+    // FF input is selected track velocity (image px/s), without mouse-event scaling.
     float feedforwardX = 0.0f, feedforwardY = 0.0f;
     float smoothMaxPixel = 50.0f;
     bool segmentEnabled = false;

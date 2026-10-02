@@ -7,6 +7,9 @@
 namespace mouse_driver {
 // Reads user/external transitions. Our tagged SendInput events cannot retrigger macros.
 bool windowsPhysicalKeyPressed(int virtualKey);
+int64_t windowsWheelCounter(bool up);
+bool windowsTypeText(const std::string& utf8);
+bool windowsMoveAbsolute(int x,int y);
 bool windowsSetBlockedHotkeys(const std::bitset<256>& keys);
 class WindowsDriver final : public IDriver {
 public:

@@ -2,9 +2,12 @@
 
 #include <QWidget>
 #include <QList>
+#include <vector>
 #include "config/ConfigManager.h"
+#include "crosshair/color_lab.h"
 
 class QSlider;
+class QCheckBox;
 class QSpinBox;
 class QDoubleSpinBox;
 class QPushButton;
@@ -17,8 +20,10 @@ class CrosshairPage : public QWidget {
 
 public:
     explicit CrosshairPage(QWidget* parent = nullptr, bool laserMode = false);
+    ~CrosshairPage() override;
 
 private:
+    enum class PickRole { Direct, TargetSample, BackgroundSample };
     void loadConfig();
     void rebuildColorList();
     void saveCrosshairColors();
@@ -28,13 +33,18 @@ private:
     void removeColorAt(int index);
 
     void toggleColorPick();
+    void startColorPick(PickRole role);
     void pollPickedColor();
     void applyPickedColor(int h, int s, int v);
+    void updateLabPreview();
+    void applyLabProfile();
+    void clearLabSamples();
     void finishPicking();
 
     QSpinBox* m_rectW{};
     QSpinBox* m_rectH{};
     QSpinBox* m_offsetY{};
+    QComboBox* m_algorithm{};
 
     QSpinBox* m_minPixels{};
     QSpinBox* m_closeRadius{};
@@ -58,4 +68,12 @@ private:
     QPushButton* m_pickColorBtn{};
     QTimer* m_pickTimer{};
     int m_pickToken = 0;
+    PickRole m_pickRole = PickRole::Direct;
+    QPushButton* m_labTargetBtn{};
+    QPushButton* m_labBackgroundBtn{};
+    QPushButton* m_labApplyBtn{};
+    QCheckBox* m_labPreviewToggle{};
+    class QLabel* m_labSummary{};
+    std::vector<crosshair::ColorLabSample> m_labTargets;
+    std::vector<crosshair::ColorLabSample> m_labBackgrounds;
 };

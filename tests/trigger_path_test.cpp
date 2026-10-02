@@ -1,6 +1,7 @@
 
 #include "mouse/aim_path.h"
 #include "mouse/trigger_fsm.h"
+#include "mouse/trigger_prearm.h"
 #include "mouse/trigger_release.h"
 
 #include <cmath>
@@ -214,6 +215,99 @@ static void test_hold_mode()
         check(act(false, 20).release_left, "★ 离开命中区才松手");
         check(!f.pressed(), "松手后相位不再是 Pressed");
     }
+}
+
+static void test_hold_zone_grace()
+{
+    boss::TriggerFsm trigger;
+    boss::ScopeController scope;
+    boss::TriggerFsm::Input in;
+    auto tick = [&](bool rawZone, int trackId, int64_t at, int graceMs) {
+        const bool zone = trigger.holdZoneOnBriefMiss(rawZone, trackId, at, graceMs);
+        scope.tick(zone, true, 2, 0, at);
+        in.in_zone = zone;
+        in.prerequisite_ready = scope.ready(zone, 2, 0, at);
+        in.track_id = trackId;
+        in.now_ms = at;
+        return trigger.tick(in, true, 0, 0, 200, 0, 0, 0, 0);
+    };
+    check(tick(true, 7, 0, 100).press_left && scope.engaged(),
+          "sustained shot begins on the tracked target");
+    check(!tick(false, 7, 10, 100).release_left && scope.engaged(),
+          "brief zone miss keeps both fire and held scope active");
+    check(!tick(false, 7, 109, 100).release_left,
+          "one miss has one fixed deadline");
+    check(!tick(true, 7, 110, 100).release_left && trigger.pressed(),
+          "zone recovery cancels pending release without another press");
+    check(!tick(false, 7, 120, 100).release_left,
+          "later miss gets its own deadline");
+    check(tick(false, 7, 220, 100).release_left && !scope.engaged(),
+          "sustained shot and scope release at the deadline");
+
+    trigger.reset();
+    check(tick(true, 7, 300, 100).press_left, "new shot starts after release");
+    check(tick(false, 8, 301, 100).release_left,
+          "another tracked target cannot inherit the grace period");
+    trigger.reset();
+    check(tick(true, 7, 400, 100).press_left, "new shot starts for zero grace");
+    check(tick(false, 7, 401, 0).release_left,
+          "zero grace immediately releases outside the zone");
+    trigger.reset();
+    check(tick(true, 7, 500, 100).press_left, "new shot starts for reset");
+    check(!tick(false, 7, 501, 100).release_left && trigger.reset(),
+          "hotkey release still stops a sustained shot immediately");
+
+    check(tick(true, 7, 600, 100).press_left, "shot starts before zone-to-target loss");
+    check(!tick(false, 7, 610, 100).release_left &&
+          !boss::releaseOnTargetLoss(trigger, scope, 2, 650, 100).left,
+          "target loss continues the existing zone-miss deadline");
+    check(boss::releaseOnTargetLoss(trigger, scope, 2, 710, 100).left,
+          "switching from zone miss to target loss cannot double the grace");
+
+    check(tick(true, 7, 800, 100).press_left, "shot starts before target-to-zone loss");
+    check(!boss::releaseOnTargetLoss(trigger, scope, 2, 810, 100).left &&
+          !tick(false, 7, 850, 100).release_left,
+          "visible target outside zone continues the target-loss deadline");
+    check(tick(false, 7, 910, 100).release_left,
+          "switching from target loss to zone miss cannot double the grace");
+}
+
+static void test_prearm_waits_for_hit_zone()
+{
+    boss::TriggerPrearm prearm;
+    boss::TriggerFsm trigger;
+    boss::ScopeController scope;
+    prearm.update(true, true, 7, 0);
+    scope.tick(true, true, 2, 40, 0);
+    boss::TriggerFsm::Input in;
+    in.track_id = 7;
+    in.in_zone = false;
+    in.now_ms = 60;
+    in.prerequisite_ready = scope.ready(true, 2, 40, 60);
+    check(prearm.elapsedMs(7, 60) == 60 && in.prerequisite_ready,
+          "prearm finishes the wait and opens a held scope near the zone");
+    check(!trigger.tick(in, true, 100, 0, 200, 0, 0, 0, 0,
+                        0, prearm.elapsedMs(7, 60)).press_left,
+          "prearm never fires before the ordinary hit zone");
+    in.in_zone = true;
+    check(!trigger.tick(in, true, 100, 0, 200, 0, 0, 0, 0,
+                        0, prearm.elapsedMs(7, 60)).press_left,
+          "remaining first-shot wait applies on zone entry");
+    in.now_ms = 99;
+    check(!trigger.tick(in, true, 100, 0, 200, 0, 0, 0, 0).press_left,
+          "prearm does not fire before the reduced deadline");
+    in.now_ms = 100;
+    check(trigger.tick(in, true, 100, 0, 200, 0, 0, 0, 0).press_left,
+          "prearm fires on the original deadline after entering the hit zone");
+
+    prearm.update(true, true, 8, 120);
+    check(prearm.elapsedMs(8, 125) == 5 && prearm.elapsedMs(7, 125) == 0,
+          "a changed target starts a fresh prearm timer");
+    prearm.update(true, false, 8, 130);
+    check(prearm.elapsedMs(8, 140) == 0, "leaving the prearm region cancels credit");
+    prearm.update(true, true, 8, 150);
+    prearm.reset();
+    check(prearm.elapsedMs(8, 160) == 0, "hotkey release cancels prearm credit");
 }
 
 static void test_switch_cooldown()
@@ -716,6 +810,8 @@ int main()
     test_burst_mode();
     test_lua_interval_from_shot_start();
     test_hold_mode();
+    test_hold_zone_grace();
+    test_prearm_waits_for_hit_zone();
     test_switch_cooldown();
     test_reset_releases();
     test_target_loss_releases();

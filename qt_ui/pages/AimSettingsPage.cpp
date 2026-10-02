@@ -1,11 +1,8 @@
 #include "pages/AimSettingsPage.h"
 
-#include "control/sensitivity_calibrator.h"
-
 #include <QCheckBox>
 #include <QDialog>
 #include <QDropEvent>
-#include <QProgressBar>
 #include <QTimer>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -163,19 +160,6 @@ QLabel* AimSettingsPage::makeSectionTitle(const QString& text)
     return l;
 }
 
-QWidget* AimSettingsPage::makeDoubleRow(const char* obj, const char* label,
-                                        double lo, double hi, double step, double def)
-{
-    auto* sp = new NoWheelDoubleSpinBox;
-    sp->setRange(lo, hi);
-    sp->setSingleStep(step);
-    sp->setDecimals(3);
-    sp->setObjectName(QString::fromUtf8(obj));
-    sp->setValue(def);
-    m_ctlDoubles.push_back(sp);
-    return FormKit::fieldRow(QString::fromUtf8(label), sp);
-}
-
 void AimSettingsPage::attachTip(QWidget* row, const QString& tip)
 {
     if (!row || tip.isEmpty()) return;
@@ -185,28 +169,18 @@ void AimSettingsPage::attachTip(QWidget* row, const QString& tip)
         w->setToolTip(tip);
 }
 
-QWidget* AimSettingsPage::makeDoubleRowTip(const char* obj, const char* label,
-                                           double lo, double hi, double step,
-                                           double def, const QString& tip)
-{
-    auto* row = makeDoubleRow(obj, label, lo, hi, step, def);
-    attachTip(row, tip);
-    return row;
-}
-
-// 轨迹卡片专用：makeDoubleRow 一律塞进 m_ctlDoubles（那是 PID 的列表），
-// 但轨迹参数要进 m_pathDoubles —— 否则会被当成 PID 增益写进配置。
 QWidget* AimSettingsPage::makePathDoubleRow(const char* obj, const char* label,
                                             double lo, double hi, double step,
                                             double def, const QString& tip)
 {
-    auto* row = makeDoubleRow(obj, label, lo, hi, step, def);
-    // 从 m_ctlDoubles 末尾摘下来，改登记到 m_pathDoubles
-    if (!m_ctlDoubles.empty() && m_ctlDoubles.back()->objectName() == QString::fromUtf8(obj))
-    {
-        m_pathDoubles.push_back(m_ctlDoubles.back());
-        m_ctlDoubles.pop_back();
-    }
+    auto* sp = new NoWheelDoubleSpinBox;
+    sp->setRange(lo, hi);
+    sp->setSingleStep(step);
+    sp->setDecimals(3);
+    sp->setObjectName(QString::fromUtf8(obj));
+    sp->setValue(def);
+    m_pathDoubles.push_back(sp);
+    auto* row = FormKit::fieldRow(QString::fromUtf8(label), sp);
     attachTip(row, tip);
     return row;
 }
@@ -214,17 +188,14 @@ QWidget* AimSettingsPage::makePathDoubleRow(const char* obj, const char* label,
 QWidget* AimSettingsPage::makeIntRow(const char* obj, const char* label, int lo, int hi,
                                      int step, int def, const QString& tip)
 {
-    std::vector<QSpinBox*>* sink = &m_ctlInts;
     const QString name = QString::fromUtf8(obj);
-    if (name.startsWith(QLatin1String("wind")) ||
-             name.startsWith(QLatin1String("aimPath"))) sink = &m_pathInts;
 
     auto* sp = new NoWheelSpinBox;
     sp->setRange(lo, hi);
     sp->setSingleStep(step);
     sp->setObjectName(name);
     sp->setValue(def);
-    sink->push_back(sp);
+    m_pathInts.push_back(sp);
     auto* row = FormKit::fieldRow(QString::fromUtf8(label), sp);
     attachTip(row, tip);
     return row;
@@ -283,7 +254,7 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
     lay->setSpacing(8);
 
     auto* groupLabel = new QLabel(QStringLiteral("热键组（当前生效）"));
-    groupLabel->setStyleSheet("color:#A1A1AA; font-size:11px; font-weight:500;");
+    groupLabel->setStyleSheet("color:#A49E90; font-size:11px; font-weight:500;");
     lay->addWidget(groupLabel);
 
     auto* groupRow = new QHBoxLayout;
@@ -293,9 +264,9 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
     groupRow->addWidget(m_groupCombo, 1);
 
     const QString smallBtnSS =
-        "QPushButton{font-size:16px; color:#71717A; background:transparent;"
-        " border:1px solid rgba(0,0,0,0.08); border-radius:4px; padding:0;}"
-        "QPushButton:hover{color:#5E6AD2; border-color:#5E6AD2;}";
+        "QPushButton{font-size:16px; color:#ABA697; background:transparent;"
+        " border:1px solid rgba(213,181,107,0.08); border-radius:4px; padding:0;}"
+        "QPushButton:hover{color:#D5B56B; border-color:#D5B56B;}";
 
     auto* addGroupBtn = new QPushButton(QStringLiteral("+"));
     addGroupBtn->setFixedSize(28, 28);
@@ -321,7 +292,7 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
     auto* header = new QHBoxLayout;
     header->setContentsMargins(4, 6, 4, 0);
     m_leftTitle = new QLabel(QStringLiteral("热键 · 拖动排序"));
-    m_leftTitle->setStyleSheet("color:#A1A1AA; font-size:11px; font-weight:500;");
+    m_leftTitle->setStyleSheet("color:#A49E90; font-size:11px; font-weight:500;");
     m_leftTitle->setToolTip(QStringLiteral("相同按键使用已激活配置；不同按键同时按住时，下方优先，组合键优先。"));
     header->addWidget(m_leftTitle);
     header->addStretch();
@@ -341,9 +312,9 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
     m_profileList->setFrameShape(QFrame::NoFrame);
     m_profileList->setStyleSheet(
         "QListWidget{background:transparent; border:none; outline:none; padding:0;}"
-        "QListWidget::item{padding:0; margin:0 0 5px 0; border-radius:9px; background:#FFFFFF;"
-        " border:1px solid rgba(0,0,0,0.05);}"
-        "QListWidget::item:selected{background:#EEF0FC; border:1px solid #EEF0FC;}");
+        "QListWidget::item{padding:0; margin:0 0 5px 0; border-radius:9px; background:#19191C;"
+        " border:1px solid rgba(213,181,107,0.05);}"
+        "QListWidget::item:selected{background:#302A1E; border:1px solid #302A1E;}");
     lay->addWidget(m_profileList, 1);
 
     m_profileList->setToolTip(m_leftTitle->toolTip());
@@ -732,7 +703,7 @@ void AimSettingsPage::rebuildAimClassRows()
         auto* rowFrame = new QFrame;
         rowFrame->setObjectName("aimRow");
         rowFrame->setStyleSheet(
-            "QFrame#aimRow{background:#FAFAFB; border:1px solid rgba(0,0,0,0.06);"
+            "QFrame#aimRow{background:#202023; border:1px solid rgba(213,181,107,0.06);"
             " border-radius:8px;}");
         auto* rl = new QVBoxLayout(rowFrame);
         rl->setContentsMargins(12, 8, 10, 10);
@@ -743,11 +714,11 @@ void AimSettingsPage::rebuildAimClassRows()
 
         auto* priLabel = new QLabel(QStringLiteral("#%1").arg(idx + 1));
         priLabel->setFixedWidth(30);
-        priLabel->setStyleSheet("color:#5E6AD2; font-size:13px; font-weight:600; border:none;");
+        priLabel->setStyleSheet("color:#D5B56B; font-size:13px; font-weight:600; border:none;");
         top->addWidget(priLabel);
 
         auto* nameLabel = new QLabel(QStringLiteral("[%1] %2").arg(r.cid).arg(r.name));
-        nameLabel->setStyleSheet("color:#3C3C44; font-size:13px; font-weight:500; border:none;");
+        nameLabel->setStyleSheet("color:#DCD7CA; font-size:13px; font-weight:500; border:none;");
         top->addWidget(nameLabel, 1);
 
         auto makeIconBtn = [](const QString& glyph, const QString& color,
@@ -758,19 +729,19 @@ void AimSettingsPage::rebuildAimClassRows()
             b->setToolTip(tip);
             b->setStyleSheet(QStringLiteral(
                 "QPushButton{color:%1; background:transparent;"
-                " border:1px solid rgba(0,0,0,0.08); border-radius:6px;"
+                " border:1px solid rgba(213,181,107,0.08); border-radius:6px;"
                 " font-size:13px; padding:0;}"
                 "QPushButton:hover{color:%2; border-color:%2;}"
-                "QPushButton:disabled{color:#C8C8CE; border-color:rgba(0,0,0,0.05);}")
+                "QPushButton:disabled{color:#514C40; border-color:rgba(213,181,107,0.05);}")
                 .arg(color, hover));
             return b;
         };
 
-        auto* upBtn = makeIconBtn(QString::fromUtf8(u8"▲"), QStringLiteral("#71717A"),
-                                  QStringLiteral("#5E6AD2"),
+        auto* upBtn = makeIconBtn(QString::fromUtf8(u8"▲"), QStringLiteral("#ABA697"),
+                                  QStringLiteral("#D5B56B"),
                                   QString::fromUtf8(u8"上移（提高优先级）"));
-        auto* downBtn = makeIconBtn(QString::fromUtf8(u8"▼"), QStringLiteral("#71717A"),
-                                    QStringLiteral("#5E6AD2"),
+        auto* downBtn = makeIconBtn(QString::fromUtf8(u8"▼"), QStringLiteral("#ABA697"),
+                                    QStringLiteral("#D5B56B"),
                                     QString::fromUtf8(u8"下移（降低优先级）"));
         auto* delBtn = makeIconBtn(QString::fromUtf8(u8"✕"), QStringLiteral("#D25A5A"),
                                    QStringLiteral("#B83232"), QString::fromUtf8(u8"移除"));
@@ -795,7 +766,7 @@ void AimSettingsPage::rebuildAimClassRows()
         auto* rangeRow = new QHBoxLayout;
         rangeRow->setSpacing(8);
         auto* yLbl = new QLabel(QString::fromUtf8(u8"随机锁点 Y"));
-        yLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        yLbl->setStyleSheet("color:#ABA697; font-size:12px; border:none;");
         auto* yMinSpin = makeOffsetSpin(r.yMin);
         auto* yMaxSpin = makeOffsetSpin(r.yMax);
         yMinSpin->setToolTip(QString::fromUtf8(
@@ -814,7 +785,7 @@ void AimSettingsPage::rebuildAimClassRows()
         auto* xRangeRow = new QHBoxLayout;
         xRangeRow->setSpacing(8);
         auto* xLbl = new QLabel(QString::fromUtf8(u8"随机锁点 X"));
-        xLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        xLbl->setStyleSheet("color:#ABA697; font-size:12px; border:none;");
         auto* xMinSpin = makeOffsetSpin(r.xMin);
         auto* xMaxSpin = makeOffsetSpin(r.xMax);
         xMinSpin->setToolTip(QString::fromUtf8(
@@ -842,11 +813,11 @@ void AimSettingsPage::rebuildAimClassRows()
         bottom->setSpacing(10);
         auto* cLbl = new QLabel(QString::fromUtf8(u8"置信"));
         cLbl->setFixedWidth(32);
-        cLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        cLbl->setStyleSheet("color:#ABA697; font-size:12px; border:none;");
         auto* cVal = new QLabel(confText(cSlider->value()));
         cVal->setFixedWidth(38);
         cVal->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        cVal->setStyleSheet("color:#3C3C44; font-size:12px; border:none;");
+        cVal->setStyleSheet("color:#DCD7CA; font-size:12px; border:none;");
         bottom->addWidget(cLbl);
         bottom->addWidget(cSlider, 1);
         bottom->addWidget(cVal);
@@ -1080,22 +1051,21 @@ void AimSettingsPage::buildRecoveredControllerCard()
     scopeCtlCombo->addItem(QString::fromUtf8(u8"关闭：跟随当前参数"), 0);
     scopeCtlCombo->addItem(QString::fromUtf8(u8"自动开镜时使用独立参数"), 1);
     extraLayout->addWidget(FormKit::fieldRow(QString::fromUtf8(u8"开镜独立参数"), scopeCtlCombo));
-    m_scopeModeCombo = scopeCtlCombo;
 
     struct Row { const char* suffix; const char* label; double minimum; double maximum; double step; double value; };
     const Row xRows[] = {
         { "KpX", "比例 Kp", 0.0, 10.0, 0.01, 0.4 },
-        { "KiX", "积分 Ki", 0.0, 10.0, 0.01, 0.02 },
+        { "KiX", "积分 Ki", 0.0, 50.0, 0.01, 0.02 },
         { "KdX", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
-        { "FfX", "速度前馈", 0.0, 10.0, 0.0005, 0.0 },
+        { "FfX", "速度前馈 FF", 0.0, 20.0, 0.0005, 0.0 },
         { "DeadzoneX", "死区半径", 0.0, 200.0, 0.5, 5.0 },
         { "FollowX", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
     };
     const Row yRows[] = {
         { "KpY", "比例 Kp", 0.0, 10.0, 0.01, 0.4 },
-        { "KiY", "积分 Ki", 0.0, 10.0, 0.01, 0.02 },
+        { "KiY", "积分 Ki", 0.0, 50.0, 0.01, 0.02 },
         { "KdY", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
-        { "FfY", "速度前馈", 0.0, 10.0, 0.0005, 0.0 },
+        { "FfY", "速度前馈 FF", 0.0, 20.0, 0.0005, 0.0 },
         { "DeadzoneY", "死区半径", 0.0, 200.0, 0.5, 5.0 },
         { "FollowY", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
     };
@@ -1119,8 +1089,12 @@ void AimSettingsPage::buildRecoveredControllerCard()
             spin->setDecimals(suffix == QStringLiteral("FfX") ||
                               suffix == QStringLiteral("FfY") ? 4 : 3);
             spin->setValue(row.value);
+            if (suffix == QStringLiteral("KiX") || suffix == QStringLiteral("KiY"))
+                spin->setToolTip(QString::fromUtf8(u8"积累持续瞄准误差，积分上限等于 Ki。开启准星找色时保留反向旧积分，关闭时先清旧积分再积本帧。增大 Ki 保留积分，减小任一轴 Ki 清空两轴积分。与跟随补偿独立。"));
             if (suffix == QStringLiteral("FollowX") || suffix == QStringLiteral("FollowY"))
-                spin->setToolTip(QString::fromUtf8(u8"补偿跟随时持续存在的偏差。确认起步、变向或明显加速后，会短暂加快建立，再恢复正常微调。0 关闭；数值越大补偿建立越快，过大仍可能过冲。这是跟随补偿强度，不是提前帧数。"));
+                spin->setToolTip(QString::fromUtf8(u8"仅根据原瞄点与准星的持续误差积累补偿，不使用鼠标换算比例。越过原瞄点保留补偿并逐步调整；利用背景移动判断目标变向，确认后立即清空该轴旧补偿。背景不可靠时不触发变向清空。0 关闭，数值越大建立越快，过大仍可能过冲。"));
+            if (suffix == QStringLiteral("FfX") || suffix == QStringLiteral("FfY"))
+                spin->setToolTip(QString::fromUtf8(u8"根据跟踪器估计的目标在画面中的移动速度增加跟随输出，0 关闭。不使用固定 0.91 或鼠标反馈换算。与跟随补偿独立；原误差趋势 FF 的参数需重新调整。"));
             grid->addWidget(FormKit::fieldRow(QString::fromUtf8(row.label), spin), line, column);
         };
         for (int i = 0; i < static_cast<int>(std::size(xRows)); ++i)
@@ -1201,350 +1175,6 @@ void AimSettingsPage::buildRecoveredControllerCard()
     m_rightLayout->addWidget(card);
 }
 
-void AimSettingsPage::buildControllerCard()
-{
-    auto* card = new CardWidget(QStringLiteral("瞄准控制器（通用控制器层）"),
-                                QStringLiteral("adjustments"));
-    auto* cl = card->contentLayout();
-
-    auto* enable = new QCheckBox(QStringLiteral("★ 启用控制器（会真的往游戏机发鼠标位移）"));
-    enable->setObjectName("ctlEnabled");
-    enable->setToolTip(QString::fromUtf8(
-        u8"⚠️ 默认关闭。打开后本程序会真的动鼠标 —— 参数未在真机标定过，"
-        u8"第一次打开请先把最大位移调小、并准备好随时关掉。"));
-    cl->addWidget(enable);
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"增益（水平 x = 跟枪 / 垂直 y = 压枪）")));
-
-    struct D { const char* obj; const char* label; double lo, hi, step, def; const char* tip; };
-    const D gains[] = {
-        { "ctlKpX", "Kp · 水平", 0.0, 500.0, 0.5, 35.0,
-          "比例增益（跟枪 / 水平轴）。误差乘以它 = 本拍要走的位移。\n"
-          "调大：贴上去更快，但太大（配合 s_max 过高）会开始左右摆动。\n"
-          "★ 这是唯一非零的默认增益，调参先只动它。" },
-        { "ctlKpY", "Kp · 垂直", 0.0, 500.0, 0.5, 35.0,
-          "比例增益（压枪 / 垂直轴）。\n"
-          "和 Kp·水平分开，是因为压枪和跟枪的手感需求不同。\n"
-          "默认与水平相同。" },
-        { "ctlKiX", "Ki · 水平", 0.0, 100.0, 0.01, 0.0,
-          "积分增益（水平轴）。累积残差，用来消掉匀速目标留下的稳态滞后。\n"
-          "★ 默认 0（关闭）。开太大遇到目标急停会过冲、来回甩。\n"
-          "只在确认有稳态滞后时才加。" },
-        { "ctlKiY", "Ki · 垂直", 0.0, 100.0, 0.01, 0.0,
-          "积分增益（垂直轴）。默认 0（关闭），理由同水平轴。" },
-        { "ctlKdX", "Kd · 水平", 0.0, 100.0, 0.01, 0.0,
-          "微分增益（水平轴）。按误差变化速度提前刹车，抑制过冲。\n"
-          "★ 默认 0。它对检测噪声很敏感 —— 调大之前先确认框是稳的。" },
-        { "ctlKdY", "Kd · 垂直", 0.0, 100.0, 0.01, 0.0,
-          "微分增益（垂直轴）。默认 0，理由同水平轴。" },
-        { "ctlPFullScalePx", "P 项饱和 (像素, 0=不限)", 0.0, 2000.0, 1.0, 0.0,
-          "P 项连续饱和阈值（像素）。误差超过它之后 P 项不再增大。\n"
-          "★ 它负责『末段不冲过头』，取代了早期的死区。\n"
-          "★ 0 = 不限。设成 0 以外的值会让大甩枪的力度被削平。" },
-        { "ctlTauUnwindSec", "积分回吐时间常数 (秒)", 0.001, 5.0, 0.005, 0.030,
-          "误差【反向】时积分按 exp(-dt/τ) 回吐的时间常数（秒）。\n"
-          "越小 = 回吐越快，越不容易在目标变向时被旧积分顶着走。\n"
-          "★ 30ms 是历史调整后的起点，无实测依据。" },
-        { "ctlTauDerivSec", "D 项低通时间常数 (秒)", 0.0, 5.0, 0.005, 0.020,
-          "D 项的低通时间常数（秒）。目标急停时误差导数会出现尖峰，\n"
-          "低通用来削掉它，免得准星被朝『目标原来运动的方向』猛推一下。\n"
-          "★ 0 = 不低通（噪声会直接进 D 项）。" },
-        { "ctlIMax", "积分上限 (0=用输出限幅)", 0.0, 5000.0, 1.0, 0.0,
-          "积分项的上限。0 = 直接用输出限幅当上限。\n"
-          "限制积分是为了防止长时间同向误差把积分喂得过大，\n"
-          "一旦反向就变成一大坨甩不掉的输出。" },
-    };
-    for (const D& d : gains)
-        cl->addWidget(makeDoubleRowTip(d.obj, d.label, d.lo, d.hi, d.step, d.def,
-                                       QString::fromUtf8(d.tip)));
-
-    cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"输出限幅与随机化")));
-    cl->addWidget(makeIntRow("ctlMaxOutputCounts", "单拍最大位移 (计数)", 1, 1000, 1, 200,
-        QString::fromUtf8(u8"一拍最多发多少个鼠标计数（1 计数 = 链路的最小位移）。\n"
-        "它是最后一道安全闸：不管 PID 算出多大的值，单拍都不会超过它。\n"
-        "★ 调小 = 更安全但更慢；调大 = 甩枪更猛，但错的时候也更猛。\n"
-        "★ 第一次打开控制器建议先设小一点。")));
-    cl->addWidget(makeIntRow("ctlRandomSeed", "瞄点随机种子 (0=固定)", 0, 999999, 1, 0,
-        QString::fromUtf8(u8"瞄点 X/Y 随机位置的种子。0 = 用内部固定常数（相同锁定起始序号可复现）。\n"
-        "★ 非 0 时每次启动都会得到不同的抖动序列。\n"
-        "★ 只在「瞄准类别」里某一类的随机锁点上下限【不相等】时才有意义。")));
-
-    // ── 灵敏度折算系数 k（修正预测吃到的速度）──────────────────────────────
-    {
-        auto* title = makeSectionTitle(QString::fromUtf8(u8"灵敏度折算系数 (修正预测速度)"));
-        title->setToolTip(QString::fromUtf8(
-            u8"★ 下面「在途补偿」的速度取自画面观测，但这个观测值有系统性偏差：\n"
-            u8"准星每追近目标一截，画面里目标的相对位移就被抵消一截——追得越准，\n"
-            u8"观测到的速度越比真实速度小，预测因此总是显得「不够用」。\n"
-            u8"这里把自身下发的鼠标计数按 k(像素/计数) 折算回像素、加回观测速度，\n"
-            u8"就能拿到目标接近真实的速度。0 = 关闭这项修正（预测仍能用，只是偏保守）。"));
-        cl->addWidget(title);
-    }
-
-    {
-        auto* row = new QWidget;
-        auto* hl = new QHBoxLayout(row);
-        hl->setContentsMargins(0, 0, 0, 0);
-
-        auto* spinK = new NoWheelDoubleSpinBox;
-        spinK->setObjectName("ctlKPxPerCount");
-        spinK->setRange(0.0, 10.0);
-        spinK->setSingleStep(0.005);
-        spinK->setDecimals(4);
-        spinK->setValue(0.0);
-        m_ctlDoubles.push_back(spinK);
-
-        auto* lbl = new QLabel(QString::fromUtf8(u8"灵敏度折算系数 k (像素/计数, 0=关):"));
-        lbl->setToolTip(QString::fromUtf8(
-            u8"发 1 个鼠标计数，准星在画面上移动多少像素。\n"
-            u8"★ 填入你本机的实测值，即开启目标速度的自身运动修正。\n"
-            u8"★ 不知道填多少？点击右侧「测算灵敏度」一键在线拟合。"));
-
-        auto* btnCalib = new QPushButton(QString::fromUtf8(u8"测算灵敏度"));
-        btnCalib->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 4px 12px; border-radius: 4px;");
-
-        hl->addWidget(lbl);
-        hl->addWidget(spinK, 1);
-        hl->addWidget(btnCalib);
-        cl->addWidget(row);
-
-        connect(btnCalib, &QPushButton::clicked, this, [this, spinK]() {
-            showSensitivityCalibrateDialog(spinK);
-        });
-    }
-
-    // ── 在途补偿（预测提前量）────────────────────────────────────────────
-    {
-        auto* title = makeSectionTitle(QString::fromUtf8(u8"在途补偿 (预测提前量)"));
-        title->setToolTip(QString::fromUtf8(
-            u8"链路（采集 → 推理 → 瞄准 → 下发 → 游戏渲染）有几十毫秒延迟，"
-            u8"等这一拍算完，目标已经跑掉了。\n"
-            u8"在途补偿按目标速度把瞄准点往前推一段，抵消这段延迟。\n"
-            u8"★ 「预测提前时间」是总开关：填 0 则整个功能关闭，下面两项不生效。"));
-        cl->addWidget(title);
-    }
-
-    cl->addWidget(makeDoubleRowTip("ctlPredictLeadMs",
-        "预测提前时间 (毫秒, 0=关闭)", 0.0, 1000.0, 1.0, 0.0,
-        QString::fromUtf8(
-        u8"【总开关】预测提前帧数（0 关闭）= 整条链路的【全部延迟】。\n"
-        u8"由你自己测量后填入，把采集 / 推理 / 瞄准 / 下发 / 游戏渲染\n"
-        u8"全部算在这一个值里。\n"
-        u8"★ 只用这一个来源，程序不会再自动往里加任何东西 ——\n"
-        u8"  填多少就是多少，不会出现重复计算。\n"
-        u8"★ 0 = 关闭（默认）。关闭时行为与没有这个功能时完全一致。\n"
-        u8"★ 调大 = 更早打提前量，但太大在目标急停时会冲过头。\n"
-        u8"★ 日志里的 ref auto 是程序自己测到的链路延迟，仅供对照参考。")));
-
-    cl->addWidget(makeDoubleRowTip("ctlPredictMaxVelocityPxPerSec",
-        "速度上限 (像素/秒, 0=不限)", 0.0, 100000.0, 10.0, 0.0,
-        QString::fromUtf8(
-        u8"目标速度估计超过它时【钳住速度】—— 保留方向、只压大小。\n"
-        u8"钳住而不是放弃，是为了让提前量连续，不会时有时无。\n"
-        u8"★ 0 = 不限制（默认）。\n"
-        u8"★ 怎么定：先看日志里打出的 v= 实际速度值，再往上留点余量。\n"
-        u8"★ 定太低会让正常移动的目标被当成异常，提前量被白白压掉。")));
-
-    cl->addWidget(makeDoubleRowTip("ctlPredictMaxLeadRatio",
-        "预测距离上限 (目标框对角线倍数, 0=不限)", 0.0, 100.0, 0.05, 0.0,
-        QString::fromUtf8(
-        u8"预测推进量的硬上限，单位是【目标框对角线倍数】。\n"
-        u8"1.0 = 最多提前一个对角线；0.5 = 半个。\n"
-        u8"★ 0 = 不限制（默认）。\n"
-        u8"★ 用相对量而不是绝对像素，是为了让远近目标的保护尺度一致 ——\n"
-        u8"  固定的像素数在近处（框大）会显得太小、远处（框小）会显得太大。\n"
-        u8"★ 它是最后一道保险：异常速度估计不会把准星甩出去。")));
-
-    // ── 在途自身位移补偿 (Smith) ──────────────────────────────────────────
-    // ★ 与上面「在途补偿(预测提前量)」是两回事：那个补的是【目标】在延迟期间
-    //   走了多远；这个补的是【自己】已经发出去、画面还没显现的位移。两者互不
-    //   干扰，命名容易混，所以分成独立的小节。
-    {
-        auto* title = makeSectionTitle(QString::fromUtf8(u8"在途自身位移补偿 (Smith)"));
-        title->setToolTip(QString::fromUtf8(
-            u8"补偿窗口内已经发出去、游戏里已生效、但画面还没显现的自身"
-            u8"位移，会被控制器当成「目标还没动」重复下令，导致锁定目标后来回抖动。\n"
-            u8"这里把这部分位移从下一拍的输出里扣掉，纯计数域运算，不需要任何"
-            u8"灵敏度标定。窗口应按当前链路实际延迟设置。"));
-        cl->addWidget(title);
-    }
-
-    cl->addWidget(makeDoubleRowTip("ctlInflightBeta",
-        "在途补偿强度 (无量纲, 0=关闭)", 0.0, 3.0, 0.05, 1.6,
-        QString::fromUtf8(
-        u8"每拍从输出里扣掉「窗口内平均每拍已发出 counts」的这个倍数。\n"
-        u8"★ 1.0 = 理论上的精确抵消点；实测适度调高（1.6）比精确点收敛更快、"
-        u8"过冲更小，这是因为它顺带压掉了 PID 自身残留的超调。\n"
-        u8"★ 超过 2.0 在低帧率下开始发散（实测 60fps 尾段从 0.29px 恶化到"
-        u8"56px），上限 3.0 只是挡住填错量级的配置，不是可用值。\n"
-        u8"★ 0 = 关闭，与没有这个功能逐位相同。\n"
-        u8"★ 锁定目标后如果左右抖、必须靠降 Kp 才能压住，先把这个调到 1.6"
-        u8"再重新试拉枪速度。")));
-
-    cl->addWidget(makeDoubleRowTip("ctlInflightDeadTimeMs",
-        "补偿窗口 (毫秒)", 0.0, 1000.0, 1.0, 46.0,
-        QString::fromUtf8(
-        u8"Smith 计算最近多长时间内已下发、画面尚未显现的鼠标计数。\n"
-        u8"★ 46ms 是旧链路日志反推的默认值，当前硬件应按实际延迟调整。\n"
-        u8"★ 设为 0 或将补偿强度设为 0，均会关闭 Smith。\n"
-        u8"★ 这里与「预测提前时间」和「近点停稳观察时间」是独立参数。")));
-
-    card->setToolTip(QString::fromUtf8(
-        u8"★ 「稳定器」那 5 项与滞回倍数目前都是【占位值】，没有实测依据，"
-        u8"默认值只保证「程序能跑」。\n"
-        u8"★ 六个增益默认 Kp=35 / 其余 0，等价于历史单套行为 —— 是安全起点。\n"
-        u8"★ 改完立即生效：控制器每拍重读配置，不用重启会话。"));
-
-    auto commit = [this, enable]() {
-        if (m_loading) return;
-        const int ri = currentRuntimeIndex();
-        if (ri < 0) return;
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        if (ri >= static_cast<int>(config.hotkeys.size())) return;
-        HotkeyProfile& hp = config.hotkeys[ri];
-
-        auto d = [this](const char* n) { return findChild<QDoubleSpinBox*>(n)->value(); };
-        auto i = [this](const char* n) { return findChild<QSpinBox*>(n)->value(); };
-
-        hp.ctl_enabled          = enable->isChecked();
-        hp.ctl_kp_x             = d("ctlKpX");
-        hp.ctl_kp_y             = d("ctlKpY");
-        hp.ctl_ki_x             = d("ctlKiX");
-        hp.ctl_ki_y             = d("ctlKiY");
-        hp.ctl_kd_x             = d("ctlKdX");
-        hp.ctl_kd_y             = d("ctlKdY");
-        hp.ctl_tau_unwind_sec   = d("ctlTauUnwindSec");
-        hp.ctl_tau_deriv_sec    = d("ctlTauDerivSec");
-        hp.ctl_i_max            = d("ctlIMax");
-        hp.ctl_max_output_counts= i("ctlMaxOutputCounts");
-        hp.ctl_p_full_scale_px  = d("ctlPFullScalePx");
-        hp.ctl_predict_lead_ms  = d("ctlPredictLeadMs");
-        hp.ctl_predict_max_velocity_px_s = d("ctlPredictMaxVelocityPxPerSec");
-        hp.ctl_predict_max_lead_ratio    = d("ctlPredictMaxLeadRatio");
-        hp.ctl_k_px_per_count   = d("ctlKPxPerCount");
-        hp.ctl_inflight_beta    = d("ctlInflightBeta");
-        hp.ctl_inflight_dead_time_ms = d("ctlInflightDeadTimeMs");
-        hp.ctl_random_seed      = i("ctlRandomSeed");
-
-        ConfigBridge::instance().markDirty();
-    };
-
-    connect(enable, &QCheckBox::toggled, this, [commit](bool) { commit(); });
-    for (auto* sp : m_ctlDoubles)
-        connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [commit](double) { commit(); });
-    for (auto* sp : m_ctlInts)
-        connect(sp, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
-
-    m_rightLayout->addWidget(card);
-}
-
-void AimSettingsPage::showSensitivityCalibrateDialog(QDoubleSpinBox* spinK)
-{
-    auto* dlg = new QDialog(this);
-    dlg->setWindowTitle(QString::fromUtf8(u8"灵敏度折算系数 (k) 在线测算"));
-    dlg->resize(440, 260);
-
-    auto* layout = new QVBoxLayout(dlg);
-
-    const QString guide = QString::fromUtf8(
-        u8"<b>测算指引：</b><br>"
-        u8"1. 在游戏训练场中，将准星对准一个<b>静止的假人 / 靶子</b>。<br>"
-        u8"2. 点击下方的「开始采集」。<br>"
-        u8"3. 按住热键，<b>左右甩动鼠标 2 ~ 3 次</b>（产生画面目标相对位移）。<br>"
-        u8"4. 进度条跑满并出现计算结果后，点击「应用回填」即可！");
-    dlg->setToolTip(guide);
-
-    auto* statusLbl = new QLabel(QString::fromUtf8(u8"状态：等待开始..."));
-    statusLbl->setStyleSheet("font-weight: bold; color: #4da3ff; margin-top: 8px;");
-    layout->addWidget(statusLbl);
-
-    auto* pbar = new QProgressBar;
-    pbar->setRange(0, 100);
-    pbar->setValue(0);
-    layout->addWidget(pbar);
-
-    auto* resultLbl = new QLabel(QString::fromUtf8(u8"当前估算 k: -- px/count"));
-    resultLbl->setStyleSheet("font-size: 15px; font-weight: bold; color: #3fb950; margin: 6px 0;");
-    layout->addWidget(resultLbl);
-
-    auto* btnRow = new QWidget;
-    auto* hl = new QHBoxLayout(btnRow);
-    hl->setContentsMargins(0, 0, 0, 0);
-
-    auto* btnToggle = new QPushButton(QString::fromUtf8(u8"开始采集"));
-    btnToggle->setToolTip(guide);
-    btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
-
-    auto* btnApply = new QPushButton(QString::fromUtf8(u8"应用回填"));
-    btnApply->setEnabled(false);
-    btnApply->setStyleSheet("padding: 6px 16px;");
-
-    auto* btnCancel = new QPushButton(QString::fromUtf8(u8"关闭"));
-    btnCancel->setStyleSheet("padding: 6px 16px;");
-
-    hl->addWidget(btnToggle);
-    hl->addWidget(btnApply);
-    hl->addWidget(btnCancel);
-    layout->addWidget(btnRow);
-
-    auto* timer = new QTimer(dlg);
-
-    connect(btnToggle, &QPushButton::clicked, dlg, [btnToggle, timer]() {
-        auto& calib = control::globalSensitivityCalibrator();
-        if (!calib.isRunning())
-        {
-            calib.start();
-            btnToggle->setText(QString::fromUtf8(u8"停止采集"));
-            btnToggle->setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 6px 16px;");
-            timer->start(50);
-        }
-        else
-        {
-            calib.stop();
-            btnToggle->setText(QString::fromUtf8(u8"开始采集"));
-            btnToggle->setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;");
-            timer->stop();
-        }
-    });
-
-    connect(timer, &QTimer::timeout, dlg, [statusLbl, pbar, resultLbl, btnApply]() {
-        auto& calib = control::globalSensitivityCalibrator();
-        auto st = calib.status();
-        statusLbl->setText(QString::fromUtf8(u8"状态：%1").arg(QString::fromUtf8(st.hint)));
-        pbar->setValue(static_cast<int>(st.progress * 100.0));
-        if (st.estimatedK > 0.0)
-        {
-            resultLbl->setText(QString::fromUtf8(u8"当前估算 k: %1 px/count").arg(st.estimatedK, 0, 'f', 4));
-        }
-        if (st.ready)
-        {
-            btnApply->setEnabled(true);
-            btnApply->setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 6px 16px;");
-        }
-    });
-
-    connect(btnApply, &QPushButton::clicked, dlg, [dlg, spinK]() {
-        auto& calib = control::globalSensitivityCalibrator();
-        if (calib.estimatedK() > 0.0)
-        {
-            spinK->setValue(calib.estimatedK());
-        }
-        calib.stop();
-        dlg->accept();
-    });
-
-    connect(btnCancel, &QPushButton::clicked, dlg, [dlg]() {
-        control::globalSensitivityCalibrator().stop();
-        dlg->reject();
-    });
-
-    connect(dlg, &QDialog::finished, dlg, []() {
-        control::globalSensitivityCalibrator().stop();
-    });
-
-    dlg->exec();
-}
-
 void AimSettingsPage::buildTriggerCard()
 {
     auto* card = new CardWidget(QString::fromUtf8(u8"自动扳机流程"),
@@ -1581,312 +1211,6 @@ void AimSettingsPage::buildTriggerCard()
     m_rightLayout->addWidget(targetsCard);
 }
 
-
-namespace
-{
-
-// ── 开镜档的行表 ────────────────────────────────────────────────────────────
-//
-// ★ 说明文字不在这里重写一遍: 建行时按 mainObj 去「瞄准控制器」卡里取那个控件
-//   已有的 tooltip(见 buildScopeCtlCard 的 tipFromMainCard)。文案只有一份,
-//   两张卡的说明不会各说各话。
-// ★ 量程/步长/默认值必须与「瞄准控制器」卡【逐条一致】—— 这里列的只是数值。
-// ★ decimals == 0 ⇒ 整数行(QSpinBox); > 0 ⇒ 浮点行(QDoubleSpinBox)。
-struct ScopeRowDesc
-{
-    const char* mainObj;    // 「瞄准控制器」卡里的控件名 (取说明用)
-    const char* scopeObj;   // 本卡控件名
-    const char* label;      // 行标签 (FormKit 标签宽 88, 太长会被截)
-    double lo, hi, step, def;
-    int    decimals;
-};
-
-const ScopeRowDesc kScopeGainRows[] = {
-    { "ctlKpX", "scopeKpX", "Kp · 水平", 0.0,   500.0, 0.5,   35.0, 3 },
-    { "ctlKpY", "scopeKpY", "Kp · 垂直", 0.0,   500.0, 0.5,   35.0, 3 },
-    { "ctlKiX", "scopeKiX", "Ki · 水平", 0.0,   100.0, 0.01,   0.0, 3 },
-    { "ctlKiY", "scopeKiY", "Ki · 垂直", 0.0,   100.0, 0.01,   0.0, 3 },
-    { "ctlKdX", "scopeKdX", "Kd · 水平", 0.0,   100.0, 0.01,   0.0, 3 },
-    { "ctlKdY", "scopeKdY", "Kd · 垂直", 0.0,   100.0, 0.01,   0.0, 3 },
-    { "ctlPFullScalePx", "scopePFullScalePx", "P 项饱和 (像素, 0=不限)",
-      0.0, 2000.0, 1.0, 0.0, 3 },
-    { "ctlTauUnwindSec", "scopeTauUnwindSec", "积分回吐时间常数 (秒)",
-      0.001, 5.0, 0.005, 0.030, 3 },
-    { "ctlTauDerivSec", "scopeTauDerivSec", "D 项低通时间常数 (秒)",
-      0.0, 5.0, 0.005, 0.020, 3 },
-    { "ctlIMax", "scopeIMax", "积分上限 (0=用输出限幅)", 0.0, 5000.0, 1.0, 0.0, 3 },
-};
-
-const ScopeRowDesc kScopeLimitRows[] = {
-    { "ctlMaxOutputCounts", "scopeMaxOutputCounts", "单拍最大位移 (计数)",
-      1.0, 1000.0, 1.0, 200.0, 0 },
-    { "ctlRandomSeed", "scopeRandomSeed", "瞄点随机种子 (0=固定)",
-      0.0, 999999.0, 1.0, 0.0, 0 },
-};
-
-const ScopeRowDesc kScopeSensitivityRows[] = {
-    { "ctlKPxPerCount", "scopeKPxPerCount", "灵敏度折算系数 k (像素/计数, 0=关)",
-      0.0, 10.0, 0.005, 0.0, 4 },
-};
-
-const ScopeRowDesc kScopePredictRows[] = {
-    { "ctlPredictLeadMs", "scopePredictLeadMs", "预测提前时间 (毫秒, 0=关闭)",
-      0.0, 1000.0, 1.0, 0.0, 3 },
-    { "ctlPredictMaxVelocityPxPerSec", "scopePredictMaxVelocityPxPerSec",
-      "速度上限 (像素/秒, 0=不限)", 0.0, 100000.0, 10.0, 0.0, 3 },
-    { "ctlPredictMaxLeadRatio", "scopePredictMaxLeadRatio",
-      "预测距离上限 (框对角线倍数, 0=不限)", 0.0, 100.0, 0.05, 0.0, 3 },
-};
-
-const ScopeRowDesc kScopeInflightRows[] = {
-    { "ctlInflightBeta", "scopeInflightBeta", "在途补偿强度 (无量纲, 0=关闭)",
-      0.0, 3.0, 0.05, 1.6, 3 },
-    { "ctlInflightDeadTimeMs", "scopeInflightDeadTimeMs", "补偿窗口 (毫秒)",
-      0.0, 1000.0, 1.0, 46.0, 3 },
-};
-
-
-}
-
-// ── 开镜档: 自动开镜生效期间取代「瞄准控制器」的整组参数 ────────────────────
-//
-// ★ 为什么需要它: 开镜后游戏内灵敏度被倍率放大, 镜前调好的一套增益与灵敏度
-//   折算填进镜内可能过冲。这里给镜内一套独立
-//   参数, 且只在【自动开镜真的按下了右键、并且你还按着热键】的期间生效 ——
-//   判定在 runtime/aim_loop.cpp。
-// ★ 开关是「自动扳机 → 自动开镜 → 开镜期间」那个下拉框。选「跟随热键」时这
-//   一整套不生效, 逐拍与没有这个功能时完全一致。
-void AimSettingsPage::buildScopeCtlCard()
-{
-    auto* card = new CardWidget(QString::fromUtf8(u8"开镜独立瞄准参数"),
-                                QStringLiteral("adjustments"));
-    auto* cl = card->contentLayout();
-
-    card->setToolTip(QString::fromUtf8(
-        u8"这里的参数【整组取代】「瞄准控制器」卡里的同名参数, 只在「自动扳机流程 → "
-        u8"自动开镜」真的按下右键、并且你还按着热键的那几拍生效。\n"
-        u8"★ 开关在本卡片的「开镜期间」下拉框。\n"
-        u8"★ 量程与默认值跟「瞄准控制器」卡逐条一致; 说明文字直接取那张卡的, 只有一份。\n"
-        u8"★ 选靶 / 稳定器 / 滞回倍数 / 瞄点 Y 这些【不属于控制器增益】的参数仍然"
-        u8"只有热键一份, 不随开镜切档 —— 它们管的是「瞄谁」, 不是「用多大力」。"));
-
-    // ── 一键复制 ─────────────────────────────────────────────────────────
-    auto* copyTitle = makeSectionTitle(QString::fromUtf8(u8"一键复制"));
-    cl->addWidget(copyTitle);
-    m_scopeParamRows.push_back(copyTitle);
-
-    m_scopeCopyCombo = new QComboBox;
-    m_scopeCopyCombo->setObjectName("scopeCopySource");
-    auto* copyBtn = new QPushButton(QString::fromUtf8(u8"复制它的默认参数"));
-    copyBtn->setObjectName("scopeCopyBtn");
-    copyBtn->setCursor(Qt::PointingHandCursor);
-
-    auto* copyRow = new QWidget;
-    {
-        auto* hl = new QHBoxLayout(copyRow);
-        hl->setContentsMargins(0, 0, 0, 0);
-        hl->setSpacing(10);
-        hl->addWidget(m_scopeCopyCombo, 1);
-        hl->addWidget(copyBtn);
-    }
-    attachTip(copyRow, QString::fromUtf8(
-        u8"把【指定热键的默认(未开镜)瞄准控制器参数】整套搬进本热键的开镜档。\n"
-        u8"★ 搬的是对方的【默认档】, 不是对方的开镜档 —— 所以可以先把某个热键在"
-        u8"镜内调好当模板, 再从别的热键一键搬过来。\n"
-        u8"★ 源热键选自己 = 把本热键的开镜档重置回自己的默认参数。"));
-    cl->addWidget(copyRow);
-    m_scopeParamRows.push_back(copyRow);
-
-    m_scopeCopyHint = makeHint(QString());
-    cl->addWidget(m_scopeCopyHint);
-
-    // 说明文字一律从主卡取: 主卡先建(buildRightPanel 的顺序), 控件已存在。
-    auto tipFromMainCard = [this](const char* obj) -> QString {
-        auto* w = findChild<QWidget*>(QString::fromUtf8(obj));
-        if (!w) return QString();
-        if (!w->toolTip().isEmpty()) return w->toolTip();
-        // 少数行(灵敏度折算系数 k —— 它那行是手搓的, 说明挂在标签上而不是控件上)
-        // 的说明在行内第一个标签里, 取它, 免得这里悄悄少一段说明。
-        if (QWidget* row = w->parentWidget())
-            if (auto* l = row->findChild<QLabel*>())
-                return l->toolTip();
-        return QString();
-    };
-
-    auto addGroup = [&](const char* title, const ScopeRowDesc* rows, size_t count) {
-        auto* t = makeSectionTitle(QString::fromUtf8(title));
-        cl->addWidget(t);
-        m_scopeParamRows.push_back(t);
-
-        for (size_t i = 0; i < count; ++i)
-        {
-            const ScopeRowDesc& d = rows[i];
-            QWidget* row = nullptr;
-
-            if (d.decimals <= 0)
-            {
-                auto* sp = new NoWheelSpinBox;
-                sp->setRange(static_cast<int>(d.lo), static_cast<int>(d.hi));
-                sp->setSingleStep(static_cast<int>(d.step));
-                sp->setObjectName(QString::fromUtf8(d.scopeObj));
-                sp->setValue(static_cast<int>(d.def));
-                m_scopeInts.push_back(sp);
-                row = FormKit::fieldRow(QString::fromUtf8(d.label), sp);
-            }
-            else
-            {
-                auto* sp = new NoWheelDoubleSpinBox;
-                sp->setRange(d.lo, d.hi);
-                sp->setSingleStep(d.step);
-                sp->setDecimals(d.decimals);
-                sp->setObjectName(QString::fromUtf8(d.scopeObj));
-                sp->setValue(d.def);
-                m_scopeDoubles.push_back(sp);
-                row = FormKit::fieldRow(QString::fromUtf8(d.label), sp);
-            }
-
-            attachTip(row, tipFromMainCard(d.mainObj));
-            cl->addWidget(row);
-            m_scopeParamRows.push_back(row);
-        }
-    };
-
-    addGroup("增益（水平 x = 跟枪 / 垂直 y = 压枪）",
-             kScopeGainRows, std::size(kScopeGainRows));
-    addGroup("输出限幅与随机化", kScopeLimitRows, std::size(kScopeLimitRows));
-    addGroup("灵敏度折算系数 (修正预测速度)",
-             kScopeSensitivityRows, std::size(kScopeSensitivityRows));
-    addGroup("在途补偿 (预测提前量)", kScopePredictRows, std::size(kScopePredictRows));
-    addGroup("在途自身位移补偿 (Smith)", kScopeInflightRows, std::size(kScopeInflightRows));
-
-    auto commitScope = [this]() {
-        if (m_loading) return;
-        const int ri = currentRuntimeIndex();
-        if (ri < 0) return;
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        if (ri >= static_cast<int>(config.hotkeys.size())) return;
-        AimCtlParams& p = config.hotkeys[ri].ctl_scope;
-
-        auto d = [this](const char* n) { return findChild<QDoubleSpinBox*>(n)->value(); };
-        auto i = [this](const char* n) { return findChild<QSpinBox*>(n)->value(); };
-
-        p.kp_x             = d("scopeKpX");
-        p.kp_y             = d("scopeKpY");
-        p.ki_x             = d("scopeKiX");
-        p.ki_y             = d("scopeKiY");
-        p.kd_x             = d("scopeKdX");
-        p.kd_y             = d("scopeKdY");
-        p.tau_unwind_sec   = d("scopeTauUnwindSec");
-        p.tau_deriv_sec    = d("scopeTauDerivSec");
-        p.i_max            = d("scopeIMax");
-        p.max_output_counts= i("scopeMaxOutputCounts");
-        p.p_full_scale_px  = d("scopePFullScalePx");
-        p.predict_lead_ms  = d("scopePredictLeadMs");
-        p.predict_max_velocity_px_s = d("scopePredictMaxVelocityPxPerSec");
-        p.predict_max_lead_ratio    = d("scopePredictMaxLeadRatio");
-        p.k_px_per_count   = d("scopeKPxPerCount");
-        p.inflight_beta    = d("scopeInflightBeta");
-        p.inflight_dead_time_ms = d("scopeInflightDeadTimeMs");
-        p.random_seed      = i("scopeRandomSeed");
-
-        ConfigBridge::instance().markDirty();
-    };
-
-    for (auto* sp : m_scopeDoubles)
-        connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                this, [commitScope](double) { commitScope(); });
-    for (auto* sp : m_scopeInts)
-        connect(sp, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [commitScope](int) { commitScope(); });
-
-    connect(copyBtn, &QPushButton::clicked, this, [this]() {
-        if (m_loading) return;
-        const int ri = currentRuntimeIndex();
-        const int src = m_scopeCopyCombo ? m_scopeCopyCombo->currentData().toInt() : -1;
-        if (ri < 0 || src < 0) return;
-
-        QString srcLabel;
-        QString selfLabel;
-        {
-            std::lock_guard<std::recursive_mutex> lk(configMutex);
-            const int n = static_cast<int>(config.hotkeys.size());
-            if (ri >= n || src >= n) return;
-            // ★ 复制的是【源热键的默认档】, 不是它的开镜档。
-            config.hotkeys[ri].ctl_scope = ctlParamsOf(config.hotkeys[src]);
-            srcLabel  = QString::fromUtf8(config.hotkeys[src].name.c_str());
-            selfLabel = QString::fromUtf8(config.hotkeys[ri].name.c_str());
-        }
-        ConfigBridge::instance().markDirty();
-        reloadProfileToUi();   // 把新值回填到控件
-
-        if (m_scopeCopyHint)
-            m_scopeCopyHint->setText(QString::fromUtf8(
-                u8"✅ 已把「%1」的默认瞄准控制器参数整套复制到「%2」的开镜档。")
-                .arg(srcLabel, selfLabel));
-    });
-
-    m_rightLayout->addWidget(card);
-
-    rebuildScopeCopyCombo();
-    applyScopeCtlVisibility();
-}
-
-// 开镜档参数是否生效: 「开镜期间」选了「用独立那一套」。
-// ★ 用置灰而不是隐藏 —— 用户还能看见自己填进去的值, 只是明确"现在不生效"。
-void AimSettingsPage::applyScopeCtlVisibility()
-{
-    const bool on = m_scopeModeCombo && m_scopeModeCombo->currentData().toInt() != 0;
-    for (auto* w : m_scopeParamRows)
-        if (w) w->setEnabled(on);
-}
-
-// 一键复制的来源下拉框: 列出【所有】热键(带组名与按键), 不限于当前组 ——
-// 镜内参数往往是在另一个组的某个热键上调出来的。
-void AimSettingsPage::rebuildScopeCopyCombo()
-{
-    if (!m_scopeCopyCombo) return;
-
-    const int prev = m_scopeCopyCombo->currentData().isValid()
-                         ? m_scopeCopyCombo->currentData().toInt()
-                         : -1;
-
-    m_scopeCopyCombo->blockSignals(true);
-    m_scopeCopyCombo->clear();
-    bool prevKept = false;
-    {
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        for (int i = 0; i < static_cast<int>(config.hotkeys.size()); ++i)
-        {
-            const auto& hp = config.hotkeys[i];
-            QString text = QString::fromUtf8(hp.group.c_str()) + QStringLiteral(" / ") +
-                           QString::fromUtf8(hp.name.c_str());
-            if (!hp.keys.empty() && hp.keys.front() != "None")
-                text += QStringLiteral("  [") +
-                        QString::fromUtf8(hp.keys.front().c_str()) + QStringLiteral("]");
-            m_scopeCopyCombo->addItem(text, i);
-            if (i == prev) prevKept = true;
-        }
-    }
-
-    if (prevKept)
-    {
-        const int k = m_scopeCopyCombo->findData(prev);
-        if (k >= 0) m_scopeCopyCombo->setCurrentIndex(k);
-    }
-    else
-    {
-        // 默认挑【不是本热键】的第一个 —— 一键复制的常见用法是"从别的热键搬"。
-        const int self = currentRuntimeIndex();
-        int pick = -1;
-        for (int i = 0; i < m_scopeCopyCombo->count(); ++i)
-        {
-            if (m_scopeCopyCombo->itemData(i).toInt() != self) { pick = i; break; }
-        }
-        if (pick < 0 && m_scopeCopyCombo->count() > 0) pick = 0;
-        if (pick >= 0) m_scopeCopyCombo->setCurrentIndex(pick);
-    }
-    m_scopeCopyCombo->blockSignals(false);
-}
 
 void AimSettingsPage::buildTrajectoryCard()
 {
@@ -2036,7 +1360,7 @@ void AimSettingsPage::buildTrajectoryCard()
     cl->addWidget(trainButton);
     m_pathSectionNeuralRows.push_back(trainButton);
     attachTip(trainButton, QString::fromUtf8(
-        u8"在弹窗里用 Windows 桌面鼠标从蓝色起点拖到绿色目标，录制多轮真实路径。\n"
+        u8"在弹窗里用 Windows 桌面鼠标从金色起点拖到绿色目标，录制多轮真实路径。\n"
         u8"训练结束会用留出的轨迹评估拟合误差；点击应用后才写入当前热键。\n"
         u8"★ 评估的是曲线拟合质量，不是游戏命中率。"));
     connect(trainButton, &QPushButton::clicked, this, [this] {
@@ -2283,11 +1607,11 @@ void AimSettingsPage::restyleProfileItems()
         if (!w) continue;
         const bool sel = (i == m_profileList->currentRow());
         if (auto* n = w->findChild<QLabel*>("pname"))
-            n->setStyleSheet(sel ? "color:#4A55C8; font-size:13px; font-weight:500;"
-                                 : "color:#3C3C44; font-size:13px;");
+            n->setStyleSheet(sel ? "color:#E9CD8A; font-size:13px; font-weight:500;"
+                                 : "color:#DCD7CA; font-size:13px;");
         if (auto* k = w->findChild<QLabel*>("pkey"))
-            k->setStyleSheet(sel ? "color:#7E88D8; font-size:11px;"
-                                 : "color:#A1A1AA; font-size:11px;");
+            k->setStyleSheet(sel ? "color:#C2AD7C; font-size:11px;"
+                                 : "color:#A49E90; font-size:11px;");
     }
 }
 
@@ -2385,25 +1709,6 @@ void AimSettingsPage::reloadProfileToUi()
             auto si = [this](const char* n, int v) {
                 if (auto* s = findChild<QSpinBox*>(n)) s->setValue(v);
             };
-            sd("ctlKpX", hp.ctl_kp_x);
-            sd("ctlKpY", hp.ctl_kp_y);
-            sd("ctlKiX", hp.ctl_ki_x);
-            sd("ctlKiY", hp.ctl_ki_y);
-            sd("ctlKdX", hp.ctl_kd_x);
-            sd("ctlKdY", hp.ctl_kd_y);
-            sd("ctlTauUnwindSec", hp.ctl_tau_unwind_sec);
-            sd("ctlTauDerivSec", hp.ctl_tau_deriv_sec);
-            sd("ctlIMax", hp.ctl_i_max);
-            sd("ctlPFullScalePx", hp.ctl_p_full_scale_px);
-            sd("ctlPredictLeadMs", hp.ctl_predict_lead_ms);
-            sd("ctlPredictMaxVelocityPxPerSec", hp.ctl_predict_max_velocity_px_s);
-            sd("ctlPredictMaxLeadRatio", hp.ctl_predict_max_lead_ratio);
-            sd("ctlKPxPerCount", hp.ctl_k_px_per_count);
-            sd("ctlInflightBeta", hp.ctl_inflight_beta);
-            sd("ctlInflightDeadTimeMs", hp.ctl_inflight_dead_time_ms);
-            si("ctlMaxOutputCounts", hp.ctl_max_output_counts);
-            si("ctlRandomSeed", hp.ctl_random_seed);
-
             auto loadRecovered = [this, &sd](const QString& prefix,
                                               const control::RecoveredPidConfig& pid) {
                 auto set = [&](const char* suffix, float value) {
@@ -2431,26 +1736,6 @@ void AimSettingsPage::reloadProfileToUi()
                 const int k = c->findData(hp.scope_ctl_enabled != 0 ? 1 : 0);
                 c->setCurrentIndex(k >= 0 ? k : 0);
             }
-            // 开镜档的 18 项 (与「瞄准控制器」卡同一组参数)。
-            sd("scopeKpX",             hp.ctl_scope.kp_x);
-            sd("scopeKpY",             hp.ctl_scope.kp_y);
-            sd("scopeKiX",             hp.ctl_scope.ki_x);
-            sd("scopeKiY",             hp.ctl_scope.ki_y);
-            sd("scopeKdX",             hp.ctl_scope.kd_x);
-            sd("scopeKdY",             hp.ctl_scope.kd_y);
-            sd("scopeTauUnwindSec",    hp.ctl_scope.tau_unwind_sec);
-            sd("scopeTauDerivSec",     hp.ctl_scope.tau_deriv_sec);
-            sd("scopeIMax",            hp.ctl_scope.i_max);
-            sd("scopePFullScalePx",    hp.ctl_scope.p_full_scale_px);
-            sd("scopePredictLeadMs",   hp.ctl_scope.predict_lead_ms);
-            sd("scopePredictMaxVelocityPxPerSec", hp.ctl_scope.predict_max_velocity_px_s);
-            sd("scopePredictMaxLeadRatio",        hp.ctl_scope.predict_max_lead_ratio);
-            sd("scopeKPxPerCount",     hp.ctl_scope.k_px_per_count);
-            sd("scopeInflightBeta",    hp.ctl_scope.inflight_beta);
-            sd("scopeInflightDeadTimeMs", hp.ctl_scope.inflight_dead_time_ms);
-            si("scopeMaxOutputCounts", hp.ctl_scope.max_output_counts);
-            si("scopeRandomSeed",      hp.ctl_scope.random_seed);
-
             if (auto* c = findChild<QComboBox*>("aimPathMode"))
             {
                 const int k = c->findData(hp.aim_path_mode);
@@ -2510,11 +1795,6 @@ void AimSettingsPage::reloadProfileToUi()
     m_loading = false;
     refreshActivation();
 
-    // 开镜档: 来源下拉框(所有热键) + 生效与否的置灰/提示。
-    // ★ 放在锁外: 两者都会自己取锁 (configMutex 是递归锁, 但没必要套着)。
-    rebuildScopeCopyCombo();
-    if (m_scopeCopyHint) m_scopeCopyHint->clear();
-    applyScopeCtlVisibility();
 }
 
 void AimSettingsPage::reloadFromRuntime()

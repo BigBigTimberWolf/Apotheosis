@@ -1,4 +1,6 @@
 #include "capture/gpu_color_ops.h"
+#include "crosshair/am_centroid.h"
+#include "crosshair/centroid_cluster.h"
 
 #include <cuda_runtime.h>
 
@@ -22,33 +24,40 @@ struct Result { int count, x, y; };
 Result detect(const std::vector<unsigned char>& image, int side,
               int roi_x, int roi_y, int roi_w, int roi_h, int close_radius,
               int reference_x = 160, int reference_y = 160,
-              int min_pixels = 4)
+              int min_pixels = 4, int algorithm = 0,
+              GpuHsvBand band = {0, 10, 80, 255, 80, 255})
 {
     unsigned char *device_image = nullptr, *mask = nullptr, *scratch = nullptr;
     GpuHsvBand* bands = nullptr;
     int* result = nullptr;
     unsigned long long* key = nullptr;
+    int* labels = nullptr;
+    crosshair::CentroidComponent* components = nullptr;
     check(cudaMalloc(reinterpret_cast<void**>(&device_image), image.size()));
     check(cudaMalloc(reinterpret_cast<void**>(&mask), 512 * 512));
     check(cudaMalloc(reinterpret_cast<void**>(&scratch), 512 * 512));
     check(cudaMalloc(reinterpret_cast<void**>(&bands), sizeof(GpuHsvBand)));
     check(cudaMalloc(reinterpret_cast<void**>(&result), 4 * sizeof(int)));
     check(cudaMalloc(reinterpret_cast<void**>(&key), sizeof(unsigned long long)));
+    check(cudaMalloc(reinterpret_cast<void**>(&labels),512*512*sizeof(int)));
+    check(cudaMalloc(reinterpret_cast<void**>(&components),512*512*sizeof(crosshair::CentroidComponent)));
 
-    const GpuHsvBand red{0, 10, 80, 255, 80, 255};
     check(cudaMemcpy(device_image, image.data(), image.size(), cudaMemcpyHostToDevice));
-    check(cudaMemcpy(bands, &red, sizeof(red), cudaMemcpyHostToDevice));
+    check(cudaMemcpy(bands, &band, sizeof(band), cudaMemcpyHostToDevice));
     check(cudaMemset(result, 0, 4 * sizeof(int)));
     check(cudaMemset(key, 0, sizeof(unsigned long long)));
     launch_crosshair_hsv_reduce_bgr_u8(
         device_image, static_cast<size_t>(side) * 3, side, side,
         roi_x, roi_y, roi_w, roi_h, bands, 1, result, key, mask, scratch,
-        close_radius, min_pixels, reference_x, reference_y, nullptr);
+        labels, components,
+        close_radius, min_pixels, reference_x, reference_y, algorithm, nullptr);
     check(cudaGetLastError());
     int out[4]{};
     check(cudaMemcpy(out, result, sizeof(out), cudaMemcpyDeviceToHost));
 
     check(cudaFree(key));
+    check(cudaFree(labels));
+    check(cudaFree(components));
     check(cudaFree(result));
     check(cudaFree(bands));
     check(cudaFree(scratch));
@@ -114,6 +123,76 @@ int main()
     if (hit.count < 150 || hit.x / hit.count != 150 || hit.y / hit.count != 150)
         return 6;
 
-    std::puts("crosshair GPU tests passed");
+    std::fill(image.begin(), image.end(), 0);
+    red_pixel(image, side, 140, 150);
+    red_pixel(image, side, 160, 150);
+    red_pixel(image, side, 150, 140);
+    red_pixel(image, side, 150, 160);
+    hit = detect(image, side, 130, 130, 40, 40, 7, 150, 150, 4, 1);
+    if (hit.count != 4 || hit.x != 600 || hit.y != 600) return 7;
+    std::fill(image.begin(), image.end(), 0);
+    hit = detect(image, side, 130, 130, 40, 40, 0, 150, 150, 4, 1);
+    if (hit.count != 0) return 8;
+    red_pixel(image, side, 140, 150);
+    red_pixel(image, side, 141, 151);
+    hit = detect(image, side, 130,130,40,40,7,150,150,2,1,{170,10,80,255,80,255});
+    if (hit.count != 2 || crosshair::amCentroidCoordinate(hit.x, hit.count) != 140
+        || crosshair::amCentroidCoordinate(hit.y, hit.count) != 150) return 9;
+    std::fill(image.begin(),image.end(),0);
+    const size_t pixel = (150 * side + 140) * 3;
+    image[pixel+1]=5; image[pixel+2]=255; // AM truncates H to 0, not round to 1.
+    image[pixel+4]=5; image[pixel+5]=255;
+    hit = detect(image,side,130,130,40,40,7,150,150,2,1,{0,0,255,255,255,255});
+    if(hit.count!=2 || hit.x!=281 || hit.y!=300)return 10;
+    for(int bg : {130,190}) {
+        std::fill(image.begin(),image.end(),0);
+        for(int y=159;y<=161;++y) for(int x=159;x<=161;++x)red_pixel(image,side,x,y);
+        for(int y=156;y<=164;++y) for(int x=bg-4;x<=bg+4;++x)red_pixel(image,side,x,y);
+        hit=detect(image,side,110,110,100,100,0,160,160,4,1);
+        if(hit.count!=9 || hit.x!=1440 || hit.y!=1440)return 11;
+    }
+    std::fill(image.begin(),image.end(),0);
+    for(int y=159;y<=161;++y) for(int x : {159,160,161,178,179,180})red_pixel(image,side,x,y);
+    hit=detect(image,side,110,110,100,100,0,160,160,4,1);
+    if(hit.count!=9 || hit.x!=1440 || hit.y!=1440)return 12;
+    std::fill(image.begin(),image.end(),0);
+    red_pixel(image,side,160,160);
+    hit=detect(image,side,110,110,100,100,0,160,160,1,1);
+    if(hit.count)return 13;
+    for(int y=0;y<side;++y)for(int x=0;x<side;++x)red_pixel(image,side,x,y);
+    hit=detect(image,side,0,0,side,side,0,160,160,4,1);
+    if(hit.count)return 14;
+    std::fill(image.begin(),image.end(),0);
+    for(int y=159;y<=161;++y)for(int x=110;x<=115;++x)red_pixel(image,side,x,y);
+    hit=detect(image,side,110,110,100,100,0,160,160,4,1);
+    if(hit.count)return 15;
+    std::fill(image.begin(),image.end(),0);
+    for(int y=174;y<=176;++y)for(int x=159;x<=161;++x)red_pixel(image,side,x,y);
+    hit=detect(image,side,110,110,100,100,0,160,160,4,1);
+    if(hit.count!=9 || hit.x!=1440 || hit.y!=1575)return 16;
+    hit=detect(image,side,110,110,100,100,0,160,160,10,1);
+    if(hit.count)return 17;
+    // Verify the GPU thumbnail against independent CPU arithmetic, including
+    // BGRA/gray inputs and padded rows used by retained inference frames.
+    for(int channels : {1,3,4}) {
+        constexpr int w=37,h=29,ow=16,oh=13;
+        const size_t pitch=w*channels+7;
+        std::vector<unsigned char> src(pitch*h),out(ow*oh);
+        for(size_t i=0;i<src.size();++i) src[i]=static_cast<unsigned char>((i*37+11)%256);
+        unsigned char *device=nullptr,*small=nullptr;
+        if(cudaMalloc(&device,src.size())!=cudaSuccess || cudaMalloc(&small,out.size())!=cudaSuccess)return 18;
+        cudaMemcpy(device,src.data(),src.size(),cudaMemcpyHostToDevice);
+        launch_motion_thumbnail(device,pitch,w,h,channels,small,ow,ow,oh,nullptr);
+        if(cudaDeviceSynchronize()!=cudaSuccess)return 19;
+        cudaMemcpy(out.data(),small,out.size(),cudaMemcpyDeviceToHost);
+        cudaFree(device);cudaFree(small);
+        auto gray=[&](int x,int y) { const auto* p=&src[y*pitch+x*channels];
+            return channels==1?int(p[0]):(29*p[0]+150*p[1]+77*p[2]+128)>>8; };
+        for(int y=0;y<oh;++y)for(int x=0;x<ow;++x) {
+            const int a=x*w/ow,b=(x+1)*w/ow-1,c=y*h/oh,d=(y+1)*h/oh-1;
+            if(out[y*ow+x]!=(gray(a,c)+gray(b,c)+gray(a,d)+gray(b,d)+2)/4)return 20;
+        }
+    }
+    std::puts("crosshair and motion thumbnail GPU tests passed");
     return 0;
 }

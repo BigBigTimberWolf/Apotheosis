@@ -8,6 +8,16 @@
 namespace runtime::aim_loop
 {
 
+control::RecoveredPidConfig pidForProfile(const HotkeyProfile& hk, bool scope, bool secondary)
+{
+    auto pid = scope ? hk.recovered_scope_pid
+                    : secondary ? hk.recovered_secondary_pid : hk.recovered_pid;
+    // GenshinImpact.sp.exe reports 166/513: this is the hotkey's enable flag,
+    // not whether the current frame happened to find a crosshair.
+    pid.preserveIntegralOnReverse = hk.crosshair_detect_enabled;
+    return pid;
+}
+
 std::vector<int> buildClassBuckets(const std::vector<int>& aimClassIds)
 {
     int maxClassId = -1;
@@ -125,8 +135,8 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
     }
 
     cfg.requireFreshDetection = true;
-    // resolveCrosshair already selects the screen center when color detection
-    // is missing or stale. That fallback must remain eligible for aiming.
+    // resolveCrosshair holds a missing crosshair for at most three frames,
+    // then uses the screen center. Both fallbacks remain eligible for aiming.
     cfg.requireFreshCrosshair = false;
 
     return cfg;
@@ -134,8 +144,7 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
 
 FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
                           const std::vector<ClassFilterState>& classFilters,
-                          const Config& globalConfig,
-                          bool scopeEngaged)
+                          const Config& globalConfig)
 {
     FlatConfig flat;
     flat.fovX = hk.fovX;
@@ -145,32 +154,7 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     flat.dynamicFovShrinkMs = hk.dynamic_fov_shrink_ms;
     flat.dynamicFovExpandMs = hk.dynamic_fov_expand_ms;
 
-    // ── 瞄准控制器参数组: 默认档 / 开镜档 ────────────────────────────────
-    // ★ 自动开镜生效期间, 若该热键开了独立开镜参数, 就用开镜档【整组】取代
-    //   默认档 —— 开镜后游戏内灵敏度被倍率放大, 镜前那套增益在镜内会过冲。
-    // ★ 没开(默认)时走的就是默认档, 逐位与从前一致。
-    const bool useScope = scopeEngaged && hk.scope_ctl_enabled != 0;
-    const AimCtlParams cp = useScope ? hk.ctl_scope : ctlParamsOf(hk);
-    flat.scopeCtlActive = useScope;
-
-    flat.kpX = cp.kp_x;
-    flat.kpY = cp.kp_y;
-    flat.kiX = cp.ki_x;
-    flat.kiY = cp.ki_y;
-    flat.kdX = cp.kd_x;
-    flat.kdY = cp.kd_y;
-    flat.tauUnwindSec = cp.tau_unwind_sec;
-    flat.tauDerivSec = cp.tau_deriv_sec;
-    flat.iMax = cp.i_max;
-    flat.maxOutputCounts = cp.max_output_counts;
-    flat.pFullScalePx = cp.p_full_scale_px;
-    flat.predictLeadMs = cp.predict_lead_ms;
-    flat.predictMaxVelocityPxPerSec = cp.predict_max_velocity_px_s;
-    flat.predictMaxLeadRatio = cp.predict_max_lead_ratio;
-    flat.kPxPerCount = cp.k_px_per_count;
-    flat.inflightBeta = cp.inflight_beta;
-    flat.inflightDeadTimeMs = cp.inflight_dead_time_ms;
-    flat.randomSeed = cp.random_seed;
+    flat.randomSeed = hk.ctl_random_seed;
 
     flat.yOffset = hk.ctl_y_offset;
     flat.yOffsetMax = hk.ctl_y_offset_max;
@@ -180,11 +164,6 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     // 全局选靶与稳定器
     flat.hysteresisRatio = globalConfig.target_hysteresis_ratio;
     flat.maxDistancePx = globalConfig.target_max_distance_px;
-    flat.matchCenterRatio = globalConfig.target_match_center_ratio;
-    flat.areaRatioTol = globalConfig.target_area_ratio_tol;
-    flat.kSnapMult = globalConfig.target_k_snap_mult;
-    flat.minAspect = globalConfig.target_min_aspect;
-    flat.maxAspect = globalConfig.target_max_aspect;
     flat.detectionResolution = detectionResolution;
     flat.aimClassIds.reserve(hk.aim_classes.size());
     for (const auto& ac : hk.aim_classes)

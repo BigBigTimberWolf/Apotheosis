@@ -45,7 +45,7 @@ QWidget* makeDiagRow(const QString& caption, QLabel*& valueOut) {
 
     valueOut = new QLabel(QStringLiteral("0"));
     valueOut->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    valueOut->setStyleSheet(QStringLiteral("color:#16A34A; background:transparent;"));
+    valueOut->setStyleSheet(QStringLiteral("color:#53C583; background:transparent;"));
 
     h->addWidget(cap);
     h->addStretch();
@@ -76,7 +76,7 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     heroRow->setContentsMargins(16, 15, 16, 15);
     heroRow->setSpacing(14);
 
-    m_heroChip = makeChip(QStringLiteral("gauge"), QStringLiteral("#E7F6EC"), QStringLiteral("#16A34A"));
+    m_heroChip = makeChip(QStringLiteral("gauge"), QStringLiteral("#1D3026"), QStringLiteral("#53C583"));
     heroRow->addWidget(m_heroChip);
 
     auto* heroText = new QVBoxLayout;
@@ -198,7 +198,7 @@ void OverviewPage::setFps(double fps) {
 }
 
 void OverviewPage::setSourceFps(double fps) {
-    m_mFps->setSub(QString::fromUtf8(u8"源 %1 帧").arg(fps, 0, 'f', 0), QStringLiteral("#16A34A"));
+    m_mFps->setSub(QString::fromUtf8(u8"源 %1 帧").arg(fps, 0, 'f', 0), QStringLiteral("#53C583"));
 }
 
 static QString ovFmtMs(double ms, int precision = 1) {
@@ -214,7 +214,7 @@ void OverviewPage::setInferenceLatency(double ms) {
 void OverviewPage::setTotalLatency(double ms) {
     m_mTotal->setValue(ms < 0.0 ? QStringLiteral("--") : QString::number(ms, 'f', 1));
     m_mTotal->setSub(ms < 0.0 ? QString::fromUtf8(u8"等待鼠标发送")
-                              : QString::fromUtf8(u8"采集 → 落点"), QStringLiteral("#16A34A"));
+                              : QString::fromUtf8(u8"采集 → 落点"), QStringLiteral("#53C583"));
 }
 
 void OverviewPage::setDetectionCount(int boxes, int locked) {
@@ -252,7 +252,7 @@ void OverviewPage::setSessionState(bool running, const QString& model,
             sub += QString::fromUtf8(u8" · 已运行 %1").arg(uptime);
         m_heroSub->setText(sub);
         if (styleChanged) {
-            m_heroChip->setStyleSheet(QStringLiteral("background:#E7F6EC; border-radius:8px; color:#168A50;"));
+            m_heroChip->setStyleSheet(QStringLiteral("background:#1D3026; border-radius:8px; color:#53C583;"));
             m_startBtn->setText(QString::fromUtf8(u8"停止推理"));
             m_startBtn->setProperty("class", "danger");
         }
@@ -260,7 +260,7 @@ void OverviewPage::setSessionState(bool running, const QString& model,
         m_heroTitle->setText(QString::fromUtf8(u8"推理已停止"));
         m_heroSub->setText(QString::fromUtf8(u8"%1 · %2").arg(model, backend));
         if (styleChanged) {
-            m_heroChip->setStyleSheet(QStringLiteral("background:#EEF1F5; border-radius:8px; color:#929BAA;"));
+            m_heroChip->setStyleSheet(QStringLiteral("background:#26262A; border-radius:8px; color:#A49E90;"));
             m_startBtn->setText(QString::fromUtf8(u8"启动推理"));
             m_startBtn->setProperty("class", "primary");
         }

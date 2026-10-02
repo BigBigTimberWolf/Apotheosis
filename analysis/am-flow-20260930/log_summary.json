@@ -1,0 +1,485 @@
+[
+  {
+    "file": "latency_2026-09-26-15-50-46.log",
+    "summary_lines": 59,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-16-19-25.log",
+    "summary_lines": 43,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.21
+  },
+  {
+    "file": "latency_2026-09-26-16-48-11.log",
+    "summary_lines": 577,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.54
+  },
+  {
+    "file": "latency_2026-09-26-17-04-11.log",
+    "summary_lines": 111,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-17-15-12.log",
+    "summary_lines": 131,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-17-32-03.log",
+    "summary_lines": 211,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-19-04-51.log",
+    "summary_lines": 167,
+    "median_summary_pub2aim_ms": 0.02,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.24
+  },
+  {
+    "file": "latency_2026-09-26-19-17-07.log",
+    "summary_lines": 18,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-19-24-59.log",
+    "summary_lines": 324,
+    "median_summary_pub2aim_ms": 0.015,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.21
+  },
+  {
+    "file": "latency_2026-09-26-21-30-21.log",
+    "summary_lines": 544,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.23
+  },
+  {
+    "file": "latency_2026-09-26-22-03-25.log",
+    "summary_lines": 39,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-22-19-55.log",
+    "summary_lines": 4,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.125,
+    "max_summary_aim2mv_ms": 0.14
+  },
+  {
+    "file": "latency_2026-09-26-22-24-27.log",
+    "summary_lines": 4,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.155,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-26-22-45-50.log",
+    "summary_lines": 276,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.21
+  },
+  {
+    "file": "latency_2026-09-27-00-29-34.log",
+    "summary_lines": 373,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.19
+  },
+  {
+    "file": "latency_2026-09-27-13-56-15.log",
+    "summary_lines": 400,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.39
+  },
+  {
+    "file": "latency_2026-09-27-15-23-12.log",
+    "summary_lines": 46,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.22
+  },
+  {
+    "file": "latency_2026-09-27-15-34-14.log",
+    "summary_lines": 32,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.19
+  },
+  {
+    "file": "latency_2026-09-27-16-43-12.log",
+    "summary_lines": 143,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.31
+  },
+  {
+    "file": "latency_2026-09-27-17-02-05.log",
+    "summary_lines": 34,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.245,
+    "max_summary_aim2mv_ms": 0.45
+  },
+  {
+    "file": "latency_2026-09-27-17-16-13.log",
+    "summary_lines": 13,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-27-17-37-35.log",
+    "summary_lines": 1842,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.68
+  },
+  {
+    "file": "latency_2026-09-27-20-16-40.log",
+    "summary_lines": 29,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.21
+  },
+  {
+    "file": "latency_2026-09-27-20-19-32.log",
+    "summary_lines": 30,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.22
+  },
+  {
+    "file": "latency_2026-09-27-20-27-43.log",
+    "summary_lines": 101,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-27-20-52-07.log",
+    "summary_lines": 159,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.25
+  },
+  {
+    "file": "latency_2026-09-27-21-19-40.log",
+    "summary_lines": 16,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.15
+  },
+  {
+    "file": "latency_2026-09-27-21-30-00.log",
+    "summary_lines": 125,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.23
+  },
+  {
+    "file": "latency_2026-09-27-21-36-33.log",
+    "summary_lines": 241,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.24
+  },
+  {
+    "file": "latency_2026-09-27-21-59-38.log",
+    "summary_lines": 50,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.17
+  },
+  {
+    "file": "latency_2026-09-27-22-06-59.log",
+    "summary_lines": 125,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.19
+  },
+  {
+    "file": "latency_2026-09-27-22-34-39.log",
+    "summary_lines": 48,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.17
+  },
+  {
+    "file": "latency_2026-09-27-22-50-04.log",
+    "summary_lines": 171,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.19
+  },
+  {
+    "file": "latency_2026-09-27-22-58-04.log",
+    "summary_lines": 63,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.17
+  },
+  {
+    "file": "latency_2026-09-28-00-51-54.log",
+    "summary_lines": 93,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.18
+  },
+  {
+    "file": "latency_2026-09-28-01-19-47.log",
+    "summary_lines": 37,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.15
+  },
+  {
+    "file": "latency_2026-09-28-01-47-24.log",
+    "summary_lines": 443,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.18,
+    "max_summary_aim2mv_ms": 0.87
+  },
+  {
+    "file": "latency_2026-09-28-02-23-21.log",
+    "summary_lines": 101,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.3
+  },
+  {
+    "file": "latency_2026-09-28-02-43-07.log",
+    "summary_lines": 40,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.2
+  },
+  {
+    "file": "latency_2026-09-28-02-53-30.log",
+    "summary_lines": 110,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.36
+  },
+  {
+    "file": "latency_2026-09-28-03-01-51.log",
+    "summary_lines": 172,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.33
+  },
+  {
+    "file": "latency_2026-09-28-11-16-41.log",
+    "summary_lines": 74,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.6
+  },
+  {
+    "file": "latency_2026-09-28-11-20-04.log",
+    "summary_lines": 203,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.39
+  },
+  {
+    "file": "latency_2026-09-28-11-56-22.log",
+    "summary_lines": 113,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.49
+  },
+  {
+    "file": "latency_2026-09-28-12-04-39.log",
+    "summary_lines": 67,
+    "median_summary_pub2aim_ms": 0.02,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.37
+  },
+  {
+    "file": "latency_2026-09-28-12-23-15.log",
+    "summary_lines": 39,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.22
+  },
+  {
+    "file": "latency_2026-09-28-12-26-14.log",
+    "summary_lines": 80,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.18,
+    "max_summary_aim2mv_ms": 0.35
+  },
+  {
+    "file": "latency_2026-09-28-12-32-27.log",
+    "summary_lines": 310,
+    "median_summary_pub2aim_ms": 0.04,
+    "median_summary_aim2mv_ms": 0.18,
+    "max_summary_aim2mv_ms": 0.46
+  },
+  {
+    "file": "latency_2026-09-28-13-42-26.log",
+    "summary_lines": 838,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.18,
+    "max_summary_aim2mv_ms": 1.43
+  },
+  {
+    "file": "latency_2026-09-28-16-31-54.log",
+    "summary_lines": 218,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.24
+  },
+  {
+    "file": "latency_2026-09-28-17-01-01.log",
+    "summary_lines": 49,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.13,
+    "max_summary_aim2mv_ms": 0.17
+  },
+  {
+    "file": "latency_2026-09-28-17-22-00.log",
+    "summary_lines": 211,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.2,
+    "max_summary_aim2mv_ms": 0.48
+  },
+  {
+    "file": "latency_2026-09-28-18-33-48.log",
+    "summary_lines": 110,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.2
+  },
+  {
+    "file": "latency_2026-09-28-18-53-29.log",
+    "summary_lines": 342,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.22
+  },
+  {
+    "file": "latency_2026-09-28-19-58-12.log",
+    "summary_lines": 98,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.46499999999999997,
+    "max_summary_aim2mv_ms": 0.54
+  },
+  {
+    "file": "latency_2026-09-28-20-11-17.log",
+    "summary_lines": 105,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.19,
+    "max_summary_aim2mv_ms": 0.23
+  },
+  {
+    "file": "latency_2026-09-29-00-10-31.log",
+    "summary_lines": 1203,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.2,
+    "max_summary_aim2mv_ms": 0.44
+  },
+  {
+    "file": "latency_2026-09-29-13-23-48.log",
+    "summary_lines": 1271,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.21,
+    "max_summary_aim2mv_ms": 0.46
+  },
+  {
+    "file": "latency_2026-09-29-21-40-35.log",
+    "summary_lines": 66,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.24
+  },
+  {
+    "file": "latency_2026-09-29-21-54-21.log",
+    "summary_lines": 29,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.23
+  },
+  {
+    "file": "latency_2026-09-29-22-12-19.log",
+    "summary_lines": 17,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.22
+  },
+  {
+    "file": "latency_2026-09-29-22-32-38.log",
+    "summary_lines": 77,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.21
+  },
+  {
+    "file": "latency_2026-09-29-23-04-26.log",
+    "summary_lines": 114,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.26
+  },
+  {
+    "file": "latency_2026-09-29-23-34-34.log",
+    "summary_lines": 77,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.14,
+    "max_summary_aim2mv_ms": 0.22
+  },
+  {
+    "file": "latency_2026-09-29-23-38-39.log",
+    "summary_lines": 24,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.12,
+    "max_summary_aim2mv_ms": 0.17
+  },
+  {
+    "file": "latency_2026-09-30-00-09-52.log",
+    "summary_lines": 32,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.16,
+    "max_summary_aim2mv_ms": 0.19
+  },
+  {
+    "file": "latency_2026-09-30-00-24-37.log",
+    "summary_lines": 152,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.15,
+    "max_summary_aim2mv_ms": 0.19
+  },
+  {
+    "file": "latency_2026-09-30-19-55-51.log",
+    "summary_lines": 1200,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.19,
+    "max_summary_aim2mv_ms": 0.6
+  },
+  {
+    "file": "latency_2026-09-30-21-46-09.log",
+    "summary_lines": 907,
+    "median_summary_pub2aim_ms": 0.01,
+    "median_summary_aim2mv_ms": 0.2,
+    "max_summary_aim2mv_ms": 0.62
+  }
+]

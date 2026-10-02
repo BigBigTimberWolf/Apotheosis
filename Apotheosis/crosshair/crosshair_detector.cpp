@@ -1,4 +1,6 @@
 #include "crosshair_detector.h"
+#include "am_centroid.h"
+#include "centroid_cluster.h"
 
 #include <algorithm>
 #include <cmath>
@@ -64,6 +66,10 @@ void compute_robust_saliency_map(const cv::Mat& bgr,
     bool has_custom_hsv = false;
     for (const auto& b : bands) {
         if (!b.enabled) continue;
+        if (b.exact_hsv) {
+            has_custom_hsv = true;
+            continue;
+        }
         ColorCategory cat = classify_band(b);
         if (cat == ColorCategory::GenericHsv) has_custom_hsv = true;
         if (std::find(active_cats.begin(), active_cats.end(), cat) == active_cats.end()) {
@@ -71,9 +77,7 @@ void compute_robust_saliency_map(const cv::Mat& bgr,
         }
     }
 
-    if (active_cats.empty()) return;
-
-    for (int r = 0; r < rows; ++r) {
+    for (int r = 0; r < rows && !active_cats.empty(); ++r) {
         const uint8_t* ptr_bgr = bgr.ptr<uint8_t>(r);
         uint8_t* ptr_out = out_saliency.ptr<uint8_t>(r);
 
@@ -145,12 +149,13 @@ void compute_robust_saliency_map(const cv::Mat& bgr,
         cv::Mat hsv_mask = cv::Mat::zeros(hsv.size(), CV_8UC1);
         cv::Mat scratch;
         for (const auto& b : bands) {
-            if (!b.enabled || classify_band(b) != ColorCategory::GenericHsv) continue;
+            if (!b.enabled || (!b.exact_hsv &&
+                               classify_band(b) != ColorCategory::GenericHsv)) continue;
             int h_lo = clamp_byte(b.h_low,  0, 179);
             int h_hi = clamp_byte(b.h_high, 0, 179);
-            int s_lo = clamp_byte(std::max(0, b.s_min - 30),  0, 255);
+            int s_lo = clamp_byte(std::max(0, b.s_min - (b.exact_hsv ? 0 : 30)), 0, 255);
             int s_hi = clamp_byte(b.s_max,  0, 255);
-            int v_lo = clamp_byte(std::max(0, b.v_min - 30),  0, 255);
+            int v_lo = clamp_byte(std::max(0, b.v_min - (b.exact_hsv ? 0 : 30)), 0, 255);
             int v_hi = clamp_byte(b.v_max,  0, 255);
 
             cv::inRange(hsv,
@@ -202,6 +207,53 @@ std::optional<cv::Point2f> CrosshairDetector::detect(
     if (roi.width < 4 || roi.height < 4) return std::nullopt;
 
     cv::Mat region = bgrFrame(roi);
+
+    if (settings.algorithm == 1) {
+        cv::Mat mask(region.size(), CV_8UC1, cv::Scalar(0));
+        for (int y = 0; y < region.rows; ++y) {
+            const auto* pixels = region.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < region.cols; ++x) {
+                const auto hsv = amHsv(pixels[x][0], pixels[x][1], pixels[x][2]);
+                for (const auto& band : settings.colors) {
+                    if (band.enabled && amHsvMatches(hsv, band)) {
+                        mask.at<unsigned char>(y,x) = 1;
+                        break; // A pixel matching multiple bands counts once.
+                    }
+                }
+            }
+        }
+        cv::Mat labels;
+        const int n = cv::connectedComponents(mask, labels, 8, CV_32S);
+        std::vector<CentroidComponent> components(n);
+        std::vector<int> firstPixel(n,std::numeric_limits<int>::max());
+        for (int y=0;y<region.rows;++y) for (int x=0;x<region.cols;++x) {
+            const int label=labels.at<int>(y,x);
+            if (!label) continue;
+            auto& c=components[label];
+            firstPixel[label]=std::min(firstPixel[label],y*roi.width+x);
+            ++c.count; c.sumX+=x; c.sumY+=y;
+            c.left=std::min(c.left,x); c.right=std::max(c.right,x);
+            c.top=std::min(c.top,y); c.bottom=std::max(c.bottom,y);
+        }
+        int best=0; unsigned long long key=0;
+        for (int i=1;i<n;++i) {
+            const auto& c=components[i];
+            if (!centroidComponentValid(c,roi.width,roi.height)) continue;
+            // First pixel index gives CPU/CUDA identical tie-breaking.
+            const auto k=centroidComponentKey(c,firstPixel[i],
+                bgrFrame.cols/2-roi.x,bgrFrame.rows/2-roi.y);
+            if(k>key) {key=k;best=i;}
+        }
+        if (!best) return std::nullopt;
+        int64_t sumX=0,sumY=0; int count=0;
+        for (int i=1;i<n;++i) if (i==best || centroidSameCluster(components[i],components[best],roi.width,roi.height)) {
+            const auto& c=components[i];
+            count+=c.count; sumX+=c.sumX+roi.x*c.count; sumY+=c.sumY+roi.y*c.count;
+        }
+        if (count < std::max(2,settings.min_pixel_count)) return std::nullopt;
+        return cv::Point2f(static_cast<float>(amCentroidCoordinate(sumX, count)),
+                           static_cast<float>(amCentroidCoordinate(sumY, count)));
+    }
 
     cv::Mat saliency;
     compute_robust_saliency_map(region, settings.colors, saliency);

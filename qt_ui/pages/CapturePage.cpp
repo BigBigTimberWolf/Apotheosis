@@ -8,6 +8,7 @@
 #include "capture/capture_card_probe.h"
 #include "capture/magewell_capture.h"
 #include "capture/stream_capture.h"
+#include "capture/ndi_capture.h"
 
 #include <algorithm>
 #include <utility>
@@ -24,6 +25,8 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
+#include <QThread>
+#include <memory>
 
 namespace {
 
@@ -86,6 +89,7 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_sourceCombo->addItem(QStringLiteral("采集卡"), QStringLiteral("device"));
     m_sourceCombo->addItem(QStringLiteral("OBS / FFmpeg · UDP"), QStringLiteral("udp"));
     m_sourceCombo->addItem(QStringLiteral("OBS / FFmpeg · TCP"), QStringLiteral("tcp"));
+    m_sourceCombo->addItem(QStringLiteral("NDI · 低延迟接收"), QStringLiteral("ndi"));
     m_cardCard->contentLayout()->addWidget(
         FormKit::fieldRow(QStringLiteral("采集来源"), m_sourceCombo));
     connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -108,6 +112,23 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
         "TCP 发送到 tcp://本机IP:23000（OBS 端不要加 listen=1）。");
     m_streamUrl->setToolTip(m_streamUrl->toolTip() + "\n\n" + streamNote);
 
+    m_ndiSource = new QComboBox;
+    m_ndiSource->setEditable(true);
+    m_ndiSource->setInsertPolicy(QComboBox::NoInsert);
+    m_ndiSource->lineEdit()->setPlaceholderText(QStringLiteral("发现后选择，或输入完整源名：电脑名 (Apotheosis)"));
+    m_ndiSource->setToolTip(QStringLiteral("精确匹配完整 NDI 源名；断线后自动等待同名源恢复。"));
+    m_ndiRefresh = new QPushButton(QStringLiteral("发现源"));
+    auto* ndiContent = new QWidget;
+    auto* ndiLayout = new QHBoxLayout(ndiContent);
+    ndiLayout->setContentsMargins(0, 0, 0, 0);
+    ndiLayout->addWidget(m_ndiSource, 1);
+    ndiLayout->addWidget(m_ndiRefresh);
+    m_ndiRow = FormKit::fieldRow(QStringLiteral("NDI 源"), ndiContent);
+    m_cardCard->contentLayout()->addWidget(m_ndiRow);
+    connect(m_ndiRefresh, &QPushButton::clicked, this, &CapturePage::refreshNdiSources);
+    connect(m_ndiSource->lineEdit(), &QLineEdit::editingFinished, this, &CapturePage::onNdiSourceEdited);
+    connect(m_ndiSource, QOverload<int>::of(&QComboBox::activated), this, [this](int) { onNdiSourceEdited(); });
+
     m_devCombo = new QComboBox;
     m_devCombo->setToolTip(tr(
         "系统实际枚举到的视频采集卡。\n"
@@ -120,13 +141,13 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
         "重新枚举采集卡, 并读取每张卡真实支持的 格式 / 分辨率 / 帧率。\n"
         "每张卡需要 20-300ms, 所以只在打开本页或手动点击时执行。"));
     m_refreshBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { border:1px solid #D8DEE9; border-radius:14px;"
-        "              background:#FFFFFF; }"
-        "QPushButton:hover { background:#F1F4F9; }"
-        "QPushButton:pressed { background:#E4E9F2; }"));
+        "QPushButton { border:1px solid #514C40; border-radius:14px;"
+        "              background:#19191C; }"
+        "QPushButton:hover { background:#2B2923; }"
+        "QPushButton:pressed { background:#353025; }"));
     if (IconFont::available()) {
         m_refreshBtn->setIcon(iconFromGlyph(QStringLiteral("refresh"), 15,
-                                           QStringLiteral("#5B6472")));
+                                           QStringLiteral("#BCB7AA")));
         m_refreshBtn->setIconSize(QSize(15, 15));
     } else {
         m_refreshBtn->setText(QStringLiteral("\u21bb"));
@@ -212,8 +233,10 @@ void CapturePage::clearError() { showError(QString()); }
 
 void CapturePage::updateSourceUi() {
     const bool network = m_sourceCombo->currentData().toString() != QStringLiteral("device");
-    m_streamRow->setVisible(network);
-    m_streamUrl->setEnabled(network);
+    const bool ndi = m_sourceCombo->currentData().toString() == QStringLiteral("ndi");
+    m_streamRow->setVisible(network && !ndi);
+    m_streamUrl->setEnabled(network && !ndi);
+    m_ndiRow->setVisible(ndi);
     m_devCombo->setEnabled(!network);
     m_refreshBtn->setEnabled(!network);
     m_fmtCombo->setEnabled(!network);
@@ -228,7 +251,7 @@ void CapturePage::onSourceChanged(int) {
     if (m_restoring || m_sourceCombo->currentIndex() < 0) return;
     const QString source = m_sourceCombo->currentData().toString();
     auto& cfg = ConfigManager::instance();
-    if (source != QStringLiteral("device")) {
+    if (source == QStringLiteral("udp") || source == QStringLiteral("tcp")) {
         const QString prefix = source + QStringLiteral("://");
         if (!m_streamUrl->text().startsWith(prefix) ||
             !stream_capture::ValidateUrl(source.toStdString(),
@@ -242,11 +265,12 @@ void CapturePage::onSourceChanged(int) {
     clearError();
     updateSourceUi();
     if (source == QStringLiteral("device")) refreshDevices();
+    if (source == QStringLiteral("ndi")) refreshNdiSources();
 }
 
 void CapturePage::onStreamUrlEdited() {
     const QString source = m_sourceCombo->currentData().toString();
-    if (source == QStringLiteral("device")) return;
+    if (source != QStringLiteral("udp") && source != QStringLiteral("tcp")) return;
     const QString url = m_streamUrl->text().trimmed();
     std::string reason;
     if (!stream_capture::ValidateUrl(source.toStdString(), url.toStdString(), &reason)) {
@@ -330,6 +354,46 @@ void CapturePage::refreshDevices() {
     rebuildFormatCombo();
     const MFDeviceInfo* selected = currentDevice();
     m_gpuDecode->setEnabled(!(selected && magewell::IsDeviceKey(selected->friendly_name)));
+}
+
+void CapturePage::onNdiSourceEdited() {
+    if (m_restoring) return;
+    const auto name = m_ndiSource->currentText().trimmed();
+    if (name.contains('\n') || name.contains('\r')) {
+        showError(QStringLiteral("NDI 源名不能包含换行。"));
+        return;
+    }
+    ConfigManager::instance().setCaptureNdiSource(name);
+    clearError();
+}
+
+void CapturePage::refreshNdiSources() {
+    if (m_ndiSearching) return;
+    m_ndiSearching = true;
+    m_ndiRefresh->setEnabled(false);
+    m_ndiRefresh->setText(QStringLiteral("发现中…"));
+    struct Result { std::vector<std::string> names; std::string error; };
+    auto result = std::make_shared<Result>();
+    auto* worker = QThread::create([result] {
+        try { result->names = ndi_capture::Discover(1500, result->error); }
+        catch (const std::exception& e) { result->error = e.what(); }
+    });
+    connect(worker, &QThread::finished, this, [this, result] {
+        m_ndiSearching = false;
+        m_ndiRefresh->setEnabled(true);
+        m_ndiRefresh->setText(QStringLiteral("发现源"));
+        const auto selected = m_ndiSource->currentText();
+        QSignalBlocker blocker(m_ndiSource);
+        m_ndiSource->clear();
+        for (const auto& name : result->names) m_ndiSource->addItem(QString::fromStdString(name));
+        m_ndiSource->setCurrentText(selected);
+        if (m_sourceCombo->currentData().toString() != QStringLiteral("ndi")) return;
+        if (!result->error.empty()) showError(QString::fromStdString(result->error));
+        else if (result->names.empty()) showError(QStringLiteral("未发现 NDI 源。请启动发射端，并检查两端防火墙和局域网连接。"));
+        else clearError();
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void CapturePage::onDeviceChanged(int) {
@@ -488,6 +552,12 @@ void CapturePage::applySelectionToConfig() {
 }
 
 void CapturePage::updateCapabilitySummary() {
+    if (m_sourceCombo->currentData().toString() == QStringLiteral("ndi")) {
+        m_capSummary->setText(QStringLiteral("NDI 高带宽接收；自动重连，丢弃积压旧帧，输出中心裁切画面。"));
+        m_recommend->setText(QStringLiteral("在发送电脑运行 ndi_sender --size %1 --fps 120，然后点击“发现源”。默认只传中心区域以减少性能占用；两端需安装 NDI 6 Runtime。")
+            .arg(ConfigManager::instance().detectionResolution()));
+        return;
+    }
     if (m_sourceCombo->currentData().toString() != QStringLiteral("device")) {
         m_capSummary->setText(QStringLiteral("等待网络视频流；使用 FFmpeg 解码后输出中心裁切画面。"));
         m_recommend->setText(QStringLiteral("发送端使用 MPEG-TS 视频流，接收端地址与端口按上方设置。"));
@@ -535,7 +605,9 @@ void CapturePage::onLoadConfig() {
         m_sourceCombo->setCurrentIndex(sourceIndex >= 0 ? sourceIndex : 0);
     }
     m_streamUrl->setText(cfg.captureStreamUrl());
+    m_ndiSource->setCurrentText(cfg.captureNdiSource());
     refreshDevices();
     m_restoring = false;
     updateSourceUi();
+    if (cfg.captureSource() == QStringLiteral("ndi")) refreshNdiSources();
 }

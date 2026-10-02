@@ -2,6 +2,9 @@
 
 #include <cuda_runtime.h>
 
+void launch_motion_thumbnail(const unsigned char* src, size_t step, int width, int height,
+    int channels, unsigned char* dst, size_t dstStep, int outWidth, int outHeight, cudaStream_t stream);
+
 void launch_bgra_to_bgr_u8(
     const unsigned char* src, size_t srcStep,
     unsigned char* dst, size_t dstStep,
@@ -49,6 +52,8 @@ struct GpuHsvBand
     int v_min, v_max;
 };
 
+namespace crosshair { struct CentroidComponent; }
+
 void launch_crosshair_hsv_reduce_bgr_u8(
     const unsigned char* img, size_t step,
     int width, int height,
@@ -56,5 +61,6 @@ void launch_crosshair_hsv_reduce_bgr_u8(
     const GpuHsvBand* bands, int band_count,
     int* result, unsigned long long* candidate_key,
     unsigned char* mask, unsigned char* scratch,
-    int close_radius, int min_pixels, int reference_x, int reference_y,
+    int* component_labels, crosshair::CentroidComponent* components,
+    int close_radius, int min_pixels, int reference_x, int reference_y, int algorithm,
     cudaStream_t stream);

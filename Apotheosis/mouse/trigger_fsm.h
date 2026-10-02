@@ -32,7 +32,7 @@ public:
     Action tick(const Input& in, bool hold_mode,
                 int fire_delay, int duration, int interval, int switch_cd,
                 int delay_jitter, int duration_jitter, int interval_jitter,
-                int pre_fire_ms = 0)
+                int pre_fire_ms = 0, int prearm_elapsed_ms = 0)
     {
         Action act;
         target_loss_since_ms_ = -1;
@@ -77,7 +77,7 @@ public:
         case TriggerPhase::Idle:
             if (eligible)
                 startShot(act, in.now_ms, hold_mode, fire_delay, duration,
-                          delay_jitter, duration_jitter, pre_fire_ms);
+                          delay_jitter, duration_jitter, pre_fire_ms, prearm_elapsed_ms);
             else
             {
                 in_zone_since_ms_ = -1;
@@ -128,7 +128,7 @@ public:
                 delay_retargeted_ = false;
                 if (eligible)
                     startShot(act, in.now_ms, hold_mode, fire_delay, duration,
-                              delay_jitter, duration_jitter, pre_fire_ms);
+                              delay_jitter, duration_jitter, pre_fire_ms, prearm_elapsed_ms);
             }
             break;
 
@@ -149,8 +149,33 @@ public:
     bool keepHoldingOnTargetLoss(int64_t now_ms, int grace_ms)
     {
         if (!pressed() || !pressed_hold_ || grace_ms <= 0) return false;
-        if (target_loss_since_ms_ < 0) target_loss_since_ms_ = now_ms;
+        if (target_loss_since_ms_ < 0)
+            target_loss_since_ms_ = hit_zone_loss_since_ms_ >= 0
+                ? hit_zone_loss_since_ms_ : now_ms;
         return now_ms - target_loss_since_ms_ < std::clamp(grace_ms, 0, 2000);
+    }
+
+    // Keep a sustained press through a brief hit-zone miss on the same track.
+    // The caller feeds the resulting zone to both scope and trigger state
+    // machines, so a temporary miss cannot close the scope first.
+    bool holdZoneOnBriefMiss(bool raw_in_zone, int track_id,
+                             int64_t now_ms, int grace_ms)
+    {
+        if (raw_in_zone)
+        {
+            hit_zone_loss_since_ms_ = -1;
+            return true;
+        }
+        if (!pressed() || !pressed_hold_ || grace_ms <= 0 ||
+            track_id < 0 || track_id != last_fire_track_id_)
+        {
+            hit_zone_loss_since_ms_ = -1;
+            return false;
+        }
+        if (hit_zone_loss_since_ms_ < 0)
+            hit_zone_loss_since_ms_ = target_loss_since_ms_ >= 0
+                ? target_loss_since_ms_ : now_ms;
+        return now_ms - hit_zone_loss_since_ms_ < std::clamp(grace_ms, 0, 2000);
     }
 
     bool reset()
@@ -166,6 +191,7 @@ public:
         shot_since_switch_ = false;
         delay_retargeted_ = false;
         target_loss_since_ms_ = -1;
+        hit_zone_loss_since_ms_ = -1;
         pressed_hold_ = false;
         return was_pressed;
     }
@@ -192,10 +218,11 @@ public:
 private:
     void startShot(Action& act, int64_t now_ms, bool hold_mode,
                    int fire_delay, int duration, int delay_jitter,
-                   int duration_jitter, int pre_fire_ms)
+                   int duration_jitter, int pre_fire_ms, int prearm_elapsed_ms)
     {
         const int target_delay = first_shot_pending_
-            ? jitter(fire_delay, delay_jitter) : 0;
+            ? std::max(0, jitter(fire_delay, delay_jitter) -
+                          std::max(0, prearm_elapsed_ms)) : 0;
         if (target_delay <= 0 && pre_fire_ms <= 0)
         {
             beginFire(act, now_ms, hold_mode, duration, duration_jitter);
@@ -241,6 +268,7 @@ private:
         in_zone_since_ms_ = -1;
         prefire_sent_ = false;
         phase_target_ms_ = hold_mode ? 0 : jitter(duration, duration_jitter);
+        hit_zone_loss_since_ms_ = -1;
     }
 
     static int jitter(int base, int j)
@@ -262,6 +290,7 @@ private:
     bool delay_retargeted_ = false;
     bool pressed_hold_ = false;
     int64_t target_loss_since_ms_ = -1;
+    int64_t hit_zone_loss_since_ms_ = -1;
 };
 
 }

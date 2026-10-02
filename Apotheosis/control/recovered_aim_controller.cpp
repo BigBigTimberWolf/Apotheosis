@@ -83,7 +83,7 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     };
     if (!(input.dtSec > 0.0) || !std::isfinite(input.dtSec))
     {
-        compensator_.reset();
+        resetCompensation();
         out.idleReason = ControlOutput::IdleReason::BadDt;
         releaseFov();
         return out;
@@ -92,18 +92,21 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     // carry are preserved across a plain no-target frame (105/106).
     const auto tracks = tracker_.update(input.detectionFresh ? input.candidates
                                                             : std::vector<Candidate>{},
-                                        input.dtSec,
-                                        input.motionEventSum);
+                                        input.dtSec);
+    const bool macroChanged=input.macro.commandSerial!=macroRevision_;
+    const bool macroSelect=macroChanged&&(input.macro.command==1||input.macro.command==3);
+    if(macroChanged){macroRevision_=input.macro.commandSerial;macroLockedId_=-1;}
+    if(macroChanged&&input.macro.command==4){selectedId_=-1;resetCompensation();return out;}
     if (config_.requireFreshDetection && !input.detectionFresh)
     {
-        compensator_.reset();
+        resetCompensation();
         out.idleReason = ControlOutput::IdleReason::StaleDetection;
         releaseFov();
         return out;
     }
     if (config_.requireFreshCrosshair && !input.crosshairFresh)
     {
-        compensator_.reset();
+        resetCompensation();
         out.idleReason = ControlOutput::IdleReason::StaleCrosshair;
         releaseFov();
         return out;
@@ -113,7 +116,9 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     for (size_t index = 0; index < tracks.size(); ++index)
     {
         const auto& track = tracks[index];
-        if (config_.buckets.bucketOf(track.classId) != Bucket::Aim) continue;
+        if(input.macro.classId>=0&&track.classId!=input.macro.classId)continue;
+        if(macroLockedId_>=0&&track.id!=macroLockedId_)continue;
+        if (input.macro.classId<0 && config_.buckets.bucketOf(track.classId) != Bucket::Aim) continue;
         if (track.confidence < config_.selector.minConfOf(track.classId)) continue;
         if (!fov_.contains(track.box, input.cross, track.id == selectedId_)) continue;
         if (config_.selector.maxDistancePx > 0.0 &&
@@ -122,8 +127,9 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     }
     if (eligible.empty())
     {
+        macroLockedId_=-1;
         releaseFov();
-        compensator_.reset();
+        resetCompensation();
         if (++selectionMisses_ >= 3) { selectedId_ = -1; selectedClassId_ = -1; }
         out.idleReason = ControlOutput::IdleReason::NoCandidates;
         return out;
@@ -140,7 +146,7 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
             if (rank >= 0) bestRank = std::min(bestRank, rank);
         }
     }
-    if (bestRank != std::numeric_limits<int>::max()) {
+    if (bestRank != std::numeric_limits<int>::max() && !input.macro.priority && !macroSelect) {
         eligible.erase(std::remove_if(eligible.begin(), eligible.end(), [&](size_t index) {
             const int id = tracks[index].classId;
             return id < 0 || static_cast<size_t>(id) >= config_.classPriorityById.size()
@@ -174,18 +180,30 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     };
     const bool higherPriorityAvailable = selectedId_ >= 0 && !eligible.empty() &&
         rankOf(tracks[eligible.front()].classId) < rankOf(selectedClassId_);
-    if (selectedId_ >= 0 && !reacquired && !higherPriorityAvailable && ++selectionMisses_ < 3)
+    if (selectedId_ >= 0 && !reacquired && !higherPriorityAvailable && !macroSelect && !input.macro.priority && ++selectionMisses_ < 3)
     {
         releaseFov();
-        compensator_.reset();
+        resetCompensation();
         out.idleReason = ControlOutput::IdleReason::NoCandidates;
         return out;
     }
     if (!reacquired)
         chosen = chooseFresh(tracks, eligible, input.cross);
+    if((macroChanged&&(input.macro.command==1||input.macro.command==3))||input.macro.priority) {
+        const bool requested=macroChanged&&(input.macro.command==1||input.macro.command==3);
+        auto score=[&](size_t i){const auto& t=tracks[i];const auto point=requested?Vec2{input.macro.x,input.macro.y}:input.cross;
+            const double distance=(t.box.center()-point).normSq();
+            if(requested||input.macro.priority==1)return -distance;
+            if(input.macro.priority==2)return distance;
+            if(input.macro.priority==3)return t.confidence;
+            return t.box.area();};
+        for(auto i:eligible)if(score(i)>score(chosen))chosen=i;
+        reacquired=tracks[chosen].id==selectedId_;
+        if(requested&&input.macro.command==1)macroLockedId_=tracks[chosen].id;
+    }
     if (!reacquired)
     {
-        compensator_.reset();
+        resetCompensation();
         // A new lock keeps the current radius: resetting here bypasses the
         // configured expansion time and abruptly admits distant candidates.
     }
@@ -222,6 +240,8 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     }
     // Freeze the sample, not the screen coordinate: the selected position
     // continues to follow the target's current box as it moves or changes size.
+    if(input.macro.partX>=0)point.xOffset=point.xOffsetMax=std::clamp(input.macro.partX,0.,1.);
+    if(input.macro.partY>=0)point.yOffset=point.yOffsetMax=1-std::clamp(input.macro.partY,0.,1.);
     const Vec2 sampledPoint = computeAnchor(out.filteredCenter, target.box,
                                             point, anchorSampleIndex_);
     const double maxX = static_cast<double>(std::max(config_.frameWidth - 1, 0));
@@ -249,23 +269,36 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     pid_.setConfig(pidConfig);
     out.followStrength = {pidConfig.maskX ? 0.0 : pidConfig.followX,
                           pidConfig.maskY ? 0.0 : pidConfig.followY};
+    const auto reversed = directionObserver_.update(target.observedCenter,
+        {target.box.w,target.box.h},input.backgroundMotion,input.observationTimeUs);
     const auto offset = compensator_.update(out.error,
         {double(config_.frameWidth), double(config_.frameHeight)},
-        out.followStrength, input.observationTimeUs, input.dtSec,
-        FollowMotion{target.observedCenter, input.motionEventSum, input.detectionFresh});
-    out.followMotion = compensator_.motionEstimate();
-    out.followPreset = compensator_.presetAmount();
+        out.followStrength, input.observationTimeUs, input.dtSec, reversed);
+    // Compensation telemetry remains original-error rate, independent of FF.
+    out.followMotion = compensator_.errorRate();
+    // Restore the selected tracking record as the FF source. The user's
+    // no-0.91 requirement leaves mouse-event compensation disabled upstream.
+    const Vec2 velocityFeedforward = target.velocity;
     out.followStateX = compensator_.stateX();
     out.followStateY = compensator_.stateY();
-    out.controlAnchor = out.anchor + offset;
+    out.controlAnchor = out.anchor + offset + target.velocity*(std::clamp(input.macro.predictionMs,0.,500.)/1000.);
     // Compensation changes only the input point. The original PID handles its
     // complete error (P/I/D, deadzone, FF, clipping, segmentation and carry).
     const auto step = pid_.update(out.controlAnchor - input.cross,
-                                  target.velocity, input.dtSec);
+                                  velocityFeedforward, input.dtSec);
     out.counts = step.counts;
+    if(input.macro.smoothing<1||input.macro.speed>0) {
+        const double alpha=std::clamp(input.macro.smoothing,0.01,1.);
+        macroSmoothed_=macroSmoothed_*(1-alpha)+Vec2{double(out.counts.x),double(out.counts.y)}*alpha;
+        Vec2 movement=macroSmoothed_;
+        const double limit=input.macro.speed*input.dtSec;
+        if(limit>0&&movement.norm()>limit)movement=movement*(limit/movement.norm());
+        movement+=macroCarry_;out.counts={int(std::trunc(movement.x)),int(std::trunc(movement.y))};
+        macroCarry_=movement-Vec2{double(out.counts.x),double(out.counts.y)};
+    } else macroSmoothed_=macroCarry_={};
     const Vec2 beforeLimit = step.afterDeadzone + Vec2{
-        !pidConfig.maskX && std::isfinite(target.velocity.x) ? pidConfig.feedforwardX * target.velocity.x : 0.0,
-        !pidConfig.maskY && std::isfinite(target.velocity.y) ? pidConfig.feedforwardY * target.velocity.y : 0.0};
+        !pidConfig.maskX && std::isfinite(velocityFeedforward.x) ? pidConfig.feedforwardX * velocityFeedforward.x : 0.0,
+        !pidConfig.maskY && std::isfinite(velocityFeedforward.y) ? pidConfig.feedforwardY * velocityFeedforward.y : 0.0};
     auto saturated = [&](double value) {
         return std::abs(value) >= pidConfig.smoothMaxPixel
             ? (value > 0.0 ? 1.0 : value < 0.0 ? -1.0 : 0.0) : 0.0;
@@ -278,10 +311,11 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
 
 void RecoveredAimController::reset()
 {
+    macroRevision_=0;macroLockedId_=-1;macroSmoothed_=macroCarry_={};
     fov_.reset();
     tracker_.reset();
     pid_.reset();
-    compensator_.reset();
+    resetCompensation();
     selectedId_ = -1;
     selectedClassId_ = -1;
     anchorTargetId_ = -1;

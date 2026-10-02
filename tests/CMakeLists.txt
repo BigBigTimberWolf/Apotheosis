@@ -38,8 +38,67 @@ endfunction()
 # ══════════════════════════════════════════════════════════════════════════════
 
 add_logic_test(latency_probe_test "${APP_SOURCE_ROOT}/runtime/tests/latency_probe_test.cpp")
+add_logic_test(frame_crosshair_test "${CMAKE_CURRENT_LIST_DIR}/frame_crosshair_test.cpp")
+if(OPENCV_LIB)
+    add_logic_test(background_motion_test "${CMAKE_CURRENT_LIST_DIR}/background_motion_test.cpp")
+    target_include_directories(background_motion_test PRIVATE "${OPENCV_INCLUDE_DIR}")
+    target_link_libraries(background_motion_test PRIVATE "${OPENCV_LIB}")
+    if(WIN32)
+        copy_runtime(background_motion_test "${OPENCV_DLL}")
+    endif()
+endif()
+add_logic_test(am_centroid_test "${CMAKE_CURRENT_LIST_DIR}/am_centroid_test.cpp")
+add_logic_test(latest_control_worker_test "${CMAKE_CURRENT_LIST_DIR}/latest_control_worker_test.cpp")
+add_logic_test(am_trigger_test "${CMAKE_CURRENT_LIST_DIR}/am_trigger_test.cpp")
+add_logic_test(button_priority_test "${CMAKE_CURRENT_LIST_DIR}/button_priority_test.cpp")
+add_logic_test(ferrum_protocol_test "${CMAKE_CURRENT_LIST_DIR}/ferrum_protocol_test.cpp")
+add_logic_test(macro_rule_test "${CMAKE_CURRENT_LIST_DIR}/macro_rule_test.cpp")
+if(WIN32 AND OPENCV_LIB AND TARGET CUDA::cudart)
+    add_logic_test(macro_sources_test "${CMAKE_CURRENT_LIST_DIR}/macro_sources_test.cpp"
+        "${APP_SOURCE_ROOT}/macro/rule_sources.cpp" "${APP_SOURCE_ROOT}/mem/gpu_image.cpp")
+    target_include_directories(macro_sources_test PRIVATE "${OPENCV_INCLUDE_DIR}")
+    target_link_libraries(macro_sources_test PRIVATE "${OPENCV_LIB}" CUDA::cudart windowsapp winmm user32)
+    target_compile_definitions(macro_sources_test PRIVATE NOMINMAX)
+    copy_runtime(macro_sources_test "${OPENCV_DLL}")
+    copy_runtime(macro_sources_test "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+endif()
+if(Qt6Widgets_FOUND)
+    add_executable(macro_rule_ui_test "${CMAKE_CURRENT_LIST_DIR}/macro_rule_ui_test.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroRuleEditor.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/FormKit.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.h")
+    target_include_directories(macro_rule_ui_test PRIVATE "${APP_SOURCE_ROOT}" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(macro_rule_ui_test PRIVATE Qt6::Widgets)
+    target_compile_features(macro_rule_ui_test PRIVATE cxx_std_20)
+    set_target_properties(macro_rule_ui_test PROPERTIES AUTOMOC ON)
+    target_compile_options(macro_rule_ui_test PRIVATE /utf-8 /Zc:char8_t-)
+    get_target_property(_macro_qt_core Qt6::Core IMPORTED_LOCATION_RELEASE)
+    get_filename_component(_macro_qt_bin "${_macro_qt_core}" DIRECTORY)
+    add_test(NAME macro_rule_ui_test COMMAND macro_rule_ui_test)
+    set_tests_properties(macro_rule_ui_test PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_macro_qt_bin}")
+endif()
+add_logic_test(ndi_latest_slot_test "${CMAKE_CURRENT_LIST_DIR}/ndi_latest_slot_test.cpp")
 add_logic_test(capture_card_caps_test "${APP_SOURCE_ROOT}/capture/tests/capture_card_caps_test.cpp")
 if(WIN32 AND OPENCV_LIB AND CUDAToolkit_FOUND)
+    add_executable(ndi_capture_test
+        "${CMAKE_CURRENT_LIST_DIR}/ndi_capture_test.cpp"
+        "${APP_SOURCE_ROOT}/capture/ndi_capture.cpp"
+        "${APP_SOURCE_ROOT}/ndi/ndi_runtime.cpp")
+    target_include_directories(ndi_capture_test PRIVATE
+        "${APP_SOURCE_ROOT}" "${OPENCV_INCLUDE_DIR}" "${CMAKE_CURRENT_LIST_DIR}/../third_party/ndi/include")
+    target_link_libraries(ndi_capture_test PRIVATE "${OPENCV_LIB}" CUDA::cudart)
+    target_compile_features(ndi_capture_test PRIVATE cxx_std_20)
+    target_compile_definitions(ndi_capture_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(ndi_capture_test PRIVATE /utf-8 /Zc:char8_t-)
+    endif()
+    copy_runtime(ndi_capture_test "${OPENCV_DLL}")
+    copy_runtime(ndi_capture_test "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+    add_dependencies(ndi_capture_test ndi_sender)
+    add_test(NAME ndi_capture_test COMMAND ndi_capture_test --sender "$<TARGET_FILE:ndi_sender>")
+    set_tests_properties(ndi_capture_test PROPERTIES TIMEOUT 40 SKIP_RETURN_CODE 77)
     add_executable(network_capture_test
         "${CMAKE_CURRENT_LIST_DIR}/network_capture_test.cpp"
         "${APP_SOURCE_ROOT}/capture/stream_capture.cpp")
@@ -62,7 +121,22 @@ add_logic_test(gpu_ready_event_test "${CMAKE_CURRENT_LIST_DIR}/gpu_ready_event_t
 # This test verifies event ownership with an instrumented CUDA API, not GPU work.
 target_include_directories(gpu_ready_event_test BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}/stubs")
 add_logic_test(raw_frame_layout_test "${CMAKE_CURRENT_LIST_DIR}/raw_frame_layout_test.cpp")
-add_logic_test(sensitivity_calibrator_test "${CMAKE_CURRENT_LIST_DIR}/sensitivity_calibrator_test.cpp")
+if(OPENCV_LIB)
+    add_executable(crosshair_exact_hsv_test
+        "${CMAKE_CURRENT_LIST_DIR}/crosshair_exact_hsv_test.cpp"
+        "${APP_SOURCE_ROOT}/crosshair/crosshair_detector.cpp")
+    target_include_directories(crosshair_exact_hsv_test PRIVATE
+        "${APP_SOURCE_ROOT}" "${OPENCV_INCLUDE_DIR}")
+    target_link_libraries(crosshair_exact_hsv_test PRIVATE "${OPENCV_LIB}")
+    target_compile_features(crosshair_exact_hsv_test PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(crosshair_exact_hsv_test PRIVATE /utf-8 /Zc:char8_t-)
+    endif()
+    if(WIN32)
+        copy_runtime(crosshair_exact_hsv_test "${OPENCV_DLL}")
+    endif()
+    add_test(NAME crosshair_exact_hsv_test COMMAND crosshair_exact_hsv_test)
+endif()
 add_logic_test(weapon_switch31_test "${CMAKE_CURRENT_LIST_DIR}/weapon_switch31_test.cpp")
 add_logic_test(switch31_shot_gate_test "${CMAKE_CURRENT_LIST_DIR}/switch31_shot_gate_test.cpp")
 if(WIN32)
@@ -243,6 +317,7 @@ endif()
 #   轨迹侧 —— 直线模式逐位透传、【四种模式只旋转不缩放】、WindMouse 门控旁路、
 #             同一 target_id 轨迹可复现、reset 后等价于全新驱动器。
 add_logic_test(trigger_path_test "${CMAKE_CURRENT_LIST_DIR}/trigger_path_test.cpp")
+add_logic_test(color_lab_test "${CMAKE_CURRENT_LIST_DIR}/color_lab_test.cpp")
 add_logic_test(trigger_target_test "${CMAKE_CURRENT_LIST_DIR}/trigger_target_test.cpp"
     "${APP_SOURCE_ROOT}/control/types.cpp")
 add_logic_test(auto_stop_timing_test "${CMAKE_CURRENT_LIST_DIR}/auto_stop_timing_test.cpp")

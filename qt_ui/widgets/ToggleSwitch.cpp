@@ -61,8 +61,8 @@ void ToggleSwitch::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
     p.setPen(Qt::NoPen);
 
-    const QColor offTrack = isEnabled() ? QColor("#D9DEE8") : QColor("#EBEDF2");
-    const QColor onTrack = isEnabled() ? QColor("#5865D8") : QColor("#BFC5EA");
+    const QColor offTrack = isEnabled() ? QColor("#44413A") : QColor("#292825");
+    const QColor onTrack = isEnabled() ? QColor("#D5B56B") : QColor("#655838");
     p.setBrush(offTrack);
     p.drawRoundedRect(QRectF(0, 0, w, h), r, r);
 
@@ -77,13 +77,13 @@ void ToggleSwitch::paintEvent(QPaintEvent*) {
     const qreal knobD = h - 2 * margin;
     const qreal x = margin + m_pos * (w - knobD - 2 * margin);
 
-    p.setBrush(QColor("#FFFFFF"));
+    p.setBrush(QColor("#F0EDE6"));
     p.setPen(QPen(QColor(0, 0, 0, 28), 0.5));
     p.drawEllipse(QRectF(x, margin, knobD, knobD));
 
     if (hasFocus()) {
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(QColor(88, 101, 216, 120), 2));
+        p.setPen(QPen(QColor(213, 181, 107, 160), 2));
         p.drawRoundedRect(rect().adjusted(1, 1, -1, -1), r - 1, r - 1);
     }
 }

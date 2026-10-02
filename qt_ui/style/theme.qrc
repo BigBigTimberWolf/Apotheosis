@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="style/theme.qss">theme.qss</file>
+        <file alias="assets/apotheosis_logo.png">../../Apotheosis/assets/apotheosis_logo.png</file>
+    </qresource>
+</RCC>

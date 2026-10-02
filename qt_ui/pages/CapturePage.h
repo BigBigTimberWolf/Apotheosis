@@ -29,6 +29,8 @@ private slots:
     void onFpsChanged(int index);
     void onSourceChanged(int index);
     void onStreamUrlEdited();
+    void refreshNdiSources();
+    void onNdiSourceEdited();
 
 private:
     void applySelectionToConfig();
@@ -49,6 +51,10 @@ private:
     QComboBox*    m_sourceCombo{};
     QLineEdit*    m_streamUrl{};
     QWidget*      m_streamRow{};
+    QComboBox*    m_ndiSource{};
+    QPushButton*  m_ndiRefresh{};
+    QWidget*      m_ndiRow{};
+    bool          m_ndiSearching = false;
     QComboBox*    m_devCombo{};
     QComboBox*    m_fmtCombo{};
     QComboBox*    m_resCombo{};

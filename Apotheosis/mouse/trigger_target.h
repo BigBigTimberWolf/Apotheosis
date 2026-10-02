@@ -20,8 +20,14 @@ struct TriggerTarget {
     double halfHeight = 0.0;
 
     bool contains(const control::Vec2& cross) const {
-        return valid && std::abs(cross.x - point.x) <= halfWidth &&
-            std::abs(cross.y - point.y) <= halfHeight;
+        return valid && std::abs(cross.x - point.x) < halfWidth &&
+            std::abs(cross.y - point.y) < halfHeight;
+    }
+
+    bool containsExpanded(const control::Vec2& cross, int expandPercent) const {
+        const double factor = 1.0 + std::clamp(expandPercent, 0, 300) / 100.0;
+        return valid && std::abs(cross.x - point.x) <= halfWidth * factor &&
+            std::abs(cross.y - point.y) <= halfHeight * factor;
     }
 };
 
@@ -47,8 +53,8 @@ public:
                 const double pointX = candidate.box.x + candidate.box.w * rule.x_offset;
                 const double pointY = candidate.box.y + candidate.box.h * (1.0 - rule.y_offset);
                 const bool hit =
-                    std::abs(cross.x - pointX) <= candidate.box.w * rule.range_x_percent / 200.0 &&
-                    std::abs(cross.y - pointY) <= candidate.box.h * rule.range_y_percent / 200.0;
+                    std::abs(cross.x - pointX) < candidate.box.w * rule.range_x_percent / 200.0 &&
+                    std::abs(cross.y - pointY) < candidate.box.h * rule.range_y_percent / 200.0;
                 if (requireHit && !hit) continue;
                 // A wide trigger range can extend beyond the aiming FOV. If
                 // the judgement point is inside that range, retain the box.

@@ -61,24 +61,15 @@ private:
     void rebuildAddClassCombo();
     void moveAimClass(int from, int to);
     void buildCrosshairCard();
-    void buildControllerCard();
-      void buildRecoveredControllerCard();
-    void showSensitivityCalibrateDialog(QDoubleSpinBox* spinK);
+    void buildRecoveredControllerCard();
     void buildDynamicFovCard();
     void buildTriggerCard();
-    void buildScopeCtlCard();
-    void applyScopeCtlVisibility();
-    void rebuildScopeCopyCombo();
     void buildTrajectoryCard();
 
     static QLabel* makeHint(const QString& text);
     static QLabel* makeSectionTitle(const QString& text);
-    QWidget* makeDoubleRow(const char* obj, const char* label,
-                           double lo, double hi, double step, double def);
     QWidget* makeIntRow(const char* obj, const char* label, int lo, int hi,
                         int step, int def, const QString& tip);
-    QWidget* makeDoubleRowTip(const char* obj, const char* label, double lo, double hi,
-                              double step, double def, const QString& tip);
     QWidget* makePathDoubleRow(const char* obj, const char* label, double lo, double hi,
                                double step, double def, const QString& tip);
     static void attachTip(QWidget* row, const QString& tip);
@@ -100,24 +91,12 @@ private:
     QStackedWidget* m_stack = nullptr;
     QLabel* m_emptyHint = nullptr;
 
-    std::vector<QDoubleSpinBox*> m_ctlDoubles;
-    std::vector<QSpinBox*>       m_ctlInts;
     TriggerWorkflowEditor* m_triggerWorkflow = nullptr;
     TriggerTargetEditor* m_triggerTargetEditor = nullptr;
     HotkeyActivationWidget* m_activationWidget = nullptr;
     std::vector<QSpinBox*>       m_pathInts;
     std::vector<QDoubleSpinBox*> m_pathDoubles;
 
-    // ── 开镜档 (自动开镜生效期间取代「瞄准控制器」整组参数) ──────────────
-    // ★ 这两条管道【必须】与 m_ctlDoubles/m_ctlInts 分开: 后两者被
-    //   buildControllerCard 的 commit 捕获, 会把值写进 hp.ctl_*; 开镜档写的是
-    //   hp.ctl_scope。
-    std::vector<QDoubleSpinBox*> m_scopeDoubles;
-    std::vector<QSpinBox*>       m_scopeInts;
-    QComboBox* m_scopeModeCombo = nullptr;   // 「自动开镜」卡里的跟随/独立开关
-    QComboBox* m_scopeCopyCombo = nullptr;   // 一键复制的来源热键
-    QLabel*    m_scopeCopyHint  = nullptr;   // 复制结果反馈
-    std::vector<QWidget*> m_scopeParamRows;  // 随开关显隐的行(含分段标题)
 
     // 轨迹卡片按模式显隐用的句柄（见 buildTrajectoryCard 的 applyMode）。
     QLabel* m_pathSectionBezier = nullptr;

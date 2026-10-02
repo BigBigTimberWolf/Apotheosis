@@ -2,6 +2,8 @@
 #include <QWidget>
 #include "macro/macro_config.h"
 
+class MacroRuleEditor;
+class QDoubleSpinBox;
 class QListWidget;
 class QTableWidget;
 class QLineEdit;
@@ -43,4 +45,8 @@ private:
     QSpinBox *interval_{}, *minHeight_{}, *maxHeight_{}, *a_{}, *b_{};
     QLabel *status_{}, *modeHelp_{}, *aLabel_{}, *bLabel_{}, *actionHint_{}, *empty_{}, *blockStatus_{};
     QPushButton* run_{};
+    MacroRuleEditor* rules_{};
+    QSpinBox *c_{},*d_{};QDoubleSpinBox* value_{};QLineEdit* text_{};
+    QWidget *cRow_{},*dRow_{},*valueRow_{},*textRow_{};
+    QLabel *cLabel_{},*dLabel_{},*valueLabel_{},*textLabel_{};
 };

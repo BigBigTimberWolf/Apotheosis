@@ -117,6 +117,7 @@ std::unordered_map<std::string, int> KeyCodes::key_code_map =
     {"LeftAlt", VK_LMENU},
     {"RightAlt", VK_RMENU},
     {"BrowserBack", VK_BROWSER_BACK},
+    {"BrowserForward",VK_BROWSER_FORWARD},
     {"BrowserRefresh", VK_BROWSER_REFRESH},
     {"BrowserStop", VK_BROWSER_STOP},
     {"BrowserSearch", VK_BROWSER_SEARCH},
@@ -136,6 +137,15 @@ std::unordered_map<std::string, int> KeyCodes::key_code_map =
 };
 
 int KeyCodes::getKeyCode(const std::string& key_name) {
+    if(key_name.rfind("VK:",0)==0){try{size_t used=0;const int vk=std::stoi(key_name.substr(3),&used,0);return used==key_name.size()-3&&vk>0&&vk<256?vk:-1;}catch(...){return -1;}}
+    if(key_name.size()>=3 && key_name[0]=='F') {
+        try {const int n=std::stoi(key_name.substr(1));if(n>=13&&n<=24)return VK_F1+n-1;}catch(...){}
+    }
+    static const std::unordered_map<std::string,int> extra={{"Minus",VK_OEM_MINUS},{"Equal",VK_OEM_PLUS},
+        {"LeftBracket",VK_OEM_4},{"RightBracket",VK_OEM_6},{"Backslash",VK_OEM_5},{"Semicolon",VK_OEM_1},
+        {"Quote",VK_OEM_7},{"Backquote",VK_OEM_3},{"Comma",VK_OEM_COMMA},{"Period",VK_OEM_PERIOD},
+        {"Slash",VK_OEM_2},{"NumpadEnter",VK_RETURN}};
+    const auto extraKey=extra.find(key_name);if(extraKey!=extra.end())return extraKey->second;
     auto it = key_code_map.find(key_name);
     if (it != key_code_map.end())
         return it->second;

@@ -18,6 +18,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -98,6 +99,13 @@ CrosshairPage::CrosshairPage(QWidget* parent, bool laserMode)
                               else ConfigManager::instance().setCrosshairRectH(v); });
 
     if (!m_laserMode) {
+        m_algorithm = new QComboBox(this);
+        m_algorithm->addItems({QStringLiteral("原有算法"), QStringLiteral("质心（局部筛选）")});
+        m_algorithm->setCurrentIndex(cfg.crosshairAlgorithm());
+        m_algorithm->setToolTip(QStringLiteral("质心：先筛选准星附近的局部色块，排除大面积色块和搜索框边缘残片，再求中心。最小像素数生效（至少2个），闭合滤波仅用于原有算法。两种算法均与目标使用同一帧画面；未找到时最多沿用上次位置3帧，第4帧回到中心。"));
+        regionCard->contentLayout()->addWidget(FormKit::fieldRow(QStringLiteral("准星找色算法"), m_algorithm));
+        connect(m_algorithm, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [](int v) { ConfigManager::instance().setCrosshairAlgorithm(v); });
         QSlider* offsetSlider = nullptr;
         regionCard->contentLayout()->addWidget(
             FormKit::sliderRow(QStringLiteral("垂直偏移（px，正数向下）"),
@@ -150,27 +158,28 @@ CrosshairPage::CrosshairPage(QWidget* parent, bool laserMode)
     m_addPresetBtn->setCursor(Qt::PointingHandCursor);
     m_addPresetBtn->setMinimumHeight(32);
     m_addPresetBtn->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#F4F5F7; color:#17191F; border:1px solid rgba(0,0,0,0.08);"
+        "QPushButton{background:#222226; color:#F0EDE6; border:1px solid rgba(213,181,107,0.08);"
         " border-radius:6px; padding:4px 12px; font-size:12px; font-weight:500;}"
-        "QPushButton:hover{background:#EAEAED; border-color:rgba(0,0,0,0.15);}"));
+        "QPushButton:hover{background:#2B2923; border-color:rgba(213,181,107,0.15);}"));
     toolBar->addWidget(m_addPresetBtn);
 
     m_pickColorBtn = new QPushButton(QStringLiteral("屏幕取色"), this);
     m_pickColorBtn->setCursor(Qt::PointingHandCursor);
+    m_pickColorBtn->setToolTip(QStringLiteral("在检测预览中移动鼠标，点击画面锁定放大镜，再点击放大镜中的单个像素块取色；右键取消。新颜色的 HSV 范围可在下方调整。"));
     m_pickColorBtn->setMinimumHeight(32);
     m_pickColorBtn->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#EEF0FB; color:#5E6AD2; border:1px solid rgba(94,106,210,0.25);"
+        "QPushButton{background:#302A1E; color:#D5B56B; border:1px solid rgba(213,181,107,0.25);"
         " border-radius:6px; padding:4px 14px; font-size:12px; font-weight:600;}"
-        "QPushButton:hover{background:#E0E4F9; border-color:#5E6AD2;}"));
+        "QPushButton:hover{background:#3A3020; border-color:#D5B56B;}"));
     toolBar->addWidget(m_pickColorBtn);
 
     m_addColorBtn = new QPushButton(QStringLiteral("+ 自定义"), this);
     m_addColorBtn->setCursor(Qt::PointingHandCursor);
     m_addColorBtn->setMinimumHeight(32);
     m_addColorBtn->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#FFFFFF; color:#3C3C44; border:1px dashed rgba(0,0,0,0.18);"
+        "QPushButton{background:#19191C; color:#DCD7CA; border:1px dashed rgba(213,181,107,0.18);"
         " border-radius:6px; padding:4px 12px; font-size:12px; font-weight:500;}"
-        "QPushButton:hover{color:#5E6AD2; border-color:#5E6AD2; background:#FAFAFC;}"));
+        "QPushButton:hover{color:#D5B56B; border-color:#D5B56B; background:#242321;}"));
     toolBar->addWidget(m_addColorBtn);
 
     colorCard->contentLayout()->addLayout(toolBar);
@@ -182,6 +191,38 @@ CrosshairPage::CrosshairPage(QWidget* parent, bool laserMode)
     colorCard->contentLayout()->addWidget(m_colorListContainer);
 
     layout->addWidget(colorCard);
+
+    auto* labCard = new CardWidget(QStringLiteral("取色实验室"), QStringLiteral("color-swatch"));
+    auto* labButtons = new QHBoxLayout;
+    labButtons->setSpacing(8);
+    m_labTargetBtn = new QPushButton(QStringLiteral("采目标色"), this);
+    m_labBackgroundBtn = new QPushButton(QStringLiteral("采背景色"), this);
+    m_labApplyBtn = new QPushButton(QStringLiteral("加入颜色列表"), this);
+    for (auto* button : {m_labTargetBtn, m_labBackgroundBtn, m_labApplyBtn}) {
+        button->setMinimumHeight(32);
+        button->setCursor(Qt::PointingHandCursor);
+        labButtons->addWidget(button);
+    }
+    m_labApplyBtn->setEnabled(false);
+    labCard->contentLayout()->addLayout(labButtons);
+    m_labPreviewToggle = new QCheckBox(QStringLiteral("在检测预览中实时显示匹配像素"), this);
+    labCard->contentLayout()->addWidget(m_labPreviewToggle);
+    m_labSummary = new QLabel(QStringLiteral("先采目标色，再采容易误识别的背景色。"), this);
+    m_labSummary->setWordWrap(true);
+    m_labSummary->setStyleSheet(QStringLiteral("color:#ABA697; font-size:12px;"));
+    labCard->contentLayout()->addWidget(m_labSummary);
+    auto* clearLabBtn = new QPushButton(QStringLiteral("清空本次样本"), this);
+    clearLabBtn->setCursor(Qt::PointingHandCursor);
+    labCard->contentLayout()->addWidget(clearLabBtn);
+    layout->addWidget(labCard);
+
+    connect(m_labTargetBtn, &QPushButton::clicked, this,
+            [this]() { startColorPick(PickRole::TargetSample); });
+    connect(m_labBackgroundBtn, &QPushButton::clicked, this,
+            [this]() { startColorPick(PickRole::BackgroundSample); });
+    connect(m_labApplyBtn, &QPushButton::clicked, this, &CrosshairPage::applyLabProfile);
+    connect(clearLabBtn, &QPushButton::clicked, this, &CrosshairPage::clearLabSamples);
+    connect(m_labPreviewToggle, &QCheckBox::toggled, this, &CrosshairPage::updateLabPreview);
 
     connect(m_addPresetBtn, &QPushButton::clicked, this, [this]() {
         addPreset(m_presetCombo->currentIndex());
@@ -243,7 +284,17 @@ CrosshairPage::CrosshairPage(QWidget* parent, bool laserMode)
     connect(&cfg, &ConfigManager::configLoaded, this, &CrosshairPage::loadConfig);
 }
 
+CrosshairPage::~CrosshairPage() {
+    if (m_pickToken != 0 && crosshair::ArmedToken() == m_pickToken)
+        crosshair::CancelColorPick();
+    crosshair::SetColorLabPreview({});
+}
+
 void CrosshairPage::loadConfig() {
+    if (m_algorithm) {
+        const QSignalBlocker blocker(m_algorithm);
+        m_algorithm->setCurrentIndex(ConfigManager::instance().crosshairAlgorithm());
+    }
     auto& cfg = ConfigManager::instance();
     const QSignalBlocker blockWidth(m_rectW), blockHeight(m_rectH);
     const QSignalBlocker blockPixels(m_minPixels), blockRadius(m_closeRadius);
@@ -285,16 +336,16 @@ void CrosshairPage::rebuildColorList() {
         auto* emptyLabel = new QLabel(m_laserMode
             ? QStringLiteral("暂未配置镭射颜色，可从上方选择预设或点击屏幕取色添加。")
             : QStringLiteral("暂未配置准星颜色，可从上方选择预设或点击屏幕取色添加。"), m_colorListContainer);
-        emptyLabel->setStyleSheet(QStringLiteral("color:#98A1B0; font-size:12px; padding:12px;"));
+        emptyLabel->setStyleSheet(QStringLiteral("color:#8E887A; font-size:12px; padding:12px;"));
         emptyLabel->setAlignment(Qt::AlignCenter);
         m_colorListLayout->addWidget(emptyLabel);
         return;
     }
 
     const QString spinBoxSS = QStringLiteral(
-        "QSpinBox{background:#FFFFFF; border:1px solid #E4E4E7; border-radius:4px;"
-        " padding:1px 3px; font-size:12px; font-weight:500; color:#17191F;}"
-        "QSpinBox:focus{border-color:#5E6AD2;}"
+        "QSpinBox{background:#19191C; border:1px solid #35332D; border-radius:4px;"
+        " padding:1px 3px; font-size:12px; font-weight:500; color:#F0EDE6;}"
+        "QSpinBox:focus{border-color:#D5B56B;}"
         "QSpinBox::up-button, QSpinBox::down-button{width:0px;}");
 
     for (int i = 0; i < m_colors.size(); ++i) {
@@ -304,9 +355,9 @@ void CrosshairPage::rebuildColorList() {
         auto* itemFrame = new QFrame(m_colorListContainer);
         itemFrame->setObjectName(QStringLiteral("colorItemFrame"));
         itemFrame->setStyleSheet(QStringLiteral(
-            "QFrame#colorItemFrame{background:#FAFAFB; border:1px solid rgba(0,0,0,0.06);"
+            "QFrame#colorItemFrame{background:#202023; border:1px solid rgba(213,181,107,0.06);"
             " border-radius:8px;}"
-            "QFrame#colorItemFrame:hover{border-color:rgba(94,106,210,0.35);}"));
+            "QFrame#colorItemFrame:hover{border-color:rgba(213,181,107,0.35);}"));
 
         auto* frameLayout = new QVBoxLayout(itemFrame);
         frameLayout->setContentsMargins(12, 10, 12, 10);
@@ -326,7 +377,7 @@ void CrosshairPage::rebuildColorList() {
         auto updateDotColor = [colorDot](int hLo, int hHi, int sLo, int sHi, int vLo, int vHi) {
             QColor qc = computePreviewColor(hLo, hHi, sLo, sHi, vLo, vHi);
             colorDot->setStyleSheet(QStringLiteral(
-                "background-color:%1; border:1px solid rgba(0,0,0,0.2); border-radius:9px;")
+                "background-color:%1; border:1px solid rgba(213,181,107,0.2); border-radius:9px;")
                 .arg(qc.name()));
         };
         updateDotColor(c.hLow, c.hHigh, c.sMin, c.sMax, c.vMin, c.vMax);
@@ -335,10 +386,16 @@ void CrosshairPage::rebuildColorList() {
         auto* nameEdit = new QLineEdit(c.name, itemFrame);
         nameEdit->setPlaceholderText(QStringLiteral("颜色名称"));
         nameEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit{background:#FFFFFF; border:1px solid #E4E4E7; border-radius:4px;"
-            " padding:2px 8px; font-size:12px; font-weight:500; color:#17191F;}"
-            "QLineEdit:focus{border-color:#5E6AD2;}"));
+            "QLineEdit{background:#19191C; border:1px solid #35332D; border-radius:4px;"
+            " padding:2px 8px; font-size:12px; font-weight:500; color:#F0EDE6;}"
+            "QLineEdit:focus{border-color:#D5B56B;}"));
         headerRow->addWidget(nameEdit, 1);
+
+        auto* exactChk = new QCheckBox(QStringLiteral("精确 HSV"), itemFrame);
+        exactChk->setChecked(c.exactHsv);
+        exactChk->setToolTip(QStringLiteral("严格使用这一行的 H/S/V 范围；实验室生成的准星颜色默认启用。"));
+        exactChk->setVisible(!m_laserMode);
+        headerRow->addWidget(exactChk);
 
         auto* delBtn = new QPushButton(QStringLiteral("删除"), itemFrame);
         delBtn->setObjectName(QStringLiteral("removeColorButton"));
@@ -346,8 +403,8 @@ void CrosshairPage::rebuildColorList() {
         delBtn->setCursor(Qt::PointingHandCursor);
         delBtn->setToolTip(QStringLiteral("移除该颜色"));
         delBtn->setStyleSheet(QStringLiteral(
-            "QPushButton#removeColorButton{color:#B4232F; background-color:#FFF1F2;"
-            " border:1px solid #F4B7BD; border-radius:5px; padding:0;"
+            "QPushButton#removeColorButton{color:#F28D98; background-color:#321E21;"
+            " border:1px solid #693139; border-radius:5px; padding:0;"
             " font-size:12px; font-weight:600;}"
             "QPushButton#removeColorButton:hover{color:#FFFFFF;"
             " background-color:#D23B3B; border-color:#D23B3B;}"));
@@ -379,7 +436,7 @@ void CrosshairPage::rebuildColorList() {
             grp->addWidget(loSpin);
 
             auto* sep = new QLabel(QStringLiteral("~"), itemFrame);
-            sep->setStyleSheet(QStringLiteral("color:#A1A1AA; font-weight:bold; font-size:12px;"));
+            sep->setStyleSheet(QStringLiteral("color:#A49E90; font-weight:bold; font-size:12px;"));
             grp->addWidget(sep);
 
             hiSpin = new QSpinBox(itemFrame);
@@ -398,7 +455,7 @@ void CrosshairPage::rebuildColorList() {
         QSpinBox *sLoBox = nullptr, *sHiBox = nullptr;
         QSpinBox *vLoBox = nullptr, *vHiBox = nullptr;
 
-        makeChannelGroup(QStringLiteral("H"), QStringLiteral("#5E6AD2"), 0, 179, c.hLow, c.hHigh, hLoBox, hHiBox);
+        makeChannelGroup(QStringLiteral("H"), QStringLiteral("#D5B56B"), 0, 179, c.hLow, c.hHigh, hLoBox, hHiBox);
         makeChannelGroup(QStringLiteral("S"), QStringLiteral("#2CA02C"), 0, 255, c.sMin, c.sMax, sLoBox, sHiBox);
         makeChannelGroup(QStringLiteral("V"), QStringLiteral("#D97706"), 0, 255, c.vMin, c.vMax, vLoBox, vHiBox);
         rangesRow->addStretch();
@@ -407,10 +464,11 @@ void CrosshairPage::rebuildColorList() {
 
         m_colorListLayout->addWidget(itemFrame);
 
-        auto onValueChanged = [this, idx, chk, nameEdit, hLoBox, hHiBox, sLoBox, sHiBox, vLoBox, vHiBox, updateDotColor]() {
+        auto onValueChanged = [this, idx, chk, exactChk, nameEdit, hLoBox, hHiBox, sLoBox, sHiBox, vLoBox, vHiBox, updateDotColor]() {
             if (idx < 0 || idx >= m_colors.size()) return;
             auto& entry = m_colors[idx];
             entry.enabled = chk->isChecked();
+            entry.exactHsv = exactChk->isChecked();
             entry.name = nameEdit->text().trimmed();
             entry.hLow = hLoBox->value();
             entry.hHigh = hHiBox->value();
@@ -423,6 +481,7 @@ void CrosshairPage::rebuildColorList() {
         };
 
         connect(chk, &QCheckBox::toggled, this, onValueChanged);
+        connect(exactChk, &QCheckBox::toggled, this, onValueChanged);
         connect(nameEdit, &QLineEdit::editingFinished, this, onValueChanged);
         connect(hLoBox, QOverload<int>::of(&QSpinBox::valueChanged), this, onValueChanged);
         connect(hHiBox, QOverload<int>::of(&QSpinBox::valueChanged), this, onValueChanged);
@@ -499,38 +558,111 @@ void CrosshairPage::removeColorAt(int index) {
 }
 
 void CrosshairPage::toggleColorPick() {
-    if (m_pickToken != 0) {
+    startColorPick(PickRole::Direct);
+}
+
+void CrosshairPage::startColorPick(PickRole role) {
+    if (m_pickToken != 0 && m_pickRole == role) {
         crosshair::CancelColorPick();
         finishPicking();
         return;
+    }
+    if (m_pickToken != 0) {
+        crosshair::CancelColorPick();
+        finishPicking();
     }
     auto& cm = ConfigManager::instance();
     if (!cm.showWindow())
         cm.setShowWindow(true);
 
+    m_pickRole = role;
     m_pickToken = crosshair::ArmColorPick(0);
-    m_pickColorBtn->setText(QStringLiteral("取消取色"));
-    m_pickColorBtn->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#FDF2F2; color:#D23B3B; border:1px solid #D23B3B;"
-        " border-radius:6px; padding:4px 14px; font-size:12px; font-weight:600;}"));
+    if (role == PickRole::Direct) m_pickColorBtn->setText(QStringLiteral("取消取色"));
+    if (role == PickRole::TargetSample) m_labTargetBtn->setText(QStringLiteral("取消目标采样"));
+    if (role == PickRole::BackgroundSample) m_labBackgroundBtn->setText(QStringLiteral("取消背景采样"));
     m_pickTimer->start();
 }
 
 void CrosshairPage::pollPickedColor() {
     int h = 0, s = 0, v = 0;
     if (crosshair::TakePickedColor(m_pickToken, h, s, v)) {
-        applyPickedColor(h, s, v);
+        if (m_pickRole == PickRole::Direct) {
+            applyPickedColor(h, s, v);
+        } else {
+            auto& samples = m_pickRole == PickRole::TargetSample
+                ? m_labTargets : m_labBackgrounds;
+            if (samples.size() >= 32) samples.erase(samples.begin());
+            samples.push_back({h, s, v});
+            updateLabPreview();
+        }
         finishPicking();
     } else if (crosshair::ArmedToken() != m_pickToken) {
         finishPicking();
     }
 }
 
+void CrosshairPage::updateLabPreview() {
+    const auto result = crosshair::deriveColorLabBands(m_labTargets, m_labBackgrounds);
+    m_labApplyBtn->setEnabled(!result.bands.empty());
+    if (m_labTargets.empty()) {
+        m_labSummary->setText(QStringLiteral("先采目标色，再采容易误识别的背景色。"));
+    } else {
+        QStringList ranges;
+        for (const auto& band : result.bands) {
+            ranges << QStringLiteral("H %1–%2 · S %3–%4 · V %5–%6")
+                .arg(band.h_low).arg(band.h_high)
+                .arg(band.s_min).arg(band.s_max)
+                .arg(band.v_min).arg(band.v_max);
+        }
+        m_labSummary->setText(
+            QStringLiteral("目标样本 %1，背景样本 %2；背景误命中 %3。候选范围：%4%5")
+                .arg(m_labTargets.size()).arg(m_labBackgrounds.size())
+                .arg(result.background_hits).arg(ranges.join(QStringLiteral(" / ")))
+                .arg(result.background_hits > 0
+                    ? QStringLiteral("。这些背景色与目标色重叠，建议补采不同位置或手动微调。")
+                    : QString()));
+    }
+    crosshair::SetColorLabPreview(m_labPreviewToggle->isChecked()
+        ? result.bands : std::vector<crosshair::ColorLabBand>{});
+}
+
+void CrosshairPage::applyLabProfile() {
+    const auto result = crosshair::deriveColorLabBands(m_labTargets, m_labBackgrounds);
+    if (result.bands.empty()) return;
+    const int group = m_colors.size() + 1;
+    for (size_t i = 0; i < result.bands.size(); ++i) {
+        const auto& band = result.bands[i];
+        ConfigManager::ColorProfile profile;
+        profile.name = result.bands.size() == 1
+            ? QStringLiteral("实验室 %1").arg(group)
+            : QStringLiteral("实验室 %1-%2").arg(group).arg(i + 1);
+        profile.enabled = true;
+        profile.exactHsv = true;
+        profile.hLow = band.h_low;
+        profile.hHigh = band.h_high;
+        profile.sMin = band.s_min;
+        profile.sMax = band.s_max;
+        profile.vMin = band.v_min;
+        profile.vMax = band.v_max;
+        m_colors.append(profile);
+    }
+    rebuildColorList();
+    saveCrosshairColors();
+}
+
+void CrosshairPage::clearLabSamples() {
+    m_labTargets.clear();
+    m_labBackgrounds.clear();
+    updateLabPreview();
+}
+
 void CrosshairPage::applyPickedColor(int h, int s, int v) {
-    constexpr int kHueHalf = 15;
-    constexpr int kSvMargin = 70;
+    constexpr int kHueHalf = 5;
+    constexpr int kSvMargin = 25;
     const int sLo = std::max(0, s - kSvMargin);
+    const int sHi = std::min(255, s + kSvMargin);
     const int vLo = std::max(0, v - kSvMargin);
+    const int vHi = std::min(255, v + kSvMargin);
     const QString base = QStringLiteral("取色 H%1 S%2 V%3").arg(h).arg(s).arg(v);
 
     const int lo = h - kHueHalf;
@@ -540,41 +672,46 @@ void CrosshairPage::applyPickedColor(int h, int s, int v) {
         ConfigManager::ColorProfile c1;
         c1.name = base + QStringLiteral(" 低");
         c1.enabled = true;
+        c1.exactHsv = true;
         c1.hLow = 0; c1.hHigh = hi;
-        c1.sMin = sLo; c1.sMax = 255;
-        c1.vMin = vLo; c1.vMax = 255;
+        c1.sMin = sLo; c1.sMax = sHi;
+        c1.vMin = vLo; c1.vMax = vHi;
         m_colors.append(c1);
 
         ConfigManager::ColorProfile c2;
         c2.name = base + QStringLiteral(" 高");
         c2.enabled = true;
+        c2.exactHsv = true;
         c2.hLow = 180 + lo; c2.hHigh = 179;
-        c2.sMin = sLo; c2.sMax = 255;
-        c2.vMin = vLo; c2.vMax = 255;
+        c2.sMin = sLo; c2.sMax = sHi;
+        c2.vMin = vLo; c2.vMax = vHi;
         m_colors.append(c2);
     } else if (hi > 179) {
         ConfigManager::ColorProfile c1;
         c1.name = base + QStringLiteral(" 低");
         c1.enabled = true;
+        c1.exactHsv = true;
         c1.hLow = 0; c1.hHigh = hi - 180;
-        c1.sMin = sLo; c1.sMax = 255;
-        c1.vMin = vLo; c1.vMax = 255;
+        c1.sMin = sLo; c1.sMax = sHi;
+        c1.vMin = vLo; c1.vMax = vHi;
         m_colors.append(c1);
 
         ConfigManager::ColorProfile c2;
         c2.name = base + QStringLiteral(" 高");
         c2.enabled = true;
+        c2.exactHsv = true;
         c2.hLow = lo; c2.hHigh = 179;
-        c2.sMin = sLo; c2.sMax = 255;
-        c2.vMin = vLo; c2.vMax = 255;
+        c2.sMin = sLo; c2.sMax = sHi;
+        c2.vMin = vLo; c2.vMax = vHi;
         m_colors.append(c2);
     } else {
         ConfigManager::ColorProfile c;
         c.name = base;
         c.enabled = true;
+        c.exactHsv = true;
         c.hLow = lo; c.hHigh = hi;
-        c.sMin = sLo; c.sMax = 255;
-        c.vMin = vLo; c.vMax = 255;
+        c.sMin = sLo; c.sMax = sHi;
+        c.vMin = vLo; c.vMax = vHi;
         m_colors.append(c);
     }
 
@@ -587,8 +724,11 @@ void CrosshairPage::finishPicking() {
     if (m_pickTimer)
         m_pickTimer->stop();
     m_pickColorBtn->setText(QStringLiteral("屏幕取色"));
+    m_labTargetBtn->setText(QStringLiteral("采目标色"));
+    m_labBackgroundBtn->setText(QStringLiteral("采背景色"));
+    m_pickRole = PickRole::Direct;
     m_pickColorBtn->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#EEF0FB; color:#5E6AD2; border:1px solid rgba(94,106,210,0.25);"
+        "QPushButton{background:#302A1E; color:#D5B56B; border:1px solid rgba(213,181,107,0.25);"
         " border-radius:6px; padding:4px 14px; font-size:12px; font-weight:600;}"
-        "QPushButton:hover{background:#E0E4F9; border-color:#5E6AD2;}"));
+        "QPushButton:hover{background:#3A3020; border-color:#D5B56B;}"));
 }
