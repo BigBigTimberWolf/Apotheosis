@@ -3,7 +3,6 @@
 #include "anchor.h"
 #include "selector.h"
 #include "types.h"
-#include "background_motion.h"
 #include "macro/control_directive.h"
 
 #include <vector>
@@ -50,7 +49,6 @@ struct ControlInput
     double trackingDtSec = 0.0; // Capture-frame interval; PID keeps dtSec.
     Vec2 motionEventSum{};      // Successful sends matched to this frame.
     int64_t observationTimeUs = 0;
-    BackgroundMotion backgroundMotion;
     uint64_t frameIndex = 0;
     bool detectionFresh = true;
     bool crosshairFresh = true;

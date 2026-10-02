@@ -1,7 +1,6 @@
 #pragma once
 #include "runtime/frame_context.h"
 #include "runtime/frame_crosshair.h"
-#include "control/background_motion.h"
 #include <algorithm>
 #include <chrono>
 #include <vector>
@@ -25,7 +24,6 @@ struct DetectionBuffer
     int64_t frame_stamp_ns = 0;
     runtime::FrameContext frame_context;
     runtime::FrameCrosshair frame_crosshair;
-    control::BackgroundMotion background_motion;
 
     void bumpVersionLocked(int64_t frame_capture_ns = 0)
     {
@@ -37,7 +35,6 @@ struct DetectionBuffer
         frame_stamp_ns = frame_capture_ns;
         frame_context = {0, frame_capture_ns, 0, 0};
         frame_crosshair = {};
-        background_motion = {};
         ++version;
     }
 

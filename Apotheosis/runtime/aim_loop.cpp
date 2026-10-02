@@ -482,7 +482,6 @@ bool tick(int* consumedVersion)
     int detectedVersion = 0;
     runtime::FrameContext detectedFrame;
     runtime::FrameCrosshair detectedCrosshair;
-    control::BackgroundMotion detectedBackground;
     {
         std::lock_guard<std::mutex> lk(detectionBuffer.mutex);
         if (consumedVersion) {
@@ -492,7 +491,6 @@ bool tick(int* consumedVersion)
         detectedFrame = detectionBuffer.frame_context;
         detectedVersion = detectionBuffer.version;
         detectedCrosshair = detectionBuffer.frame_crosshair;
-        detectedBackground = detectionBuffer.background_motion;
         captureNs = detectionBuffer.frame_context.captured_ns > 0
             ? detectionBuffer.frame_context.captured_ns : detectionBuffer.frame_stamp_ns;
         publishNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -714,7 +712,6 @@ bool tick(int* consumedVersion)
             g_pidfFeedback.add({event.dx, event.dy, event.timestamp_us, event.source});
         in.motionEventSum = g_pidfFeedback.sample(frameUs);
         in.observationTimeUs = frameUs;
-        in.backgroundMotion = detectedBackground;
         in.frameIndex = ++g_frame_index;
         in.detectionFresh = detectionFresh;
         in.crosshairFresh = crossFresh;

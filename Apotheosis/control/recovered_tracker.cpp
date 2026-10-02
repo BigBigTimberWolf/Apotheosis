@@ -122,6 +122,32 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
     if (state.track.velocity.norm() <
         std::max(config.frameMinDimension * 0.0096, 2.5))
         state.track.velocity = {};
+
+    // Separate maneuver-aware velocity for aim-point extrapolation only (the
+    // frozen FF `velocity` above is untouched). Built from pure observed screen
+    // motion so the lead reaches its ideal value on the first frame that reveals
+    // a reversal, sudden stop, or new target — the 1-frame observation floor.
+    constexpr double steadyAlpha = 0.4; // baked: smooth when steady, auto-snaps on maneuvers
+    auto predictAxis = [&](double pv, double raw, double size, bool xAxis) {
+        if (!state.predictSeeded) return raw; // seed a new target immediately
+        const double noise = xAxis ? std::max(std::max(size, 8.0) * 0.0067, 2.0)
+                                   : std::max(std::max(size, 10.0) * 0.0107, 2.5);
+        const double innovation = raw - pv;
+        // How clearly the change exceeds detection noise: 0 inside the band
+        // (stay smooth, no shake), ramping to 1 for a real maneuver (snap).
+        const double realness = std::clamp((std::abs(innovation) - noise) / (3.0 * noise), 0.0, 1.0);
+        double alpha = steadyAlpha + (1.0 - steadyAlpha) * realness;
+        const bool reversal = pv * raw < 0.0 && std::abs(raw) > noise;
+        const bool suddenStop = std::abs(raw) <= noise && std::abs(pv) > 2.0 * noise;
+        if (reversal || suddenStop) alpha = 1.0;
+        return pv + alpha * innovation;
+    };
+    state.track.predictVelocity = {
+        predictAxis(state.track.predictVelocity.x, rawVelocity.x, incoming.w, true),
+        predictAxis(state.track.predictVelocity.y, rawVelocity.y, incoming.h, false)
+    };
+    state.predictSeeded = true;
+
     state.lastObservation = incoming.center();
     state.track.observedCenter = state.lastObservation;
     state.track.confidence = candidate.confidence;
@@ -188,6 +214,7 @@ std::vector<RecoveredTrack> RecoveredTracker::update(
             ++tracks_[ti].track.missedFrames;
             tracks_[ti].track.velocity.x *= 0.74;
             tracks_[ti].track.velocity.y *= 0.68;
+            tracks_[ti].track.predictVelocity = tracks_[ti].track.predictVelocity * 0.8;
             tracks_[ti].firstVelocity = tracks_[ti].firstVelocity * 0.72;
         }
     std::erase_if(tracks_, [this](const State& state) {
@@ -329,6 +356,7 @@ std::vector<RecoveredTrack> RecoveredDualTracker::update(
         if (best < motion.size())
         {
             published.velocity = motion[best].velocity;
+            published.predictVelocity = motion[best].predictVelocity;
             used[best] = true;
         }
         visible.push_back(published);

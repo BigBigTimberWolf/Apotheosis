@@ -1325,7 +1325,6 @@ void TrtDetector::inferenceThread()
     std::array<cv::Mat, 2> inflightCpu;
 
     bool graphCaptureGivenUp = false;
-    int motionHotkey = -1;
 
     auto publishSlot = [&](int slot)
     {
@@ -1341,33 +1340,6 @@ void TrtDetector::inferenceThread()
         // Color and detections consume the SAME retained inference image.
         // Never rendezvous with the capture worker's latest-only slot.
         const auto colorStart = std::chrono::steady_clock::now();
-        const auto motionSettings = runtime_config::read();
-        const int activeMotionKey = runtime::g_active_hotkey_index.load();
-        bool needMotion = false;
-        if (activeMotionKey >= 0 && size_t(activeMotionKey) < motionSettings->hotkeys.size()) {
-            const auto& hk = motionSettings->hotkeys[activeMotionKey];
-            auto enabled = [](const control::RecoveredPidConfig& p) { return p.followX > 0 || p.followY > 0; };
-            needMotion = enabled(hk.recovered_pid) || enabled(hk.recovered_secondary_pid) || enabled(hk.recovered_scope_pid);
-        }
-        if (!needMotion || motionHotkey != activeMotionKey) backgroundEstimator_.reset();
-        motionHotkey = activeMotionKey;
-        motionThumbnail_.release();
-        if (needMotion) {
-            if (!inflightGpu[slot].empty()) {
-                const auto& frame = inflightGpu[slot];
-                const auto size = runtime::BackgroundMotionEstimator::thumbnailSize({frame.cols(),frame.rows()});
-                if (motionThumbnailGpu_.create(size.height,size.width,1)) {
-                    launch_motion_thumbnail(frame.data(),frame.step(),frame.cols(),frame.rows(),frame.channels(),
-                        motionThumbnailGpu_.data(),motionThumbnailGpu_.step(),size.width,size.height,stream);
-                    if (cudaGetLastError()==cudaSuccess) {
-                        motionThumbnailGpu_.download(motionThumbnail_,stream);
-                        if (cudaStreamSynchronize(stream)!=cudaSuccess) motionThumbnail_.release();
-                    }
-                }
-            } else if (!inflightCpu[slot].empty()) {
-                runtime::BackgroundMotionEstimator::thumbnail(inflightCpu[slot],motionThumbnail_);
-            }
-        }
         if (crosshair_runtime::same_frame_crosshair_active())
         {
             crosshair_runtime::PivotSnapshot pivot;
@@ -1470,7 +1442,6 @@ void TrtDetector::inferenceThread()
             slotSubmitNs[0]  = slotSubmitNs[1]  = 0;
             curr_slot = 0;
             graphCaptureGivenUp = false;
-            backgroundEstimator_.reset();
         }
 
         if (useCudaGraph != runtime_config::read()->use_cuda_graph)
@@ -1835,13 +1806,6 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
             *nmsTime = std::chrono::duration<double, std::milli>(0);
     }
 
-    // Exclude every detected object before class filtering, including objects
-    // that the user has removed from the aiming classes.
-    std::vector<cv::Rect> foreground;
-    foreground.reserve(detections.size());
-    for (const auto& det : detections) foreground.push_back(det.box);
-    const auto background = backgroundEstimator_.update(motionThumbnail_,
-        {publishContext.width,publishContext.height},foreground,publishCaptureNs/1000);
     applyDeleteBucketFilter(detections);
 
     {
@@ -1862,7 +1826,6 @@ void TrtDetector::postProcess(const void* output, const std::string& outputName,
         runtime::latency::markInferenceDone(publishSubmitNs);
         detectionBuffer.bumpVersionLocked(publishContext);
         detectionBuffer.frame_crosshair = publishCrosshair;
-        detectionBuffer.background_motion = background;
         detectionBuffer.cv.notify_all();
     }
 

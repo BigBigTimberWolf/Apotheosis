@@ -172,27 +172,6 @@ int main()
     if(hit.count!=9 || hit.x!=1440 || hit.y!=1575)return 16;
     hit=detect(image,side,110,110,100,100,0,160,160,10,1);
     if(hit.count)return 17;
-    // Verify the GPU thumbnail against independent CPU arithmetic, including
-    // BGRA/gray inputs and padded rows used by retained inference frames.
-    for(int channels : {1,3,4}) {
-        constexpr int w=37,h=29,ow=16,oh=13;
-        const size_t pitch=w*channels+7;
-        std::vector<unsigned char> src(pitch*h),out(ow*oh);
-        for(size_t i=0;i<src.size();++i) src[i]=static_cast<unsigned char>((i*37+11)%256);
-        unsigned char *device=nullptr,*small=nullptr;
-        if(cudaMalloc(&device,src.size())!=cudaSuccess || cudaMalloc(&small,out.size())!=cudaSuccess)return 18;
-        cudaMemcpy(device,src.data(),src.size(),cudaMemcpyHostToDevice);
-        launch_motion_thumbnail(device,pitch,w,h,channels,small,ow,ow,oh,nullptr);
-        if(cudaDeviceSynchronize()!=cudaSuccess)return 19;
-        cudaMemcpy(out.data(),small,out.size(),cudaMemcpyDeviceToHost);
-        cudaFree(device);cudaFree(small);
-        auto gray=[&](int x,int y) { const auto* p=&src[y*pitch+x*channels];
-            return channels==1?int(p[0]):(29*p[0]+150*p[1]+77*p[2]+128)>>8; };
-        for(int y=0;y<oh;++y)for(int x=0;x<ow;++x) {
-            const int a=x*w/ow,b=(x+1)*w/ow-1,c=y*h/oh,d=(y+1)*h/oh-1;
-            if(out[y*ow+x]!=(gray(a,c)+gray(b,c)+gray(a,d)+gray(b,d)+2)/4)return 20;
-        }
-    }
-    std::puts("crosshair and motion thumbnail GPU tests passed");
+    std::puts("crosshair GPU tests passed");
     return 0;
 }

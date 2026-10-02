@@ -152,12 +152,19 @@ int main()
         const auto a=replay.update({0,49.649238586},{},.1);
         const auto b=replay.update({0,-50},{},.001);
         const auto end=replay.update({0,-50},{},.001);
-        check(a.counts.y==24 && b.counts.y==-27 && end.counts.y==(enabled?-23:-24),
-              "source 513 three-frame reversal reproduces the integer branch difference");
+        // New deterministic baseline after the always-on stabilizers (filtered D,
+        // decoupled integral). The old firmware-exact ±ki knife-edge that made the
+        // reversal branch differ by one count is gone; both banks now resolve the
+        // same, which this snapshot guards against future accidental drift.
+        check(a.counts.y==24 && b.counts.y==-27 && end.counts.y==-27,
+              "stabilized PID three-frame reversal: deterministic new baseline");
     }
     for (float nextKi : {2.0f,.5f}) {
         RecoveredPid p;RecoveredPidConfig c;
         c.kpX=c.kpY=c.kdX=c.kdY=0;c.kiX=c.kiY=1;
+        // Deadzone 0 isolates the Ki-edit integral-clear rule from the always-on
+        // in-deadzone integral freeze; this rule itself is unchanged.
+        c.deadzoneX=c.deadzoneY=0;
         c.preserveIntegralOnReverse=true;p.setConfig(c);
         p.update({2,3},{},.1);
         c.kiX=nextKi;p.setConfig(c);
@@ -218,17 +225,27 @@ int main()
     const auto stable = pid.update({ 8, -4 }, {}, 0.0625);
     check(stable.counts.x != 0, "stable segment resumes sending");
 
-    RecoveredPid directD;
-    RecoveredPidConfig directDConfig;
-    directDConfig.kpX = directDConfig.kpY = 0.0f;
-    directDConfig.kiX = directDConfig.kiY = 0.0f;
-    directDConfig.kdX = directDConfig.kdY = 1.0f;
-    directD.setConfig(directDConfig);
-    directD.update({ 0, 0 }, {}, 0.01);
-    const auto directStep = directD.update({ 10, 0 }, {}, 0.01);
-    check(std::abs(directStep.derivativeRaw.x - 1000.0) < 0.1 &&
-          std::abs(directStep.pid.x - 1000.0) < 0.1,
-          "D term directly uses the current error difference");
+    // D is low-pass filtered now (always on): the raw difference is still
+    // reported in derivativeRaw, but the term fed to the output is attenuated on
+    // a spike and converges toward the raw value under a sustained slope. This is
+    // what turns kd into usable phase lead instead of amplified noise.
+    RecoveredPid filteredD;
+    RecoveredPidConfig filteredDConfig;
+    filteredDConfig.kpX = filteredDConfig.kpY = 0.0f;
+    filteredDConfig.kiX = filteredDConfig.kiY = 0.0f;
+    filteredDConfig.kdX = filteredDConfig.kdY = 1.0f;
+    filteredDConfig.deadzoneX = filteredDConfig.deadzoneY = 0.0f;
+    filteredD.setConfig(filteredDConfig);
+    filteredD.update({ 0, 0 }, {}, 0.01);
+    const auto spike = filteredD.update({ 10, 0 }, {}, 0.01);
+    check(std::abs(spike.derivativeRaw.x - 1000.0) < 0.1 &&
+          spike.pid.x > 100.0 && spike.pid.x < 950.0,
+          "D is low-pass filtered: raw difference reported, output attenuated on a spike");
+    double lastD = spike.pid.x;
+    for (int n = 2; n <= 8; ++n)
+        lastD = filteredD.update({ 10.0 * n, 0 }, {}, 0.01).pid.x; // constant slope
+    check(lastD > spike.pid.x && lastD < 1000.0,
+          "filtered D converges toward the raw derivative under a sustained slope");
 
     RecoveredTracker tracker;
     const auto first = tracker.update({ Candidate{ { 126, 114, 20, 20 }, 0, 0.9 } }, 0.01);
@@ -494,6 +511,27 @@ int main()
         ControlInput in;in.dtSec=.01;in.cross={160,160};in.candidates={{{155,140,20,40},0,.9},{{220,140,20,40},1,.8}};
         in.macro.command=2;in.macro.commandSerial=1;const auto out=controller.update(in);
         check(out.targetClassId==1,"clearing macro overrides preserves configured class priority on first frame");
+    }
+    // Aim-point extrapolation velocity: snaps within one observation frame on
+    // reversal and sudden stop, while the frozen FF velocity stays gated. dt=4ms.
+    {
+        RecoveredTracker tr; RecoveredTrackerConfig cfg; tr.setConfig(cfg);
+        auto step=[&](RecoveredTracker& t,double cx){
+            std::vector<Candidate> c{Candidate{{cx-20.0,100,40,40},0,0.9}};
+            auto v=t.update(c,0.004); return v.empty()?RecoveredTrack{}:v.front();
+        };
+        RecoveredTrack t;
+        for(int n=0;n<20;++n) t=step(tr,200.0+n*10.0); // steady +2500 px/s
+        check(t.predictVelocity.x>2000 && t.predictVelocity.x<3000,
+              "predict velocity converges to the steady target velocity");
+        const auto rev=step(tr,380.0); // one leftward step reverses direction
+        check(rev.predictVelocity.x<-1000 && rev.velocity.x>-500,
+              "predict velocity snaps to the reversal in one frame while FF stays gated");
+        RecoveredTracker tr2; tr2.setConfig(cfg); RecoveredTrack t2;
+        for(int n=0;n<20;++n) t2=step(tr2,200.0+n*10.0);
+        const auto stop=step(tr2,390.0); // center unchanged => sudden stop
+        check(std::abs(stop.predictVelocity.x)<300,
+              "predict velocity collapses to zero on a sudden stop in one frame");
     }
     return failures ? 1 : 0;
 }

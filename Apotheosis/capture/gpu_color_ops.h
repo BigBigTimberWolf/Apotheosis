@@ -2,9 +2,6 @@
 
 #include <cuda_runtime.h>
 
-void launch_motion_thumbnail(const unsigned char* src, size_t step, int width, int height,
-    int channels, unsigned char* dst, size_t dstStep, int outWidth, int outHeight, cudaStream_t stream);
-
 void launch_bgra_to_bgr_u8(
     const unsigned char* src, size_t srcStep,
     unsigned char* dst, size_t dstStep,

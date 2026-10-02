@@ -53,6 +53,8 @@ private:
     float integralX_ = 0.0f, integralY_ = 0.0f;
     float previousX_ = 0.0f, previousY_ = 0.0f;
     float carryX_ = 0.0f, carryY_ = 0.0f;
+    // Low-pass state for the always-on filtered derivative.
+    float dFilterX_ = 0.0f, dFilterY_ = 0.0f;
     bool configured_ = false;
     bool skipOutputOnce_ = false;
     bool seedResetX_ = false, seedResetY_ = false;

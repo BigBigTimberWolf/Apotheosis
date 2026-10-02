@@ -271,11 +271,9 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     pid_.setConfig(pidConfig);
     out.followStrength = {pidConfig.maskX ? 0.0 : pidConfig.followX,
                           pidConfig.maskY ? 0.0 : pidConfig.followY};
-    const auto reversed = directionObserver_.update(target.observedCenter,
-        {target.box.w,target.box.h},input.backgroundMotion,input.observationTimeUs);
     const auto offset = compensator_.update(out.error,
         {double(config_.frameWidth), double(config_.frameHeight)},
-        out.followStrength, input.observationTimeUs, input.dtSec, reversed);
+        out.followStrength, input.observationTimeUs, input.dtSec);
     // Compensation telemetry remains original-error rate, independent of FF.
     out.followMotion = compensator_.errorRate();
     // Restore the selected tracking record as the FF source. The user's
@@ -283,7 +281,10 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     const Vec2 velocityFeedforward = target.velocity;
     out.followStateX = compensator_.stateX();
     out.followStateY = compensator_.stateY();
-    out.controlAnchor = out.anchor + offset + target.velocity*(std::clamp(input.macro.predictionMs,0.,500.)/1000.);
+    // Extrapolation always uses the maneuver-aware predict velocity (snaps within
+    // one observation frame on reversal/stop/new target); the PID feedforward
+    // above keeps the frozen smooth velocity.
+    out.controlAnchor = out.anchor + offset + target.predictVelocity*(std::clamp(input.macro.predictionMs,0.,500.)/1000.);
     if (changedTarget) {
         // Frozen second-port switch rule: do not carry old-target I or produce
         // a one-frame D spike from the old target's error.

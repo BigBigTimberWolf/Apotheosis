@@ -7,17 +7,63 @@
 namespace control {
 namespace {
 
+// Optional per-axis stabilizers. Defaults here reproduce the frozen baseline:
+// derivAlpha==0 keeps the raw derivative, integralLimit<=0 keeps the ±ki clamp,
+// and antiWindupGain<=0 / freezeInDeadzone==false disable the new integral paths.
+struct AxisTune
+{
+    float deadzone = 0.0f;
+    float derivAlpha = 0.0f;   // low-pass coefficient for the D term
+    float integralLimit = 0.0f;
+    bool  freezeIntegralInDeadzone = false;
+    float antiWindupGain = 0.0f;
+    float satLimit = 0.0f;     // smoothMaxPixel, the PID output clip
+};
+
+void clampIntegral(float& integral, float ki, float integralLimit)
+{
+    if (integralLimit > 0.0f)
+        integral = std::clamp(integral, -integralLimit, integralLimit);
+    else if (ki > 0.0f)
+        integral = std::clamp(integral, -ki, ki);
+}
+
 float axisPid(float error, float kp, float ki, float kd, float dt,
-              bool preserveIntegralOnReverse,
-              float& integral, float& previous, float& rawD)
+              bool preserveIntegralOnReverse, const AxisTune& tune,
+              float& integral, float& previous, float& dFilter, float& rawD)
 {
     if (!preserveIntegralOnReverse && error * integral < 0.0f)
         integral = 0.0f;
-    integral += ki * error * dt;
-    if (ki > 0.0f)
-        integral = std::clamp(integral, -ki, ki);
+    const bool inDeadzone = tune.deadzone > 0.0f && std::abs(error) < tune.deadzone;
+    const bool freeze = tune.freezeIntegralInDeadzone && inDeadzone;
+    if (!freeze)
+        integral += ki * error * dt;
+    clampIntegral(integral, ki, tune.integralLimit);
     rawD = kd * (error - previous) / dt;
-    const float output = kp * error + integral + rawD;
+    // Low-pass the derivative so measurement/dt jitter stops being amplified by
+    // ~1/dt. derivAlpha==0 leaves the frozen raw derivative untouched.
+    float dTerm = rawD;
+    if (tune.derivAlpha > 0.0f)
+    {
+        dFilter += tune.derivAlpha * (rawD - dFilter);
+        dTerm = dFilter;
+    }
+    else
+        dFilter = rawD; // keep state coherent if the filter is toggled on later
+    float output = kp * error + integral + dTerm;
+    // Back-calculation anti-windup: bleed the integral toward the value that
+    // keeps the PID output inside the ±satLimit clip. Skipped while frozen in
+    // the deadzone so the two integral rules never fight.
+    if (tune.antiWindupGain > 0.0f && tune.satLimit > 0.0f && !freeze)
+    {
+        const float clipped = std::clamp(output, -tune.satLimit, tune.satLimit);
+        if (clipped != output)
+        {
+            integral += tune.antiWindupGain * (clipped - output) * dt;
+            clampIntegral(integral, ki, tune.integralLimit);
+            output = kp * error + integral + dTerm;
+        }
+    }
     previous = error;
     return output;
 }
@@ -85,22 +131,48 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     const float ey = static_cast<float>(error.y);
     // A macro axis reset has no historical sample. Seed it from the next
     // observation instead of differentiating against an invented zero.
-    if (seedResetX_) { previousX_ = ex; seedResetX_ = false; }
-    if (seedResetY_) { previousY_ = ey; seedResetY_ = false; }
+    if (seedResetX_) { previousX_ = ex; dFilterX_ = 0.0f; seedResetX_ = false; }
+    if (seedResetY_) { previousY_ = ey; dFilterY_ = 0.0f; seedResetY_ = false; }
+    // Always-on stabilizers, baked to good fixed values so there is nothing new
+    // to tune. These intentionally diverge from the raw frozen formula:
+    //  - filtered derivative: a fixed ~20 Hz low-pass turns kd into usable phase
+    //    lead instead of amplifying per-frame/dt jitter, so kp can go higher.
+    //  - integral ceiling decoupled from ki (a fraction of the output budget) so
+    //    raising ki no longer raises the windup ceiling -> no "i shakes" runaway.
+    //  - back-calculation anti-windup (Tt ~= 50 ms) bleeds the integral only when
+    //    the output saturates; dormant otherwise.
+    //  - integral frozen inside the deadzone to stop at-rest hunting.
+    constexpr float kDerivativeCutoffHz = 20.0f;
+    constexpr float kIntegralLimitFraction = 0.3f;
+    constexpr float kAntiWindupTt = 0.05f; // seconds
+    const float derivAlpha = dt / (dt + 1.0f / (2.0f * 3.14159265f * kDerivativeCutoffHz));
+    const float satLimit = std::max(0.0f, config_.smoothMaxPixel);
+    auto tuneFor = [&](float deadzone) {
+        AxisTune tune;
+        tune.deadzone = deadzone;
+        tune.derivAlpha = derivAlpha;
+        tune.integralLimit = kIntegralLimitFraction * satLimit;
+        tune.freezeIntegralInDeadzone = true;
+        tune.antiWindupGain = 1.0f / kAntiWindupTt;
+        tune.satLimit = satLimit;
+        return tune;
+    };
     float rawDx = 0.0f, rawDy = 0.0f;
     float px = 0.0f, py = 0.0f;
     if (config_.maskX) {
         integralX_ = carryX_ = 0.0f;
         previousX_ = ex;
+        dFilterX_ = 0.0f;
     } else px = axisPid(ex, config_.kpX, config_.kiX, config_.kdX, dt,
-                       config_.preserveIntegralOnReverse,
-                       integralX_, previousX_, rawDx);
+                       config_.preserveIntegralOnReverse, tuneFor(config_.deadzoneX),
+                       integralX_, previousX_, dFilterX_, rawDx);
     if (config_.maskY) {
         integralY_ = carryY_ = 0.0f;
         previousY_ = ey;
+        dFilterY_ = 0.0f;
     } else py = axisPid(ey, config_.kpY, config_.kiY, config_.kdY, dt,
-                       config_.preserveIntegralOnReverse,
-                       integralY_, previousY_, rawDy);
+                       config_.preserveIntegralOnReverse, tuneFor(config_.deadzoneY),
+                       integralY_, previousY_, dFilterY_, rawDy);
     result.pid = { px, py };
     result.integral = { integralX_, integralY_ };
     result.derivativeRaw = { rawDx, rawDy };
@@ -153,8 +225,8 @@ void RecoveredPid::resetIntegral()
 
 void RecoveredPid::resetAxes(bool x, bool y)
 {
-    if (x) { integralX_ = previousX_ = carryX_ = 0.0f; seedResetX_ = true; }
-    if (y) { integralY_ = previousY_ = carryY_ = 0.0f; seedResetY_ = true; }
+    if (x) { integralX_ = previousX_ = carryX_ = dFilterX_ = 0.0f; seedResetX_ = true; }
+    if (y) { integralY_ = previousY_ = carryY_ = dFilterY_ = 0.0f; seedResetY_ = true; }
 }
 
 void RecoveredPid::reset()
@@ -162,6 +234,7 @@ void RecoveredPid::reset()
     resetIntegral();
     previousX_ = previousY_ = 0.0f;
     carryX_ = carryY_ = 0.0f;
+    dFilterX_ = dFilterY_ = 0.0f;
     configured_ = false;
     skipOutputOnce_ = false;
     seedResetX_ = seedResetY_ = false;

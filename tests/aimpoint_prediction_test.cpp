@@ -19,19 +19,18 @@ int main() {
     offset=c.update({-.01,5},{416,416},{10,10},3000000,.01);
     check(offset.x>20 && offset.y>=beforeY,
           "crossing the real aimpoint preserves learned and applied lead");
-    offset=c.update({-.01,5},{416,416},{10,10},3010000,.01,{1,0});
-    check(offset.x==0 && offset.y>=beforeY && c.stateX()==FollowCompensator::ErrorReversed,
-          "confirmed target reversal clears both X storage and smoother on this image only");
-    for (int n=2; n<100; ++n)
+    // The background-motion immediate-reset path has been removed: an opposite
+    // error unwinds the learned lead gradually rather than zeroing it in one
+    // frame, and only a long sustained reversal rebuilds lead the other way.
+    const double beforeReversal=offset.x;
+    offset=c.update({-5,5},{416,416},{10,10},3010000,.01);
+    check(offset.x>beforeReversal-1.0,
+          "a single opposite frame does not hard-reset the learned lead");
+    for (int n=2; n<400; ++n)
         offset=c.update({-5,5},{416,416},{10,10},3000000+n*10000,.01);
-    check(offset.x<-5, "new direction rebuilds after reversal");
-    offset=c.update({0,5},{416,416},{10,10},4000000,.01);
-    check(offset.x<0, "zero error is not a reversal");
-    offset=c.update({5,5},{416,416},{10,10},4010000,.01);
-    check(offset.x<0, "crossing zero does not masquerade as a target reversal");
-    for (int n=1;n<300;++n)
-        offset=c.update({5,5},{416,416},{10,10},4010000+n*10000,.01);
-    check(offset.x>0,"unconfirmed opposite error can still unwind excessive lead gradually");
+    check(offset.x<-5, "a long sustained reversal rebuilds lead the other way");
+    offset=c.update({0,5},{416,416},{10,10},7000000,.01);
+    check(offset.x<0, "zero error neither reverses nor clears the rebuilt lead");
 
     c.reset();
     for (int n=0; n<200; ++n) {
@@ -121,8 +120,11 @@ int main() {
               "moving target feeds FF independently of crosshair-relative error trend");
     }
 
-    // End-to-end wiring: camera drift reverses screen velocity, but the
-    // corrected target direction stays positive. Crossing is not a reset.
+    // End-to-end wiring: the follow compensator learns lead from sustained
+    // aimpoint error and preserves it when the crosshair merely overtakes the
+    // target. The background-motion immediate-reset path has been removed, so a
+    // genuine target reversal now unwinds lead gradually instead of snapping it
+    // to zero.
     {
         ControllerConfig cfg; cfg.frameWidth=cfg.frameHeight=640; cfg.buckets.byClassId={Bucket::Aim};
         RecoveredPidConfig p; p.kpX=p.kpY=.01f; p.kiX=p.kiY=p.kdX=p.kdY=0;
@@ -135,23 +137,21 @@ int main() {
             const double center=400-n;
             in.candidates={Candidate{{center-20,280,40,80},0,.95}};
             in.cross={center-5,310};
-            in.backgroundMotion={{-2.0*n,0},n*.01,77,in.observationTimeUs,true};
             out=ctrl.update(in);
         }
-        check(out.controlAnchor.x-out.anchor.x>10,"controller learns lead while camera moves faster than target");
+        check(out.controlAnchor.x-out.anchor.x>10,"controller learns lead while the target tracks across the frame");
         in.observationTimeUs+=10000; in.candidates={Candidate{{280,280,40,80},0,.95}};
-        in.cross.x=301; in.backgroundMotion={{-200,0},1,77,in.observationTimeUs,true};
+        in.cross.x=301;
         out=ctrl.update(in);
         check(out.error.x<0 && out.controlAnchor.x-out.anchor.x>10,
-              "controller preserves lead when crosshair overtakes a still-rightward target");
-        for(int n=101;n<=102;++n) {
+              "controller preserves lead when the crosshair overtakes a still-rightward target");
+        for(int n=101;n<=104;++n) {
             in.observationTimeUs=40000000+n*10000;
             in.candidates={Candidate{{280-3.0*(n-100),280,40,80},0,.95}};
-            in.backgroundMotion={{-2.0*n,0},n*.01,77,in.observationTimeUs,true};
             out=ctrl.update(in);
         }
-        check(out.followStateX==FollowCompensator::ErrorReversed && out.controlAnchor.x==out.anchor.x &&
-              out.controlAnchor.y>out.anchor.y,"controller immediately clears confirmed reversed axis only");
+        check(out.controlAnchor.x-out.anchor.x>0,
+              "a few reversed frames do not hard-reset the learned lead (no immediate clear)");
     }
 
     ControllerConfig config;

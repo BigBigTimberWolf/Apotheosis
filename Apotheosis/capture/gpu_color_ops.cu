@@ -4,25 +4,6 @@
 
 #include <cuda_runtime.h>
 
-static __device__ int motion_luma(const unsigned char* p, int channels) {
-    return channels==1 ? int(p[0]) : (29*p[0]+150*p[1]+77*p[2]+128)>>8;
-}
-static __global__ void motion_thumbnail_kernel(const unsigned char* src, size_t step,
-    int width, int height, int channels, unsigned char* dst, size_t dstStep, int outWidth, int outHeight) {
-    const int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y*blockDim.y+threadIdx.y;
-    if(x>=outWidth || y>=outHeight) return;
-    const int x0=x*width/outWidth,x1=(x+1)*width/outWidth-1;
-    const int y0=y*height/outHeight,y1=(y+1)*height/outHeight-1;
-    dst[y*dstStep+x]=(motion_luma(src+y0*step+x0*channels,channels)+
-        motion_luma(src+y0*step+x1*channels,channels)+motion_luma(src+y1*step+x0*channels,channels)+
-        motion_luma(src+y1*step+x1*channels,channels)+2)/4;
-}
-void launch_motion_thumbnail(const unsigned char* src, size_t step, int width, int height,
-    int channels, unsigned char* dst, size_t dstStep, int outWidth, int outHeight, cudaStream_t stream) {
-    const dim3 block(16,16),grid((outWidth+15)/16,(outHeight+15)/16);
-    motion_thumbnail_kernel<<<grid,block,0,stream>>>(src,step,width,height,channels,dst,dstStep,outWidth,outHeight);
-}
-
 static __global__ void bgra_to_bgr_u8_kernel(
     const unsigned char* __restrict__ src, int srcStep,
     unsigned char* __restrict__ dst, int dstStep,

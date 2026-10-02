@@ -7,17 +7,18 @@
 
 namespace control {
 
-// Learns from original aimpoint error. Only a separately confirmed target
-// direction change may clear lead immediately; crossing the aimpoint may not.
+// Learns lead from original aimpoint error. A sustained direction flip only
+// restarts persistence and unwinds the opposite error gradually; crossing the
+// aimpoint preserves the learned and applied lead.
 class FollowCompensator
 {
 public:
     // Preserve old recording values; new recordings use explicit error states.
     enum State { Learning, Checking, Reversed, Stopped, Preset, Remembered, Uncertain, Burst,
-                 ErrorLearning, ErrorHolding, ErrorUnwinding, ErrorDisabled, ErrorReversed };
+                 ErrorLearning, ErrorHolding, ErrorUnwinding, ErrorDisabled };
 
     Vec2 update(Vec2 error, Vec2 frameSize, Vec2 strength,
-                int64_t observationUs, double controlDt, Vec2 reversed = {})
+                int64_t observationUs, double controlDt)
     {
         if (!finite(error) || !finite(frameSize) || frameSize.x <= 0.0 || frameSize.y <= 0.0 ||
             !std::isfinite(controlDt) || controlDt <= 0.0) {
@@ -50,12 +51,8 @@ public:
             errorRate_ += (rawRate - errorRate_) * rateAlpha;
             previousError_ = error;
             const double dt = std::clamp(imageDt, 0.000001, 0.05);
-            auto advance = [&](Axis& a, double e, double extent, double gain, bool reverse) {
-                if (reverse && gain > 0) { a = {}; seed(a,e,gain); a.state=ErrorReversed; }
-                else learn(a,e,extent,gain,dt);
-            };
-            advance(x_,error.x,frameSize.x,strength.x,reversed.x != 0);
-            advance(y_,error.y,frameSize.y,strength.y,reversed.y != 0);
+            learn(x_,error.x,frameSize.x,strength.x,dt);
+            learn(y_,error.y,frameSize.y,strength.y,dt);
             previousUs_ = observationUs;
         }
         auto apply = [&](Axis& axis) {

@@ -18,7 +18,6 @@
 
 #include "i_detector.h"
 #include "runtime/frame_crosshair.h"
-#include "runtime/background_motion_estimator.h"
 #include "postProcess.h"
 #include "raw_yolo_postprocess.h"
 #include "../mem/gpu_image.h"
@@ -117,9 +116,6 @@ private:
 
     runtime::FrameContext pendingContext, publishContext;
     runtime::FrameCrosshair publishCrosshair;
-    runtime::BackgroundMotionEstimator backgroundEstimator_;
-    cv::Mat motionThumbnail_;
-    GpuImage motionThumbnailGpu_;
     int64_t publishCaptureNs = 0;
     int64_t publishSubmitNs  = 0;
 

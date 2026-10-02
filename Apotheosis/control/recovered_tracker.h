@@ -14,6 +14,11 @@ struct RecoveredTrack
     int classId = -1;
     double confidence = 0.0;
     Vec2 velocity{};
+    // Maneuver-aware velocity for aim-point extrapolation only. Converges on the
+    // first frame that reveals a reversal, sudden stop, or new target, while a
+    // size-scaled noise gate keeps steady tracking smooth. The frozen FF path
+    // keeps using `velocity`.
+    Vec2 predictVelocity{};
     int missedFrames = 0;
 };
 
@@ -38,6 +43,9 @@ public:
         Vec2 firstVelocity{};
         int reverseX = 0;
         int reverseY = 0;
+        // Seed the extrapolation velocity from the first observed displacement
+        // instead of easing up from zero.
+        bool predictSeeded = false;
     };
 
     void setConfig(const RecoveredTrackerConfig& config) { config_ = config; }
