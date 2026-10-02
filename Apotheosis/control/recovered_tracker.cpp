@@ -130,8 +130,13 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
     constexpr double steadyAlpha = 0.4; // baked: smooth when steady, auto-snaps on maneuvers
     auto predictAxis = [&](double pv, double raw, double size, bool xAxis) {
         if (!state.predictSeeded) return raw; // seed a new target immediately
-        const double noise = xAxis ? std::max(std::max(size, 8.0) * 0.0067, 2.0)
-                                   : std::max(std::max(size, 10.0) * 0.0107, 2.5);
+        // noisePx is a per-frame pixel jitter budget; raw/pv are px/second, so
+        // convert it to the same velocity units. Without the /velocityDt the gate
+        // is ~1/dt too small, every frame counts as a maneuver, and the lead jumps
+        // with detection noise -> the crosshair hunts on both sides of the aim point.
+        const double noisePx = xAxis ? std::max(std::max(size, 8.0) * 0.0067, 2.0)
+                                     : std::max(std::max(size, 10.0) * 0.0107, 2.5);
+        const double noise = noisePx / velocityDt;
         const double innovation = raw - pv;
         // How clearly the change exceeds detection noise: 0 inside the band
         // (stay smooth, no shake), ramping to 1 for a real maneuver (snap).

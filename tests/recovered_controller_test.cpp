@@ -532,6 +532,33 @@ int main()
         const auto stop=step(tr2,390.0); // center unchanged => sudden stop
         check(std::abs(stop.predictVelocity.x)<300,
               "predict velocity collapses to zero on a sudden stop in one frame");
+        // Units regression: a near-stationary target with small detection jitter
+        // must stay a small predict velocity. The noise gate is px/second (matches
+        // raw/pv); without the /dt it was ~250x too small, so every frame snapped
+        // to the noisy raw velocity and the lead hunted around the aim point.
+        RecoveredTracker tr3; tr3.setConfig(cfg); RecoveredTrack t3;
+        for(int n=0;n<40;++n){
+            const double cx=300.0+(n%2 ? 0.5 : -0.5); // +/-0.5 px detection jitter
+            std::vector<Candidate> c{Candidate{{cx-20.0,100,40,40},0,0.9}};
+            auto v=tr3.update(c,0.004); if(!v.empty()) t3=v.front();
+        }
+        check(std::abs(t3.predictVelocity.x)<800.0,
+              "stationary target with detection jitter keeps a small predict velocity");
+    }
+    // Regression (crosshair-detect stall): a pure-P tune (ki=0) must never build
+    // an integral, even when the output saturates and reversal-reset is disabled
+    // (preserveIntegralOnReverse == crosshair color-detect mode). The removed
+    // back-calculation anti-windup used to inject an opposing integral here that
+    // stalled the crosshair at the detection-box edge instead of the aim point.
+    {
+        RecoveredPid p; RecoveredPidConfig c;
+        c.kpX=c.kpY=2; c.kiX=c.kiY=0; c.kdX=c.kdY=0; c.smoothMaxPixel=50;
+        c.deadzoneX=c.deadzoneY=0; c.preserveIntegralOnReverse=true;
+        p.setConfig(c);
+        for(int n=0;n<40;++n) p.update({100,0},{},0.004); // large, saturating error
+        const auto sat=p.update({100,0},{},0.004);
+        check(std::abs(sat.integral.x)<1e-9 && std::abs(sat.pid.x-200.0)<1e-6,
+              "pure-P tune builds no integral under saturation (no anti-windup injection)");
     }
     return failures ? 1 : 0;
 }
