@@ -7,6 +7,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFrame>          // QFrame::NoFrame
+#include <QFileDialog>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -17,6 +18,7 @@
 #include <QMessageBox>     // 删除热键组的确认框
 #include <QMenu>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QShowEvent>      // showEvent 的参数类型
@@ -46,6 +48,7 @@
 #include "widgets/TriggerWorkflowEditor.h"
 #include "widgets/TriggerTargetEditor.h"
 #include "widgets/NeuralCurveTrainer.h"
+#include "widgets/NeuralCurveFile.h"
 #include "widgets/ToggleSwitch.h"
 
 namespace
@@ -1055,17 +1058,17 @@ void AimSettingsPage::buildRecoveredControllerCard()
     struct Row { const char* suffix; const char* label; double minimum; double maximum; double step; double value; };
     const Row xRows[] = {
         { "KpX", "比例 Kp", 0.0, 10.0, 0.01, 0.4 },
-        { "KiX", "积分 Ki", 0.0, 50.0, 0.01, 0.02 },
+        { "KiX", "积分 Ki", 0.0, 10.0, 0.01, 0.02 },
         { "KdX", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
-        { "FfX", "速度前馈 FF", 0.0, 20.0, 0.0005, 0.0 },
+        { "FfX", "速度前馈 FF", 0.0, 10.0, 0.0005, 0.0 },
         { "DeadzoneX", "死区半径", 0.0, 200.0, 0.5, 5.0 },
         { "FollowX", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
     };
     const Row yRows[] = {
         { "KpY", "比例 Kp", 0.0, 10.0, 0.01, 0.4 },
-        { "KiY", "积分 Ki", 0.0, 50.0, 0.01, 0.02 },
+        { "KiY", "积分 Ki", 0.0, 10.0, 0.01, 0.02 },
         { "KdY", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
-        { "FfY", "速度前馈 FF", 0.0, 20.0, 0.0005, 0.0 },
+        { "FfY", "速度前馈 FF", 0.0, 10.0, 0.0005, 0.0 },
         { "DeadzoneY", "死区半径", 0.0, 200.0, 0.5, 5.0 },
         { "FollowY", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
     };
@@ -1090,11 +1093,11 @@ void AimSettingsPage::buildRecoveredControllerCard()
                               suffix == QStringLiteral("FfY") ? 4 : 3);
             spin->setValue(row.value);
             if (suffix == QStringLiteral("KiX") || suffix == QStringLiteral("KiY"))
-                spin->setToolTip(QString::fromUtf8(u8"积累持续瞄准误差，积分上限等于 Ki。开启准星找色时保留反向旧积分，关闭时先清旧积分再积本帧。增大 Ki 保留积分，减小任一轴 Ki 清空两轴积分。与跟随补偿独立。"));
+                spin->setToolTip(QString::fromUtf8(u8"积累持续瞄准误差，积分上限等于 Ki。开启准星找色时保留反向旧积分。二次移植版在该轴 Ki 数值变化时清空该轴旧积分。"));
             if (suffix == QStringLiteral("FollowX") || suffix == QStringLiteral("FollowY"))
                 spin->setToolTip(QString::fromUtf8(u8"仅根据原瞄点与准星的持续误差积累补偿，不使用鼠标换算比例。越过原瞄点保留补偿并逐步调整；利用背景移动判断目标变向，确认后立即清空该轴旧补偿。背景不可靠时不触发变向清空。0 关闭，数值越大建立越快，过大仍可能过冲。"));
             if (suffix == QStringLiteral("FfX") || suffix == QStringLiteral("FfY"))
-                spin->setToolTip(QString::fromUtf8(u8"根据跟踪器估计的目标在画面中的移动速度增加跟随输出，0 关闭。不使用固定 0.91 或鼠标反馈换算。与跟随补偿独立；原误差趋势 FF 的参数需重新调整。"));
+                spin->setToolTip(QString::fromUtf8(u8"二次移植版速度前馈：检测框画面速度与成功发送的鼠标运动事件合成，再经逐轴速度门控；0 关闭。"));
             grid->addWidget(FormKit::fieldRow(QString::fromUtf8(row.label), spin), line, column);
         };
         for (int i = 0; i < static_cast<int>(std::size(xRows)); ++i)
@@ -1363,33 +1366,102 @@ void AimSettingsPage::buildTrajectoryCard()
         u8"在弹窗里用 Windows 桌面鼠标从金色起点拖到绿色目标，录制多轮真实路径。\n"
         u8"训练结束会用留出的轨迹评估拟合误差；点击应用后才写入当前热键。\n"
         u8"★ 评估的是曲线拟合质量，不是游戏命中率。"));
-    connect(trainButton, &QPushButton::clicked, this, [this] {
+    const auto applyNeural = [this](int profileIndex, const boss::NeuralCurveTrainResult& result) {
+        if (!result.success || profileIndex < 0) return;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (profileIndex >= static_cast<int>(config.hotkeys.size())) return;
+            HotkeyProfile& hp = config.hotkeys[profileIndex];
+            hp.aim_path_mode = 4;
+            hp.aim_path_neural_trained = true;
+            hp.aim_path_neural_weights = result.weights;
+            hp.aim_path_neural_examples = result.quality.trainingTrajectories
+                                        + result.quality.validationTrajectories;
+            hp.aim_path_neural_validation_rmse =
+                static_cast<float>(result.quality.validationRmse);
+            hp.aim_path_neural_validation_p95 =
+                static_cast<float>(result.quality.validationP95);
+            hp.aim_path_neural_slope_variation =
+                static_cast<float>(result.quality.slopeVariation);
+            ConfigBridge::instance().markDirty();
+        }
+        reloadProfileToUi();
+    };
+    connect(trainButton, &QPushButton::clicked, this, [this, applyNeural] {
         const int profileIndex = currentRuntimeIndex();
         if (profileIndex < 0) return;
         auto* trainer = new NeuralCurveTrainerDialog(this);
         trainer->setAttribute(Qt::WA_DeleteOnClose);
         trainer->setWindowModality(Qt::WindowModal);
-        trainer->onApply = [this, profileIndex](const boss::NeuralCurveTrainResult& result) {
-            {
-                std::lock_guard<std::recursive_mutex> lock(configMutex);
-                if (profileIndex >= static_cast<int>(config.hotkeys.size())) return;
-                HotkeyProfile& hp = config.hotkeys[profileIndex];
-                hp.aim_path_mode = 4;
-                hp.aim_path_neural_trained = true;
-                hp.aim_path_neural_weights = result.weights;
-                hp.aim_path_neural_examples = result.quality.trainingTrajectories
-                                            + result.quality.validationTrajectories;
-                hp.aim_path_neural_validation_rmse =
-                    static_cast<float>(result.quality.validationRmse);
-                hp.aim_path_neural_validation_p95 =
-                    static_cast<float>(result.quality.validationP95);
-                hp.aim_path_neural_slope_variation =
-                    static_cast<float>(result.quality.slopeVariation);
-                ConfigBridge::instance().markDirty();
-            }
-            reloadProfileToUi();
+        trainer->onApply = [applyNeural, profileIndex](const boss::NeuralCurveTrainResult& result) {
+            applyNeural(profileIndex, result);
         };
         trainer->show();
+    });
+    auto* randomButton = new QPushButton(QString::fromUtf8(u8"一键随机曲线"));
+    randomButton->setObjectName("aimNeuralCurveRandom");
+    cl->addWidget(randomButton);
+    m_pathSectionNeuralRows.push_back(randomButton);
+    attachTip(randomButton, QString::fromUtf8(
+        u8"生成平滑的随机曲线并保存到当前热键，预览立即更新；再次点击可换一条。"
+        u8"随机曲线不代表个人训练结果，弯曲程度仍受曲线影响参数控制。"));
+    connect(randomButton, &QPushButton::clicked, this, [this, applyNeural] {
+        applyNeural(currentRuntimeIndex(), boss::randomNeuralCurve(QRandomGenerator::global()->generate()));
+    });
+
+    auto* neuralFileRow = new QWidget;
+    auto* neuralFileLayout = new QHBoxLayout(neuralFileRow);
+    neuralFileLayout->setContentsMargins(0, 0, 0, 0);
+    auto* importNeural = new QPushButton(QString::fromUtf8(u8"导入神经曲线"));
+    importNeural->setObjectName("aimNeuralCurveImport");
+    auto* exportNeural = new QPushButton(QString::fromUtf8(u8"导出神经曲线"));
+    exportNeural->setObjectName("aimNeuralCurveExport");
+    neuralFileLayout->addWidget(importNeural);
+    neuralFileLayout->addWidget(exportNeural);
+    cl->addWidget(neuralFileRow);
+    m_pathSectionNeuralRows.push_back(neuralFileRow);
+    connect(importNeural, &QPushButton::clicked, this, [this, applyNeural] {
+        const int profileIndex = currentRuntimeIndex();
+        if (profileIndex < 0) return;
+        const QString path = QFileDialog::getOpenFileName(this,
+            QString::fromUtf8(u8"导入神经曲线"), QString(),
+            QString::fromUtf8(u8"神经曲线 (*.ancurve *.json)"));
+        if (path.isEmpty()) return;
+        boss::NeuralCurveTrainResult model;
+        QString error;
+        if (!neural_curve_file::load(path, model, error)) {
+            QMessageBox::warning(this, QString::fromUtf8(u8"导入失败"), error);
+            return;
+        }
+        applyNeural(profileIndex, model);
+    });
+    connect(exportNeural, &QPushButton::clicked, this, [this] {
+        const int profileIndex = currentRuntimeIndex();
+        if (profileIndex < 0) return;
+        boss::NeuralCurveTrainResult model;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (profileIndex >= static_cast<int>(config.hotkeys.size())) return;
+            const HotkeyProfile& hp = config.hotkeys[profileIndex];
+            model.success = hp.aim_path_neural_trained;
+            model.weights = hp.aim_path_neural_weights;
+            model.quality.trainingTrajectories = hp.aim_path_neural_examples;
+            model.quality.validationRmse = hp.aim_path_neural_validation_rmse;
+            model.quality.validationP95 = hp.aim_path_neural_validation_p95;
+            model.quality.slopeVariation = hp.aim_path_neural_slope_variation;
+        }
+        if (!model.success) {
+            QMessageBox::information(this, QString::fromUtf8(u8"没有曲线"),
+                QString::fromUtf8(u8"请先训练、随机生成或导入神经曲线。"));
+            return;
+        }
+        const QString path = QFileDialog::getSaveFileName(this,
+            QString::fromUtf8(u8"导出神经曲线"), QStringLiteral("neural_curve.ancurve"),
+            QString::fromUtf8(u8"神经曲线 (*.ancurve)"));
+        if (path.isEmpty()) return;
+        QString error;
+        if (!neural_curve_file::save(path, model, error))
+            QMessageBox::warning(this, QString::fromUtf8(u8"导出失败"), error);
     });
 
     auto commit = [this, modeCombo]() {
@@ -1776,8 +1848,7 @@ void AimSettingsPage::reloadProfileToUi()
                             .arg(hp.aim_path_neural_slope_variation, 0, 'f', 3));
                     else
                         m_neuralQualityLabel->setText(QString::fromUtf8(
-                            u8"已载入旧版神经网络模型，但没有保留验证指标；"
-                            u8"建议重新录制以评估拟合质量。"));
+                            u8"已载入随机生成或旧版曲线，无个人训练评分；可一键随机更换或录制训练。"));
                 }
                 else
                 {

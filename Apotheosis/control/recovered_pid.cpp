@@ -45,38 +45,28 @@ void RecoveredPid::setConfig(const RecoveredPidConfig& config)
         return std::isfinite(value) ? std::clamp(value, 0.0f, maximum) : fallback;
     };
     clean.kpX = finiteRange(clean.kpX, 0.4f, 10.0f);
-    clean.kiX = finiteRange(clean.kiX, 0.02f, 50.0f);
+    clean.kiX = finiteRange(clean.kiX, 0.02f, 10.0f);
     clean.kdX = finiteRange(clean.kdX, 0.12f, 10.0f);
     clean.kpY = finiteRange(clean.kpY, 0.4f, 10.0f);
-    clean.kiY = finiteRange(clean.kiY, 0.02f, 50.0f);
+    clean.kiY = finiteRange(clean.kiY, 0.02f, 10.0f);
     clean.kdY = finiteRange(clean.kdY, 0.12f, 10.0f);
     clean.deadzoneX = finiteRange(clean.deadzoneX, 5.0f, 200.0f);
     clean.deadzoneY = finiteRange(clean.deadzoneY, 5.0f, 200.0f);
-    clean.feedforwardX = finiteRange(clean.feedforwardX, 0.0f, 20.0f);
-    clean.feedforwardY = finiteRange(clean.feedforwardY, 0.0f, 20.0f);
+    clean.feedforwardX = finiteRange(clean.feedforwardX, 0.0f, 10.0f);
+    clean.feedforwardY = finiteRange(clean.feedforwardY, 0.0f, 10.0f);
     clean.smoothMaxPixel = finiteRange(clean.smoothMaxPixel, 50.0f, 1000.0f);
     clean.segment = std::isfinite(clean.segment)
         ? std::clamp(clean.segment, 1.0f, 10.0f) : 3.0f;
     clean.followX = finiteRange(clean.followX, 0.0f, 50.0f);
     clean.followY = finiteRange(clean.followY, 0.0f, 50.0f);
-    const float oldSegment = config_.segmentEnabled ? config_.segment : 3.0f;
-    const float newSegment = clean.segmentEnabled ? clean.segment : 3.0f;
-    if (configured_) {
-        // Source report 121: compare effective segment, not the checkbox.
-        // FF and the crosshair flag are outside this PID snapshot.
-        const bool changed = clean.kpX != config_.kpX || clean.kpY != config_.kpY ||
-            clean.kiX != config_.kiX || clean.kiY != config_.kiY ||
-            clean.kdX != config_.kdX || clean.kdY != config_.kdY ||
-            clean.deadzoneX != config_.deadzoneX || clean.deadzoneY != config_.deadzoneY ||
-            oldSegment != newSegment ||
-            static_cast<int>(clean.smoothMaxPixel) != static_cast<int>(config_.smoothMaxPixel);
-        if (changed) carryX_ = carryY_ = 0.0f;
-        if (oldSegment != newSegment) skipOutputOnce_ = true;
-        // Either Ki decreasing clears BOTH integrals; an increase preserves
-        // them. Derivative history survives either kind of gain change.
-        if (clean.kiX < config_.kiX || clean.kiY < config_.kiY)
-            resetIntegral();
-    }
+    // Frozen second-port configuration behavior: only KpX or the segment
+    // setting skips one send; changing either Ki clears that axis's integral.
+    if (configured_ && (clean.kpX != config_.kpX ||
+                        clean.segmentEnabled != config_.segmentEnabled ||
+                        clean.segment != config_.segment))
+        skipOutputOnce_ = true;
+    if (clean.kiX != config_.kiX) integralX_ = 0.0f;
+    if (clean.kiY != config_.kiY) integralY_ = 0.0f;
     if (clean.maskX) integralX_ = carryX_ = 0.0f;
     if (clean.maskY) integralY_ = carryY_ = 0.0f;
     config_ = clean;

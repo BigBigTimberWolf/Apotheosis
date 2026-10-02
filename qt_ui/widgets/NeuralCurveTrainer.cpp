@@ -40,7 +40,7 @@ NeuralCurveTrainingCanvas::NeuralCurveTrainingCanvas(QWidget* parent) : QWidget(
 
 void NeuralCurveTrainingCanvas::startRecording(int rounds, bool append)
 {
-    requested_ = std::clamp(rounds, 5, 80);
+    requested_ = std::clamp(rounds, 5, 200);
     acceptedThisRun_ = 0;
     rejected_ = 0;
     rejectionReason_.clear();
@@ -249,17 +249,20 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
     auto* root = new QVBoxLayout(this);
     auto* hint = new QLabel(QString::fromUtf8(
         u8"用当前 Windows 桌面的鼠标，在金色起点按住左键拖到绿色目标。"
-        u8"录制多条真实手动轨迹后，网络学习平均路径；曲线只改变瞄准移动方向。"));
+        u8"建议录制 100～200 条自然轨迹；左右镜像会对齐后学习典型弯曲，曲线只改变移动方向。"
+        u8"本窗口最多保留最近 200 条，关闭窗口后原始样本不保留。"));
     hint->setWordWrap(true);
     root->addWidget(hint);
 
     auto* controls = new QHBoxLayout;
     controls->addWidget(new QLabel(QString::fromUtf8(u8"本次录制条数")));
     rounds_ = new QSpinBox;
-    rounds_->setRange(5, 80);
-    rounds_->setValue(20);
+    rounds_->setObjectName("neuralRecordingRounds");
+    rounds_->setRange(5, 200);
+    rounds_->setValue(100);
     controls->addWidget(rounds_);
     append_ = new QCheckBox(QString::fromUtf8(u8"追加到本窗口已有轨迹"));
+    append_->setChecked(true);
     controls->addWidget(append_);
     recordButton_ = new QPushButton(QString::fromUtf8(u8"开始录制"));
     recordButton_->setObjectName("neuralStartRecording");
@@ -294,6 +297,17 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
     exportButton_->setEnabled(false);
     applyButton_->setEnabled(false);
     actions->addWidget(exportButton_);
+    randomButton_ = new QPushButton(QString::fromUtf8(u8"一键随机曲线"));
+    randomButton_->setObjectName("neuralRandomCurve");
+    actions->addWidget(randomButton_);
+    connect(randomButton_, &QPushButton::clicked, this, [this] {
+        if (training_ || canvas_->recording()) return;
+        result_ = boss::randomNeuralCurve(QRandomGenerator::global()->generate());
+        showResult();
+        quality_->setText(QString::fromUtf8(u8"随机生成的平滑曲线，未使用录制样本，不提供拟合评分。"));
+        quality_->show();
+        status_->setText(QString::fromUtf8(u8"已生成新曲线，可再次随机，满意后点击「应用到当前热键」。"));
+    });
     actions->addStretch();
     actions->addWidget(closeButton);
     actions->addWidget(applyButton_);
@@ -361,6 +375,7 @@ void NeuralCurveTrainerDialog::setRecordingUi(bool recording)
     rounds_->setEnabled(!recording);
     append_->setEnabled(!recording);
     trainButton_->setEnabled(!recording && !training_ && canvas_->trajectories().size() >= 5);
+    randomButton_->setEnabled(!recording && !training_);
     recordButton_->setText(recording ? QString::fromUtf8(u8"停止录制")
                                      : QString::fromUtf8(u8"开始录制"));
 }
@@ -376,6 +391,7 @@ void NeuralCurveTrainerDialog::launchTraining()
     exportButton_->setEnabled(true);
     recordButton_->setEnabled(false);
     trainButton_->setEnabled(false);
+    randomButton_->setEnabled(false);
     status_->setText(QString::fromUtf8(u8"正在后台训练，并评估留出的轨迹…"));
     auto data = canvas_->trajectories();
     training_ = std::make_shared<TrainingState>();
@@ -409,21 +425,26 @@ void NeuralCurveTrainerDialog::pollTraining()
     training_.reset();
     pollTimer_->stop();
     recordButton_->setEnabled(true);
-    trainButton_->setEnabled(canvas_->trajectories().size() >= 5);
+    setRecordingUi(false);
     if (!result_.success)
     {
         status_->setText(QString::fromUtf8(result_.error.c_str()));
         return;
     }
+    showResult();
+    showQuality(result_);
+    status_->setText(QString::fromUtf8(u8"训练完成。满意后点击「应用到当前热键」。"));
+}
+
+void NeuralCurveTrainerDialog::showResult()
+{
     std::vector<float> preview(512);
     for (size_t i = 0; i < preview.size(); ++i)
         preview[i] = static_cast<float>(boss::evaluateNeuralCurve(
             result_.weights, static_cast<double>(i) / (preview.size() - 1)));
     preview_->setSamples(preview);
     preview_->show();
-    showQuality(result_);
     applyButton_->setEnabled(true);
-    status_->setText(QString::fromUtf8(u8"训练完成。满意后点击「应用到当前热键」。"));
 }
 
 void NeuralCurveTrainerDialog::showQuality(const boss::NeuralCurveTrainResult& result)
@@ -434,16 +455,17 @@ void NeuralCurveTrainerDialog::showQuality(const boss::NeuralCurveTrainResult& r
     for (int i = 0; i <= 256; ++i)
         peakDeviation = std::max(peakDeviation, std::abs(boss::evaluateNeuralCurve(
             result.weights, static_cast<double>(i) / 256.0)));
-    const bool improvesOnStraight = q.baselineRmse > 0.01 &&
-        q.validationRmse <= q.baselineRmse * 0.95 && peakDeviation >= 0.03;
-    const char* grade = !improvesOnStraight ? u8"与直线相近，建议补录" :
+    const bool improvesOnStraight = q.baselineRmse > 0.001 &&
+        q.validationRmse <= q.baselineRmse * 0.95;
+    const char* grade = q.baselineRmse <= 0.001 ? u8"样本本身接近直线" :
+        !improvesOnStraight ? u8"轨迹形状差异较大，建议检查样本" :
         (q.validationRmse < 0.08 && q.validationP95 < 0.18 && gap < 0.05)
         ? u8"良好" : (q.validationRmse < 0.15 && q.validationP95 < 0.30)
         ? u8"可试用" : u8"建议补录或重录";
     quality_->setText(QString::fromUtf8(
-        u8"拟合质量：%1｜训练 %2 条、独立验证 %3 条\n"
+        u8"形状拟合质量（镜像对齐后）：%1｜训练 %2 条、独立验证 %3 条\n"
         u8"训练偏差 %4%，验证偏差 %5% 路径长度；95% 点偏差不超过 %6%（直线基线 %7%）。\n"
-        u8"斜率变化量 %8（越低越平顺），起点和终点固定归零。\n"
+        u8"斜率变化量 %8（越低越平顺），最大弯曲 %9%，起点和终点固定归零。\n"
         u8"这只衡量录制路径的拟合一致性，不代表游戏命中率。")
         .arg(QString::fromUtf8(grade))
         .arg(q.trainingTrajectories).arg(q.validationTrajectories)
@@ -451,6 +473,7 @@ void NeuralCurveTrainerDialog::showQuality(const boss::NeuralCurveTrainResult& r
         .arg(q.validationRmse * 100.0, 0, 'f', 1)
         .arg(q.validationP95 * 100.0, 0, 'f', 1)
         .arg(q.baselineRmse * 100.0, 0, 'f', 1)
-        .arg(q.slopeVariation, 0, 'f', 3));
+        .arg(q.slopeVariation, 0, 'f', 3)
+        .arg(peakDeviation * 100.0, 0, 'f', 1));
     quality_->show();
 }

@@ -11,6 +11,7 @@
 #include "widgets/FormKit.h"
 #include <QCheckBox>
 #include <QApplication>
+#include <QAction>
 #include <QComboBox>
 #include <QGridLayout>
 #include <QHeaderView>
@@ -18,15 +19,19 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QScrollArea>
+#include <QStackedWidget>
 #include <QShowEvent>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTimer>
+#include <QToolButton>
 #include <QUuid>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -128,63 +133,99 @@ MacroPage::MacroPage(QWidget* parent):QWidget(parent) {
 
     auto* scroll=new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
     auto* body=new QWidget; auto* bl=new QVBoxLayout(body); bl->setContentsMargins(6,0,0,0); bl->setSpacing(12);
-    empty_=hint(QStringLiteral("未选择宏"));
-    empty_->setToolTip(QStringLiteral("从左侧新建一个宏，再依次添加动作。例如：键盘点按 → 等待 → 鼠标点击。"));
+    empty_=hint(QStringLiteral("还没有宏。点击左侧“＋ 新建”，设置触发键，再添加第一个动作。"));
     bl->addWidget(empty_);
     detail_=new QWidget; auto* dl=new QVBoxLayout(detail_); dl->setContentsMargins(0,0,0,0); dl->setSpacing(12); bl->addWidget(detail_);
+    auto* tabs=new QTabWidget; dl->addWidget(tabs);
+    auto* workflow=new QWidget; auto* wl=new QVBoxLayout(workflow); wl->setContentsMargins(2,12,2,4); wl->setSpacing(12);
+    tabs->addTab(workflow,QStringLiteral("编排流程"));
+    overview_=hint(QString()); wl->addWidget(overview_);
 
-    auto* settings=new CardWidget(QStringLiteral("触发与条件")); auto* sl=settings->contentLayout();
+    auto* settings=new CardWidget(QStringLiteral("① 什么时候运行")); auto* sl=settings->contentLayout();
     name_=new QLineEdit; name_->setMaxLength(48);
     enabled_=new QCheckBox(QStringLiteral("启用此宏"));
-    sl->addWidget(FormKit::fieldRow(QStringLiteral("名称"),name_)); sl->addWidget(enabled_);
+    auto* nameLine=new QHBoxLayout; nameLine->addWidget(FormKit::fieldRow(QStringLiteral("宏名称"),name_),1); nameLine->addWidget(enabled_);
+    sl->addLayout(nameLine);
     trigger_=keyCombo(true,true);trigger_->setEditable(true);
     trigger_->addItem(QStringLiteral("滚轮向上"),"WheelUp");trigger_->addItem(QStringLiteral("滚轮向下"),"WheelDown");
     for(int pad=0;pad<4;++pad)for(const char* key:{"A","B","X","Y","Up","Down","Left","Right","Start","Back","LB","RB","LS","RS","LT","RT"}){const auto id=QString("Pad%1:%2").arg(pad).arg(key);trigger_->addItem(id,id);}
     trigger_->setToolTip(QStringLiteral("可选择单键，也可输入 LeftControl+U 组合键或 A>B>C 按键序列。手柄采用 Pad0:A 形式。"));
     mode_=new QComboBox; mode_->addItems(modeNames);
-    sl->addWidget(FormKit::fieldRow(QStringLiteral("触发按键"),trigger_));
+    auto* triggerLine=new QHBoxLayout;triggerLine->addWidget(FormKit::fieldRow(QStringLiteral("按下此键"),trigger_),1);
+    triggerLine->addWidget(FormKit::fieldRow(QStringLiteral("如何执行"),mode_),1);sl->addLayout(triggerLine);
     blockTrigger_=new QCheckBox(QStringLiteral("屏蔽触发键（只用于触发宏）"));
     sl->addWidget(blockTrigger_);
     blockTrigger_->setToolTip(QStringLiteral("宏启用后屏蔽原始触发键，宏动作正常输出；目标条件未满足也会屏蔽。鼠标已接入所有输入方式，MAKCU 自定义旧固件需更新。键盘支持本机，以及 KMBox Net / Ferrum 接入的被控端键盘；其他硬件的独立键盘尚不支持。修改后请松开再按。"));
     blockStatus_=hint(QString()); sl->addWidget(blockStatus_);
-    sl->addWidget(FormKit::fieldRow(QStringLiteral("执行方式"),mode_));
     modeHelp_=hint(QString()); sl->addWidget(modeHelp_);
     interval_=spin(1,60000,QStringLiteral(" ms"));
-    sl->addWidget(FormKit::fieldRow(QStringLiteral("每轮间隔"),interval_));
-    target_=new QCheckBox(QStringLiteral("仅检测到符合条件的目标时执行")); sl->addWidget(target_);
+    intervalRow_=FormKit::fieldRow(QStringLiteral("循环间隔"),interval_);sl->addWidget(intervalRow_);
+    wl->addWidget(settings);
+
+    auto* targetCard=new CardWidget(QStringLiteral("② 目标限制（可选）"));auto* tl=targetCard->contentLayout();
+    target_=new QCheckBox(QStringLiteral("只在检测到目标时运行")); tl->addWidget(target_);
     classes_=new QLineEdit; classes_->setPlaceholderText(QStringLiteral("留空表示任意类别；多个 ID 用逗号分隔"));
     classes_->setMaxLength(256);
     classes_->setValidator(new QRegularExpressionValidator(QRegularExpression(QStringLiteral("[0-9,，\\s]*")),classes_));
-    sl->addWidget(FormKit::fieldRow(QStringLiteral("目标类别 ID"),classes_));
-    height_=new QCheckBox(QStringLiteral("限制目标框高度占画面的比例")); sl->addWidget(height_);
+    classesRow_=FormKit::fieldRow(QStringLiteral("目标类别 ID"),classes_);tl->addWidget(classesRow_);
+    height_=new QCheckBox(QStringLiteral("再限制目标框高度")); heightRow_=height_;tl->addWidget(heightRow_);
     auto* range=new QWidget; auto* rl=new QHBoxLayout(range); rl->setContentsMargins(0,0,0,0);
     minHeight_=spin(0,100,QStringLiteral(" %")); maxHeight_=spin(0,100,QStringLiteral(" %"));
     rl->addWidget(minHeight_); rl->addWidget(new QLabel(QStringLiteral("至"))); rl->addWidget(maxHeight_);
-    sl->addWidget(FormKit::fieldRow(QStringLiteral("框高范围"),range));
-    dl->addWidget(settings);
-    rules_=new MacroRuleEditor;dl->addWidget(rules_);
+    rangeRow_=FormKit::fieldRow(QStringLiteral("框高范围"),range);tl->addWidget(rangeRow_);
+    wl->addWidget(targetCard);
+    auto* advanced=new QWidget;auto* advancedLayout=new QVBoxLayout(advanced);advancedLayout->setContentsMargins(2,12,2,4);
+    advancedLayout->addWidget(hint(QStringLiteral("按事件与条件组合触发，并设置调度、互斥和模拟运行。普通按键宏只需使用“编排流程”页。")));
+    rules_=new MacroRuleEditor;advancedLayout->addWidget(rules_);advancedLayout->addStretch();
+    tabs->addTab(advanced,QStringLiteral("高级规则与调试"));
     rules_->changed=[this](const macros::Program& edited){if(loading_)return;if(auto* p=selected()){p->conditions=edited.conditions;p->options=edited.options;p->actions=edited.actions;save();rebuildActions(actions_->currentRow());}};
     rules_->simulate=[this]{if(auto* p=selected())macros::simulate(p->id);};
 
-    auto* flow=new CardWidget(QStringLiteral("动作顺序")); auto* fl=flow->contentLayout();
+    auto* flow=new CardWidget(QStringLiteral("③ 按顺序执行这些动作")); auto* fl=flow->contentLayout();
+    fl->addWidget(hint(QStringLiteral("从上到下执行。点击一行在右侧修改参数；新动作会插入到当前步骤后。")));
+    auto addStep=[this](int type){if(auto* p=selected();p && p->actions.size()<macros::maxActions){
+        const int after=actions_->currentRow();const int insertAt=after<0?int(p->actions.size()):after+1;
+        p->actions.insert(p->actions.begin()+insertAt,defaultAction(type));save();rebuildActions(insertAt);
+    }};
     auto* actionTools=new QHBoxLayout;
-    addType_=new QComboBox; addType_->addItems(actionNames); actionTools->addWidget(addType_,1);
-    auto* addAction=new QPushButton(QStringLiteral("＋ 添加动作")); actionTools->addWidget(addAction);
-    fl->addLayout(actionTools);
+    for(const auto& shortcut:std::initializer_list<std::pair<const char*,int>>{{u8"＋ 等待",0},{u8"＋ 按键",3},{u8"＋ 点击",7},{u8"＋ 移动",4}}){
+        auto* button=new QPushButton(QString::fromUtf8(shortcut.first));actionTools->addWidget(button);
+        connect(button,&QPushButton::clicked,this,[addStep,type=shortcut.second]{addStep(type);});
+    }
+    actionTools->addStretch();
+    auto* more=new QToolButton;more->setText(QStringLiteral("更多动作 ▾"));more->setPopupMode(QToolButton::InstantPopup);
+    auto* catalog=new QMenu(more);
+    const auto category=[&](const QString& name,std::initializer_list<int> types){
+        auto* menu=catalog->addMenu(name);for(const int type:types){
+            auto* item=menu->addAction(actionNames.value(type));connect(item,&QAction::triggered,this,[addStep,type]{addStep(type);});
+        }
+    };
+    category(QStringLiteral("基础输入"),{0,1,2,3,4,5,6,7,8,30,31,32,33});
+    category(QStringLiteral("循环与条件"),{12,13,14,15,16,17,18,19,20,21,52,53,54,55,56,57,58,59});
+    category(QStringLiteral("变量与规则"),{22,23,24,25,26,27,28,29});
+    category(QStringLiteral("目标与瞄准"),{9,10,11,34,35,36,37,38,39,40,41,42,43,44,45});
+    category(QStringLiteral("通知与配置"),{46,47,48,49,50,51});
+    more->setMenu(catalog);actionTools->addWidget(more);fl->addLayout(actionTools);
+    auto* flowSplit=new QSplitter(Qt::Horizontal);
+    auto* stepPane=new QWidget;auto* stepLayout=new QVBoxLayout(stepPane);stepLayout->setContentsMargins(0,0,0,0);
     actions_=new QTableWidget(0,3); actions_->setHorizontalHeaderLabels({QStringLiteral("步骤"),QStringLiteral("动作"),QStringLiteral("内容")});
     actions_->verticalHeader()->hide(); actions_->setSelectionBehavior(QAbstractItemView::SelectRows);
     actions_->setSelectionMode(QAbstractItemView::SingleSelection); actions_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    actions_->setShowGrid(false);actions_->setAlternatingRowColors(true);
+    actions_->verticalHeader()->setDefaultSectionSize(38);actions_->setWordWrap(false);
     actions_->horizontalHeader()->setSectionResizeMode(0,QHeaderView::ResizeToContents);
     actions_->horizontalHeader()->setSectionResizeMode(1,QHeaderView::ResizeToContents);
     actions_->horizontalHeader()->setSectionResizeMode(2,QHeaderView::Stretch);
-    actions_->setMinimumHeight(190); fl->addWidget(actions_);
+    actions_->setMinimumHeight(300);stepLayout->addWidget(actions_,1);
     auto* rowTools=new QHBoxLayout;
     auto* up=new QPushButton(QStringLiteral("↑ 上移")); auto* down=new QPushButton(QStringLiteral("↓ 下移"));
     auto* duplicateAction=new QPushButton(QStringLiteral("复制步骤")); auto* deleteAction=new QPushButton(QStringLiteral("删除步骤"));
     rowTools->addWidget(up); rowTools->addWidget(down); rowTools->addStretch(); rowTools->addWidget(duplicateAction); rowTools->addWidget(deleteAction);
-    fl->addLayout(rowTools);
+    stepLayout->addLayout(rowTools);flowSplit->addWidget(stepPane);
 
-    inspector_=new QWidget; auto* il=new QVBoxLayout(inspector_); il->setContentsMargins(0,8,0,0);
+    auto* editorScroll=new QScrollArea;editorScroll->setWidgetResizable(true);editorScroll->setFrameShape(QFrame::NoFrame);
+    inspector_=new QWidget; auto* il=new QVBoxLayout(inspector_); il->setContentsMargins(8,0,4,0);il->setSpacing(8);
+    auto* editorTitle=new QLabel(QStringLiteral("步骤设置"));editorTitle->setStyleSheet("font-weight:600;font-size:14px;");il->addWidget(editorTitle);
     type_=new QComboBox; type_->addItems(actionNames); il->addWidget(FormKit::fieldRow(QStringLiteral("选中步骤"),type_));
     key_=keyCombo(false,false);key_->setEditable(true); keyRow_=FormKit::fieldRow(QStringLiteral("键盘按键"),key_); il->addWidget(keyRow_);
     button_=new QComboBox; button_->addItems(buttonNames); buttonRow_=FormKit::fieldRow(QStringLiteral("鼠标按键"),button_); il->addWidget(buttonRow_);
@@ -197,11 +238,15 @@ MacroPage::MacroPage(QWidget* parent):QWidget(parent) {
     auto fieldRow=[&](QWidget*& row,QLabel*& label,QWidget* field){row=new QWidget;auto* l=new QHBoxLayout(row);l->setContentsMargins(0,0,0,0);label=new QLabel;label->setWordWrap(true);l->addWidget(label);l->addWidget(field,1);il->addWidget(row);};
     value_=new QDoubleSpinBox;value_->setRange(-1e9,1e9);value_->setDecimals(4);text_=new QLineEdit;text_->setMaxLength(4096);
     fieldRow(valueRow_,valueLabel_,value_);fieldRow(textRow_,textLabel_,text_);
-    actionHint_=hint(QString());il->addWidget(actionHint_);fl->addWidget(inspector_);
-    dl->addWidget(flow);
+    actionHint_=hint(QString());il->addWidget(actionHint_);il->addStretch();editorScroll->setWidget(inspector_);
+    actionStack_=new QStackedWidget;
+    auto* noStep=hint(QStringLiteral("选择左侧一个步骤，在这里设置按键、时长和其他参数。"));
+    noStep->setAlignment(Qt::AlignCenter);actionStack_->addWidget(noStep);actionStack_->addWidget(editorScroll);
+    flowSplit->addWidget(actionStack_);flowSplit->setStretchFactor(0,3);flowSplit->setStretchFactor(1,2);flowSplit->setSizes({420,300});
+    fl->addWidget(flowSplit);wl->addWidget(flow);
     run_=new QPushButton(QStringLiteral("▶ 运行一次"));
     run_->setToolTip(QStringLiteral("会发送真实输入；需要切回目标窗口时，可在第一步添加等待。"));
-    dl->addWidget(run_);
+    wl->addWidget(run_);wl->addStretch();
     run_->setToolTip(run_->toolTip() + QStringLiteral("\n运行时暂时接管自动瞄准和扳机输出。移动单位是设备计数；右／下为正。"
         "停止会释放宏按住的键。键盘支持 Windows 原生、KMBox Net 或本项目固件的独立键盘设备。"));
     bl->addStretch(); scroll->setWidget(body); split->addWidget(scroll); split->setStretchFactor(1,1); split->setSizes({220,620});
@@ -222,9 +267,6 @@ MacroPage::MacroPage(QWidget* parent):QWidget(parent) {
     for(auto* c:{trigger_,mode_}) connect(c,QOverload<int>::of(&QComboBox::currentIndexChanged),this,&MacroPage::readSettings);
     for(auto* s:{interval_,minHeight_,maxHeight_}) connect(s,&QSpinBox::editingFinished,this,&MacroPage::readSettings);
     connect(actions_,&QTableWidget::itemSelectionChanged,this,[this]{ if(!loading_) selectAction(); });
-    connect(addAction,&QPushButton::clicked,this,[this]{ if(auto* p=selected();p && p->actions.size()<macros::maxActions) {
-        p->actions.push_back(defaultAction(addType_->currentIndex())); save(); rebuildActions(static_cast<int>(p->actions.size())-1);
-    }});
     connect(up,&QPushButton::clicked,this,[this]{ moveAction(-1); });
     connect(down,&QPushButton::clicked,this,[this]{ moveAction(1); });
     connect(duplicateAction,&QPushButton::clicked,this,[this]{ if(auto* p=selected();p && selectedAction() && p->actions.size()<macros::maxActions) {
@@ -294,18 +336,7 @@ void MacroPage::selectProgram() {
     blockTrigger_->setChecked(p->blockTrigger);
     minHeight_->setValue(p->minHeightPercent); maxHeight_->setValue(p->maxHeightPercent);
     QStringList ids; for(int id:p->classes) ids<<QString::number(id); classes_->setText(ids.join(", "));
-    classes_->setEnabled(p->targetOnly); height_->setEnabled(p->targetOnly);
-    minHeight_->setEnabled(p->targetOnly && p->heightFilter); maxHeight_->setEnabled(p->targetOnly && p->heightFilter);
-    interval_->setEnabled(p->mode==macros::Mode::Hold || p->mode==macros::Mode::Toggle);
-    const QString modeHelp = p->mode==macros::Mode::Sequence ?
-        QStringLiteral("每次按键推进一个动作；按住动作可跨步骤保持。最后一步、停止或条件失效时统一松开。") :
-        QStringLiteral("不需要按住瞄准键。循环每轮结束会释放未配对的按住动作；目标条件失效立即停止。");
-    mode_->setToolTip(modeHelp);
-    modeHelp_->clear();
-    if(!p->trigger.empty() && p->trigger==stopKey_->currentData().toString().toStdString())
-        modeHelp_->setText(QStringLiteral("触发键与全部停止键相同，请修改其中一个。"));
-    else for(const auto& other:programs_) if(other.id!=p->id && other.enabled && p->enabled && !p->trigger.empty() && other.trigger==p->trigger)
-        modeHelp_->setText(QStringLiteral("多个宏共用触发键：按优先级和互斥设置调度。"));
+    updateSettingVisibility();refreshOverview();
     rules_->setProgram(*p);loading_=false; rebuildActions(0); poll();
 }
 void MacroPage::readSettings() {
@@ -319,7 +350,31 @@ void MacroPage::readSettings() {
     p->classes.clear(); for(const auto& text:classes_->text().split(QRegularExpression("[,，\\s]+"),Qt::SkipEmptyParts)) {
         bool ok=false; const int id=text.toInt(&ok); if(ok && id>=0) p->classes.push_back(id);
     }
-    save(); rebuildLibrary(library_->currentRow());
+    save();updateSettingVisibility();refreshOverview();
+    if(auto* item=library_->currentItem())item->setText((macros::option(*p,"group").empty()?QString():QString::fromUtf8(macros::option(*p,"group").c_str())+" / ")+
+        (p->enabled?QStringLiteral("●  "):QStringLiteral("○  "))+QString::fromUtf8(p->name.c_str()));
+}
+void MacroPage::updateSettingVisibility() {
+    const auto* p=selected();if(!p)return;
+    intervalRow_->setVisible(p->mode==macros::Mode::Hold || p->mode==macros::Mode::Toggle);
+    classesRow_->setVisible(p->targetOnly);heightRow_->setVisible(p->targetOnly);
+    rangeRow_->setVisible(p->targetOnly && p->heightFilter);
+    QString help=modeNames.value(static_cast<int>(p->mode));
+    if(p->mode==macros::Mode::Sequence)help+=QStringLiteral("。每次按键推进一步，全部停止键可中断。 ");
+    if(!p->trigger.empty() && p->trigger==stopKey_->currentData().toString().toStdString())
+        help+=QStringLiteral(" 触发键与全部停止键冲突，请修改其中一个。 ");
+    else for(const auto& other:programs_)if(other.id!=p->id && other.enabled && p->enabled && !p->trigger.empty() && other.trigger==p->trigger){
+        help+=QStringLiteral(" 多个宏共用触发键，请在高级规则中设置优先级和互斥。 ");break;
+    }
+    modeHelp_->setText(help);
+}
+void MacroPage::refreshOverview() {
+    const auto* p=selected();if(!p)return;
+    const QString key=p->trigger.empty()?QStringLiteral("未设置触发键"):trigger_->currentText();
+    const QString count=QStringLiteral("%1 个动作").arg(p->actions.size());
+    overview_->setText(QStringLiteral("%1  →  %2  →  %3%4")
+        .arg(key,p->targetOnly?QStringLiteral("检测到目标"):QStringLiteral("无目标限制"),count,
+            p->enabled?QString():QStringLiteral("  ·  当前宏未启用")));
 }
 void MacroPage::rebuildActions(int row) {
     loading_=true; actions_->setRowCount(0);
@@ -330,10 +385,10 @@ void MacroPage::rebuildActions(int row) {
         actions_->setItem(r,2,new QTableWidgetItem(description(a)));
     }
     if(row>=0 && row<actions_->rowCount()) actions_->selectRow(row);
-    loading_=false;if(auto* p=selected())rules_->setProgram(*p);selectAction();
+    loading_=false;if(auto* p=selected())rules_->setProgram(*p);selectAction();refreshOverview();
 }
 void MacroPage::selectAction() {
-    const auto* a=selectedAction(); inspector_->setVisible(a); if(!a) return;
+    const auto* a=selectedAction();actionStack_->setCurrentIndex(a?1:0);if(!a)return;
     loading_=true; type_->setCurrentIndex(static_cast<int>(a->type)); setKey(key_,a->key); button_->setCurrentIndex(a->a-1);
     const bool delay=a->type==AT::Delay, move=a->type==AT::MouseMove, wheel=a->type==AT::Wheel;
     const bool keyboard=a->type==AT::KeyDown || a->type==AT::KeyUp || a->type==AT::KeyPress;

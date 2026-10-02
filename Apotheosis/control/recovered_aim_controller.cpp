@@ -92,7 +92,8 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     // carry are preserved across a plain no-target frame (105/106).
     const auto tracks = tracker_.update(input.detectionFresh ? input.candidates
                                                             : std::vector<Candidate>{},
-                                        input.dtSec);
+                                        input.trackingDtSec > 0.0 ? input.trackingDtSec : input.dtSec,
+                                        input.motionEventSum);
     const bool macroChanged=input.macro.commandSerial!=macroRevision_;
     const bool macroSelect=macroChanged&&(input.macro.command==1||input.macro.command==3);
     if(macroChanged){macroRevision_=input.macro.commandSerial;macroLockedId_=-1;}
@@ -209,6 +210,7 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     }
     selectionMisses_ = 0;
     const auto& target = tracks[chosen];
+    const bool changedTarget = selectedId_ != target.id;
     selectedId_ = target.id;
     selectedClassId_ = target.classId;
     selectedBox_ = target.box;
@@ -282,6 +284,12 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     out.followStateX = compensator_.stateX();
     out.followStateY = compensator_.stateY();
     out.controlAnchor = out.anchor + offset + target.velocity*(std::clamp(input.macro.predictionMs,0.,500.)/1000.);
+    if (changedTarget) {
+        // Frozen second-port switch rule: do not carry old-target I or produce
+        // a one-frame D spike from the old target's error.
+        pid_.resetIntegral();
+        pid_.seedDerivativeAfterPause();
+    }
     // Compensation changes only the input point. The original PID handles its
     // complete error (P/I/D, deadzone, FF, clipping, segmentation and carry).
     const auto step = pid_.update(out.controlAnchor - input.cross,

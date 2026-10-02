@@ -1,10 +1,13 @@
 #include "widgets/NeuralCurveTrainer.h"
 #include "widgets/CurveCanvas.h"
+#include "widgets/NeuralCurveFile.h"
 
 #include <QApplication>
 #include <QCoreApplication>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QSpinBox>
+#include <QTemporaryDir>
 
 #include <chrono>
 #include <cstdio>
@@ -14,6 +17,53 @@
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+
+    {
+        QTemporaryDir directory;
+        if (!directory.isValid()) return 1;
+        const QString path = directory.filePath(QStringLiteral("curve.ancurve"));
+        auto exported = boss::randomNeuralCurve(2026);
+        exported.quality.trainingTrajectories = 12;
+        exported.quality.validationRmse = .04;
+        QString error;
+        if (!neural_curve_file::save(path, exported, error)) return 1;
+        boss::NeuralCurveTrainResult imported;
+        if (!neural_curve_file::load(path, imported, error) ||
+            imported.weights != exported.weights ||
+            imported.quality.trainingTrajectories != 12 ||
+            std::abs(imported.quality.validationRmse - .04) > 1e-9)
+            return 1;
+        imported.weights[0] = 99;
+        QSaveFile invalid(path);
+        if (!invalid.open(QIODevice::WriteOnly) ||
+            invalid.write("{\"format\":\"apotheosis-neural-curve\",\"version\":1,\"weights\":[]}") < 0 ||
+            !invalid.commit()) return 1;
+        if (neural_curve_file::load(path, imported, error) || imported.weights[0] != 99)
+            return 1;
+    }
+
+    {
+        NeuralCurveTrainerDialog randomDialog;
+        auto* button = randomDialog.findChild<QPushButton*>("neuralRandomCurve");
+        auto* applyRandom = randomDialog.findChild<QPushButton*>("neuralApplyCurve");
+        auto* rounds = randomDialog.findChild<QSpinBox*>("neuralRecordingRounds");
+        if (!button || !applyRandom || !rounds || rounds->maximum() != 200 || rounds->value() != 100)
+            return 1;
+        bool received = false;
+        randomDialog.onApply = [&](const boss::NeuralCurveTrainResult& r) {
+            received = r.success && r.quality.trainingTrajectories == 0 &&
+                std::abs(boss::evaluateNeuralCurve(r.weights, .5)) > .06;
+        };
+        button->click();
+        if (!applyRandom->isEnabled()) return 1;
+        if (argc > 1) {
+            randomDialog.show();
+            app.processEvents();
+            randomDialog.grab().save(QString::fromLocal8Bit(argv[1]) + ".random.png");
+        }
+        applyRandom->click();
+        if (!received) return 1;
+    }
 
     {
         CurveCanvas drawing;
@@ -36,6 +86,26 @@ int main(int argc, char** argv)
         }
     }
 
+    // Verify the new 200-stroke session completes without the old 80 limit.
+    {
+        NeuralCurveTrainingCanvas probe;
+        probe.resize(640, 360);
+        int completed = 0;
+        probe.collectionFinished = [&] { ++completed; };
+        probe.startRecording(200, false);
+        for (int j = 0; j < 200; ++j) {
+            const auto from = probe.startPoint(), to = probe.targetPoint();
+            for (double fraction : {0.0, .3, .6, 1.0}) {
+                const auto point = from + (to - from) * fraction;
+                QMouseEvent event(fraction == 0 ? QEvent::MouseButtonPress : QEvent::MouseMove,
+                    point, probe.mapToGlobal(point.toPoint()),
+                    fraction == 0 ? Qt::LeftButton : Qt::NoButton,
+                    Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(&probe, &event);
+            }
+        }
+        if (probe.recording() || completed != 1 || probe.trajectories().size() != 200) return 1;
+    }
     // Real desktop events may arrive sparsely or skip over the target circle.
     auto recordSparse = [&](bool finishOnRelease) {
         NeuralCurveTrainingCanvas probe;
@@ -118,6 +188,7 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (canvas->trajectories().size() != 5 || !apply->isEnabled()) return 1;
+    if (argc > 1) dialog.grab().save(QString::fromLocal8Bit(argv[1]) + ".trained.png");
     apply->click();
     return applied ? 0 : 1;
 }

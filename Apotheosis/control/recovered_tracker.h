@@ -42,7 +42,7 @@ public:
 
     void setConfig(const RecoveredTrackerConfig& config) { config_ = config; }
     std::vector<RecoveredTrack> update(const std::vector<Candidate>& candidates,
-                                       double dtSec);
+                                       double dtSec, Vec2 eventSum = {});
     void reset();
 
 private:
@@ -52,12 +52,12 @@ private:
 };
 
 // The source keeps a motion track (0xE8) and a separately filtered box
-// record (0x168). Joined motion velocity supplies FF without mouse-event scaling.
+// record (0x168). Joined motion velocity supplies the frozen second-port FF.
 class RecoveredDualTracker
 {
 public:
     std::vector<RecoveredTrack> update(const std::vector<Candidate>& candidates,
-                                       double dtSec);
+                                       double dtSec, Vec2 eventSum = {});
     void setFrameSize(int width, int height);
     void reset();
 

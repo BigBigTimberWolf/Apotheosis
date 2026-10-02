@@ -5,6 +5,9 @@
 namespace control {
 
 // Direct-output branch recovered from 0xAED20 and 0x15917D..0x15A530.
+// User-requested frozen baseline: this second-port PIDF (P/I/D, FF, deadzone,
+// clipping, segmentation, carry and configuration-state rules) must not be
+// changed by later controller work unless the user explicitly authorizes it.
 // Values are in image pixels until the final segment division and rounding.
 struct RecoveredPidConfig
 {
@@ -13,7 +16,7 @@ struct RecoveredPidConfig
     float kpX = 0.4f, kiX = 0.02f, kdX = 0.12f;
     float kpY = 0.4f, kiY = 0.02f, kdY = 0.12f;
     float deadzoneX = 5.0f, deadzoneY = 5.0f;
-    // FF input is selected track velocity (image px/s), without mouse-event scaling.
+    // FF input is selected track velocity with successful-move feedback.
     float feedforwardX = 0.0f, feedforwardY = 0.0f;
     float smoothMaxPixel = 50.0f;
     bool segmentEnabled = false;

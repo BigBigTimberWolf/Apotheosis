@@ -1,4 +1,5 @@
 #include "config/config.h"
+#include "mouse/neural_curve.h"
 
 #include <cstdio>
 #include <cmath>
@@ -426,6 +427,28 @@ int main()
                   restored.hotkeys[0].aim_path_mode == 4 &&
                   restored.hotkeys[0].aim_path_neural_weights[24] > 0.09f,
                   "25 个神经网络权重保存后完整回读");
+    }
+
+    {
+        Config saved;
+        saved.hotkeys.emplace_back();
+        auto& hp = saved.hotkeys.back();
+        hp.aim_path_mode = 4;
+        hp.aim_path_neural_trained = true;
+        hp.aim_path_neural_weights = boss::randomNeuralCurve(2026).weights;
+        check(saved.saveConfig("neural_random_roundtrip.ini"), "随机曲线能保存");
+        Config loaded;
+        check(loaded.loadConfig("neural_random_roundtrip.ini"), "随机曲线能重新加载");
+        check(!loaded.hotkeys.empty(), "随机曲线所属热键保留");
+        if (!loaded.hotkeys.empty()) {
+            const auto& actual = loaded.hotkeys.back();
+            check(actual.aim_path_mode == 4 && actual.aim_path_neural_trained &&
+                  actual.aim_path_neural_examples == 0, "随机曲线不伪装成录制训练");
+            for (int i = 0; i <= 100; ++i)
+                check(std::abs(boss::evaluateNeuralCurve(hp.aim_path_neural_weights, i / 100.0) -
+                               boss::evaluateNeuralCurve(actual.aim_path_neural_weights, i / 100.0)) < 1e-6,
+                      "随机曲线重启后形状不变");
+        }
     }
 
     std::printf("\n[3] 旧三槽 -> aim_classes 的迁移\n");

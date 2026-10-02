@@ -47,6 +47,8 @@ struct ControlInput
     std::vector<Candidate> candidates;
     Vec2 cross{};
     double dtSec = 0.0;
+    double trackingDtSec = 0.0; // Capture-frame interval; PID keeps dtSec.
+    Vec2 motionEventSum{};      // Successful sends matched to this frame.
     int64_t observationTimeUs = 0;
     BackgroundMotion backgroundMotion;
     uint64_t frameIndex = 0;

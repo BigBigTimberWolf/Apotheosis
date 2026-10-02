@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <random>
 #include <string>
@@ -50,6 +51,24 @@ inline double evaluateNeuralCurve(const std::array<float, 25>& weights, double p
     return std::tanh(raw) * 4.0 * t * (1.0 - t);
 }
 
+// Generate directly in the runtime model format: smooth, bounded, and zero at
+// both endpoints. This is a generated curve, not a fitted personal model.
+inline NeuralCurveTrainResult randomNeuralCurve(std::uint32_t seed)
+{
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    NeuralCurveTrainResult result;
+    const double sign = unit(rng) < 0.5 ? -1.0 : 1.0;
+    result.weights[24] = static_cast<float>(sign * (0.12 + 0.14 * unit(rng)));
+    for (int h = 0; h < 3; ++h) {
+        result.weights[h] = static_cast<float>(0.5 + 1.5 * unit(rng));
+        result.weights[8 + h] = static_cast<float>(unit(rng) - 0.5);
+        result.weights[16 + h] = static_cast<float>(sign * (unit(rng) - 0.5) * 0.05);
+    }
+    result.success = true;
+    return result;
+}
+
 inline NeuralCurveTrainResult trainNeuralCurve(const std::vector<NeuralTrajectory>& input)
 {
     NeuralCurveTrainResult result;
@@ -80,18 +99,77 @@ inline NeuralCurveTrainResult trainNeuralCurve(const std::vector<NeuralTrajector
         return result;
     }
 
+    // Equal spatial sampling gives each stroke equal weight. Determine the
+    // reference shape using training strokes ONLY; held-out strokes never pick
+    // the reference or fit the prototype. Mirror whole strokes, not individual
+    // points, so S curves retain their changes of direction.
+    constexpr int kShapeSamples = 128;
+    std::vector<NeuralTrajectory> aligned(valid.size());
+    for (size_t j = 0; j < valid.size(); ++j) {
+        const auto& source = *valid[j];
+        size_t segment = 0;
+        for (int i = 0; i < kShapeSamples; ++i) {
+            const double t = static_cast<double>(i) / (kShapeSamples - 1);
+            while (segment + 1 < source.size() && source[segment + 1].progress < t)
+                ++segment;
+            const auto& a = source[segment];
+            const auto& b = source[std::min(segment + 1, source.size() - 1)];
+            const double f = b.progress > a.progress
+                ? std::clamp((t - a.progress) / (b.progress - a.progress), 0.0, 1.0) : 0.0;
+            aligned[j].push_back({t, i == 0 || i == kShapeSamples - 1
+                ? 0.0 : a.deviation + f * (b.deviation - a.deviation)});
+        }
+    }
+    auto dot = [&](size_t a, size_t b) {
+        double sum = 0.0;
+        for (int i = 0; i < kShapeSamples; ++i)
+            sum += aligned[a][i].deviation * aligned[b][i].deviation;
+        return sum;
+    };
+    std::vector<double> norms(valid.size());
+    for (size_t j = 0; j < valid.size(); ++j) norms[j] = std::sqrt(dot(j, j));
+    size_t reference = 1;
+    double bestSimilarity = -1.0;
+    for (size_t a = 0; a < valid.size(); ++a) {
+        if (a % 5 == 0 || norms[a] < 1e-6) continue;
+        double similarity = 0.0;
+        for (size_t b = 0; b < valid.size(); ++b)
+            if (b % 5 != 0 && norms[b] >= 1e-6)
+                similarity += std::abs(dot(a, b)) / (norms[a] * norms[b]);
+        if (similarity > bestSimilarity) {
+            bestSimilarity = similarity;
+            reference = a;
+        }
+    }
+    for (size_t j = 0; j < valid.size(); ++j)
+        if (dot(j, reference) < 0.0)
+            for (auto& point : aligned[j]) point.deviation = -point.deviation;
+
     std::vector<const NeuralTrajectory*> training, validation;
     for (size_t i = 0; i < valid.size(); ++i)
-        (i % 5 == 0 ? validation : training).push_back(valid[i]);
+        (i % 5 == 0 ? validation : training).push_back(&aligned[i]);
     result.quality.trainingTrajectories = static_cast<int>(training.size());
     result.quality.validationTrajectories = static_cast<int>(validation.size());
+
+    // Median preserves the typical bend while suppressing occasional detours.
+    // Fitting one prototype also keeps 100-200 stroke training inexpensive.
+    NeuralTrajectory prototype;
+    for (int i = 0; i < kShapeSamples; ++i) {
+        std::vector<double> values;
+        for (const auto* stroke : training) values.push_back((*stroke)[i].deviation);
+        std::sort(values.begin(), values.end());
+        const size_t middle = values.size() / 2;
+        prototype.push_back({aligned[0][i].progress,
+            (values[middle] + values[(values.size() - 1) / 2]) * 0.5});
+    }
+    const std::vector<const NeuralTrajectory*> fitting{&prototype};
 
     std::mt19937 rng(0x41504F54u);
     std::normal_distribution<double> init(0.0, 0.24);
     std::array<double, 25> w{}, m{}, v{}, best{};
     for (int h = 0; h < 8; ++h)
     {
-        w[h] = init(rng);
+        w[h] = (h - 3.5) * 0.8;
         w[8 + h] = init(rng) * 0.5;
         w[16 + h] = init(rng);
     }
@@ -118,11 +196,11 @@ inline NeuralCurveTrainResult trainNeuralCurve(const std::vector<NeuralTrajector
 
     double bestTraining = std::numeric_limits<double>::infinity();
     int staleChecks = 0;
-    for (int epoch = 1; epoch <= 400; ++epoch)
+    for (int epoch = 1; epoch <= 1200; ++epoch)
     {
         std::array<double, 25> grad{};
         size_t samples = 0;
-        for (const auto* trajectory : training)
+        for (const auto* trajectory : fitting)
             for (const auto& point : *trajectory)
             {
                 const double t = point.progress;
@@ -164,14 +242,14 @@ inline NeuralCurveTrainResult trainNeuralCurve(const std::vector<NeuralTrajector
         }
         if (epoch % 10 == 0)
         {
-            const double score = evaluate(w, training);
-            if (score + 1e-5 < bestTraining)
+            const double score = evaluate(w, fitting);
+            if (score + 1e-7 < bestTraining)
             {
                 bestTraining = score;
                 best = w;
                 staleChecks = 0;
             }
-            else if (++staleChecks >= 6 && epoch >= 100)
+            else if (++staleChecks >= 12 && epoch >= 300)
                 break;
         }
     }

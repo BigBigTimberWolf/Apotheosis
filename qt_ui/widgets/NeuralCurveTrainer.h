@@ -75,6 +75,7 @@ private:
 
     void launchTraining();
     void pollTraining();
+    void showResult();
     void showQuality(const boss::NeuralCurveTrainResult& result);
     void setRecordingUi(bool recording);
 
@@ -84,6 +85,7 @@ private:
     QCheckBox* append_ = nullptr;
     QPushButton* recordButton_ = nullptr;
     QPushButton* trainButton_ = nullptr;
+    QPushButton* randomButton_ = nullptr;
     QPushButton* applyButton_ = nullptr;
     QPushButton* exportButton_ = nullptr;
     QLabel* status_ = nullptr;

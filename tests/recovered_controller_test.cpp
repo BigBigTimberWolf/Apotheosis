@@ -131,8 +131,7 @@ int main()
     }
 
     RecoveredPid pid;
-    // Source reports 166/513: crosshair enable controls the base Ki reversal
-    // gate in every parameter bank, independently of the following offset.
+    // Crosshair enable controls the base Ki reversal gate in every bank.
     for (bool enabled : {false,true}) {
         HotkeyProfile hk;
         hk.crosshair_detect_enabled=enabled;
@@ -163,9 +162,9 @@ int main()
         p.update({2,3},{},.1);
         c.kiX=nextKi;p.setConfig(c);
         const auto step=p.update({0,0},{},.01);
-        check(std::abs(step.integral.x-(nextKi>1?.2:0))<1e-6 &&
-              std::abs(step.integral.y-(nextKi>1?.3:0))<1e-6,
-              "source 121 increasing Ki preserves both integrals; decreasing clears both");
+        check(std::abs(step.integral.x)<1e-6 &&
+              std::abs(step.integral.y-.3)<1e-6,
+              "second-port Ki edit clears only its own axis integral");
     }
     {
         RecoveredPid p;RecoveredPidConfig c;
@@ -176,14 +175,14 @@ int main()
         check(p.update({1,0},{},.01).counts.x==1,
               "FF-only edits preserve integer carry");
         c.kpX=2;p.setConfig(c);
-        check(p.update({1,0},{},.01).counts.x==1,
-              "ordinary Kp update clears carry but does not skip the send");
+        check(p.update({1,0},{},.01).counts.x==0,
+              "second-port KpX edit skips one send");
         c.segmentEnabled=true;c.segment=3;p.setConfig(c);
-        check(p.update({3,0},{},.01).counts.x!=0,
-              "same effective segment toggle does not skip the send");
+        check(p.update({3,0},{},.01).counts.x==0,
+              "second-port segment toggle skips one send");
         c.kiX=40;c.feedforwardX=15;p.setConfig(c);
-        check(p.config().kiX==40 && p.config().feedforwardX==15,
-              "Ki and FF support the recovered UI ranges");
+        check(p.config().kiX==10 && p.config().feedforwardX==10,
+              "second-port Ki and FF use their original 0..10 range");
     }
     RecoveredPidConfig config;
     config.kpX = config.kpY = 0.5f;
@@ -240,6 +239,13 @@ int main()
           "recovered default position smoothing (90)");
     check(second.size() == 1 && std::abs(second[0].velocity.x - 152.39) < 0.2,
           "no-event two-frame velocity (90)");
+    RecoveredTracker withMoveFeedback;
+    withMoveFeedback.update({ Candidate{ { 126, 114, 20, 20 }, 0, 0.9 } }, 0.01);
+    const auto feedbackFrame = withMoveFeedback.update(
+        { Candidate{ { 134, 114, 20, 20 }, 0, 0.9 } }, 0.01, { 4, 0 });
+    check(feedbackFrame.size() == 1 &&
+          feedbackFrame[0].velocity.x > second[0].velocity.x,
+          "second-port FF velocity includes successful mouse movement events");
     tracker.update({}, 0.01);
     const auto reacquired = tracker.update({ Candidate{ { 134, 114, 20, 20 }, 0, 0.9 } }, 0.01);
     check(reacquired.size() == 1 && reacquired[0].id == first[0].id,
@@ -307,6 +313,16 @@ int main()
           std::abs(eventSelected.trackedVelocity.x - 23.2624) < 0.2 &&
           eventSelected.trackedVelocity.y == 0,
           "selected diagnostic velocity comes only from observed image motion");
+    RecoveredAimController slowerFrameClock;
+    slowerFrameClock.setConfig(eventConfig, RecoveredPidConfig{});
+    eventInput.candidates = { row0, row1 };
+    eventInput.trackingDtSec = 0.02;
+    slowerFrameClock.update(eventInput);
+    eventInput.candidates = { moved0, moved1 };
+    const auto slowerVelocity = slowerFrameClock.update(eventInput);
+    check(slowerVelocity.engaged &&
+          slowerVelocity.trackedVelocity.x < eventSelected.trackedVelocity.x,
+          "tracker uses capture-frame interval independently of PID interval");
 
     RecoveredAimController switching;
     ControllerConfig switchConfig = eventConfig;
@@ -323,8 +339,8 @@ int main()
     const auto newTarget = switching.update(switchInput);
     check(oldTarget.engaged && newTarget.engaged &&
           oldTarget.targetId != newTarget.targetId &&
-          std::abs(newTarget.derivativeRaw.x) > 0.01,
-          "target switch retains the PID derivative state");
+          std::abs(newTarget.derivativeRaw.x) < 0.01,
+          "second-port target switch seeds derivative from new target");
 
     RecoveredAimController controller;
     ControllerConfig controllerConfig;

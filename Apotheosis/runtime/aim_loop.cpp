@@ -27,6 +27,7 @@
 #include "runtime/aim_telemetry.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/latency_probe.h"
+#include "runtime/motion_feedback_window.h"
 
 #include <algorithm>
 #include <atomic>
@@ -141,6 +142,8 @@ MouseThread* ensureMouse()
 }
 std::chrono::steady_clock::time_point g_last_tick{};
 bool g_first_tick = true;
+int64_t g_last_capture_ns = 0;
+runtime::MotionFeedbackWindow g_pidfFeedback;
 uint64_t g_frame_index = 0;
 int g_last_active_hotkey = -1;
 int g_flash_target_id = -1;
@@ -391,6 +394,8 @@ bool tick(int* consumedVersion)
             g_triggerTargetSelector.reset();
             g_path.reset();
             g_first_tick = true;
+            g_last_capture_ns = 0;
+            g_pidfFeedback.reset();
             g_last_active_hotkey = -1;
             g_hotkey_activated_ms = 0;
             g_aimpointRecoilGate.reset();
@@ -433,6 +438,10 @@ bool tick(int* consumedVersion)
     {
         releaseHeldButtons();
         if (MouseThread* mouse = ensureMouse()) mouse->consumeMovementFeedback();
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_pidfFeedback.reset();
+        }
         g_lastTriggerMode = triggerMode;
         g_path.reset();
     }
@@ -452,6 +461,8 @@ bool tick(int* consumedVersion)
             g_triggerTargetSelector.reset();
             g_path.reset();
             g_first_tick = true;
+            g_last_capture_ns = 0;
+            g_pidfFeedback.reset();
             g_last_active_hotkey = activeIdx;
             g_hotkey_activated_ms = nowMs();
             g_aimpointRecoilGate.reset();
@@ -594,6 +605,7 @@ bool tick(int* consumedVersion)
          (g_aim_delay_target_id >= 0 && g_aim_delay_started_ms > 0 &&
           nowMs() - g_aim_delay_started_ms >= std::clamp(hk.unlock_y_delay_ms, 0, 5000)));
     double dtSec = 0.0;
+    double trackingDtSec = 0.0;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         if (g_first_tick)
@@ -609,11 +621,23 @@ bool tick(int* consumedVersion)
             dtSec = 1.0 / std::max(60, cfg.capture_fps);
         }
         else dtSec = std::chrono::duration<double>(now - g_last_tick).count();
+        // Frozen second-port timing: E8/0x168 velocity follows capture-frame
+        // timestamps, while the PID derivative/integral uses the control tick.
+        trackingDtSec = dtSec;
+        if (captureNs > 0) {
+            if (g_last_capture_ns > 0 && captureNs > g_last_capture_ns) {
+                const double frameDt = (captureNs - g_last_capture_ns) * 1e-9;
+                if (dtIsUsable(frameDt)) trackingDtSec = frameDt;
+            }
+            if (captureNs > g_last_capture_ns) g_last_capture_ns = captureNs;
+        }
     }
     if (!dtIsUsable(dtSec))
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         if (g_controller) g_controller->reset();
+        g_last_capture_ns = 0;
+        g_pidfFeedback.reset();
         g_aimpointRecoilGate.reset();
         g_target_aim_hotkey = -1;
         if (g_autoStop.continuous())
@@ -682,9 +706,13 @@ bool tick(int* consumedVersion)
         in.candidates = std::move(candidates);
         in.cross = cross;
         in.dtSec = dtSec;
+        in.trackingDtSec = trackingDtSec;
         const int64_t frameUs = captureNs > 0 ? captureNs / 1000
             : std::chrono::duration_cast<std::chrono::microseconds>(
                 now.time_since_epoch()).count();
+        for (const auto& event : movementFeedback.events)
+            g_pidfFeedback.add({event.dx, event.dy, event.timestamp_us, event.source});
+        in.motionEventSum = g_pidfFeedback.sample(frameUs);
         in.observationTimeUs = frameUs;
         in.backgroundMotion = detectedBackground;
         in.frameIndex = ++g_frame_index;
@@ -1297,6 +1325,8 @@ void reset()
             if (MouseThread* mouse = ensureMouse()) mouse->maskRealKeyboard(0);
         g_autoStop.reset();
         g_first_tick = true;
+        g_last_capture_ns = 0;
+        g_pidfFeedback.reset();
         g_frame_index = 0;
         g_last_active_hotkey = -1;
         g_hotkey_activated_ms = 0;
