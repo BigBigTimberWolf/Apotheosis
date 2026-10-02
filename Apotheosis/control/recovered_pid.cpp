@@ -7,32 +7,61 @@
 namespace control {
 namespace {
 
-// The integral path is exactly the frozen second-port behavior. The only change
-// kept from the stabilizer work is the low-pass on the derivative term: it turns
-// kd into usable phase lead (instead of amplified per-frame/dt jitter) so kp can
-// go higher, and it never injects anything into the integral. derivAlpha is the
-// filter coefficient for this tick; 0 reproduces the raw frozen derivative.
+struct AxisTune
+{
+    float derivAlpha = 0.0f;     // low-pass coefficient for the D term (A)
+    float deadzone = 0.0f;       // per-axis deadzone radius
+    float integralCeiling = 0.0f;// decoupled integral authority limit (B)
+    float satLimit = 0.0f;       // PID output clip = smoothMaxPixel (B)
+};
+
+// A: the derivative is low-pass filtered so kd is usable phase lead, not
+//    amplified per-frame/dt jitter -> kp can go higher.
+// B: conditional-integration anti-windup. When the output is already saturated
+//    and integrating would push it further out, accumulation is SKIPPED (never
+//    reversed) -- so it never injects an integral that opposes the proportional
+//    term, and ki<=0 keeps the integral exactly zero (pure P). The ceiling is
+//    decoupled from ki, so raising ki speeds correction without raising the
+//    windup ceiling.
+// D: inside the deadzone the integral bleeds toward zero so it settles on the
+//    point instead of holding a value that nudges across it.
 float axisPid(float error, float kp, float ki, float kd, float dt,
-              bool preserveIntegralOnReverse, float derivAlpha,
+              bool preserveIntegralOnReverse, const AxisTune& tune,
               float& integral, float& previous, float& dFilter, float& rawD)
 {
     if (!preserveIntegralOnReverse && error * integral < 0.0f)
         integral = 0.0f;
-    integral += ki * error * dt;
-    if (ki > 0.0f)
-        integral = std::clamp(integral, -ki, ki);
+
+    // Derivative first (the saturation test below needs the full output).
     rawD = kd * (error - previous) / dt;
     float dTerm = rawD;
-    if (derivAlpha > 0.0f)
+    if (tune.derivAlpha > 0.0f) { dFilter += tune.derivAlpha * (rawD - dFilter); dTerm = dFilter; }
+    else dFilter = rawD;
+    previous = error;
+
+    const bool inDeadzone = tune.deadzone > 0.0f && std::abs(error) < tune.deadzone;
+    if (ki <= 0.0f)
     {
-        dFilter += derivAlpha * (rawD - dFilter);
-        dTerm = dFilter;
+        integral = 0.0f; // pure-P tune: never any integral action
+    }
+    else if (inDeadzone)
+    {
+        integral *= std::exp(-dt / 0.05f); // bleed windup so the output settles
     }
     else
-        dFilter = rawD; // keep state coherent if the filter is toggled off
-    const float output = kp * error + integral + dTerm;
-    previous = error;
-    return output;
+    {
+        const float candidate = integral + ki * error * dt;
+        const float u = kp * error + candidate + dTerm;
+        const bool saturated = tune.satLimit > 0.0f && std::abs(u) >= tune.satLimit;
+        const bool pushingOut = u * error > 0.0f; // output drives further in error's dir
+        if (!(saturated && pushingOut)) integral = candidate; // else: just stop, don't reverse
+        if (tune.integralCeiling > 0.0f)
+            integral = std::clamp(integral, -tune.integralCeiling, tune.integralCeiling);
+        else
+            integral = std::clamp(integral, -ki, ki);
+    }
+
+    return kp * error + integral + dTerm;
 }
 
 int quantize(float value, float& carry)
@@ -98,28 +127,39 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     const float ey = static_cast<float>(error.y);
     // A macro axis reset has no historical sample. Seed it from the next
     // observation instead of differentiating against an invented zero.
-    if (seedResetX_) { previousX_ = ex; dFilterX_ = 0.0f; seedResetX_ = false; }
-    if (seedResetY_) { previousY_ = ey; dFilterY_ = 0.0f; seedResetY_ = false; }
-    // The one always-on change to the frozen formula: a fixed ~20 Hz low-pass on
-    // the derivative term so kd becomes usable phase lead (kp can go higher)
-    // rather than amplified per-frame/dt jitter. P and I stay exactly frozen.
+    if (seedResetX_) { previousX_ = ex; dFilterX_ = ffFilterX_ = 0.0f; seedResetX_ = false; }
+    if (seedResetY_) { previousY_ = ey; dFilterY_ = ffFilterY_ = 0.0f; seedResetY_ = false; }
+    // Always-on stabilizers, baked to fixed good values (no new knobs):
+    //  A  ~20 Hz low-pass on the derivative -> usable kd, higher kp.
+    //  B  integral ceiling decoupled from ki (a small fraction of the output
+    //     budget) + conditional-integration anti-windup inside axisPid.
+    const float maxPixel = std::max(0.0f, config_.smoothMaxPixel);
     constexpr float kDerivativeCutoffHz = 20.0f;
+    constexpr float kIntegralCeilingFraction = 0.1f;
     const float derivAlpha = dt / (dt + 1.0f / (2.0f * 3.14159265f * kDerivativeCutoffHz));
+    auto tuneFor = [&](float deadzone) {
+        AxisTune tune;
+        tune.derivAlpha = derivAlpha;
+        tune.deadzone = deadzone;
+        tune.integralCeiling = kIntegralCeilingFraction * maxPixel;
+        tune.satLimit = maxPixel;
+        return tune;
+    };
     float rawDx = 0.0f, rawDy = 0.0f;
     float px = 0.0f, py = 0.0f;
     if (config_.maskX) {
         integralX_ = carryX_ = 0.0f;
         previousX_ = ex;
-        dFilterX_ = 0.0f;
+        dFilterX_ = ffFilterX_ = 0.0f;
     } else px = axisPid(ex, config_.kpX, config_.kiX, config_.kdX, dt,
-                       config_.preserveIntegralOnReverse, derivAlpha,
+                       config_.preserveIntegralOnReverse, tuneFor(config_.deadzoneX),
                        integralX_, previousX_, dFilterX_, rawDx);
     if (config_.maskY) {
         integralY_ = carryY_ = 0.0f;
         previousY_ = ey;
-        dFilterY_ = 0.0f;
+        dFilterY_ = ffFilterY_ = 0.0f;
     } else py = axisPid(ey, config_.kpY, config_.kiY, config_.kdY, dt,
-                       config_.preserveIntegralOnReverse, derivAlpha,
+                       config_.preserveIntegralOnReverse, tuneFor(config_.deadzoneY),
                        integralY_, previousY_, dFilterY_, rawDy);
     result.pid = { px, py };
     result.integral = { integralX_, integralY_ };
@@ -128,28 +168,43 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     const float dx = config_.deadzoneX, dy = config_.deadzoneY;
     if (!config_.skipDeadzone)
     {
+        // D: true-zero inner band. Inside the innermost fraction the output is
+        // exactly zero so the aim settles on the point; it then ramps to full at
+        // the deadzone edge. The old 0.1 floor left a persistent nudge that, with
+        // integer quantization, showed up as a static tremor around the target.
+        constexpr float kInner = 0.2f;
+        auto band = [](float radius) {
+            return radius <= kInner ? 0.0f : (radius - kInner) / (1.0f - kInner);
+        };
         if (dx > 0.0f && dy > 0.0f)
         {
             const float radius = std::hypot(std::abs(ex) / dx, std::abs(ey) / dy);
             if (radius < 1.0f)
             {
-                const float scale = std::max(0.1f, radius);
+                const float scale = band(radius);
                 px *= scale;
                 py *= scale;
             }
         }
         else if (dx > 0.0f && std::abs(ex) < dx)
-            px *= std::max(0.1f, std::abs(ex) / dx);
+            px *= band(std::abs(ex) / dx);
         else if (dy > 0.0f && std::abs(ey) < dy)
-            py *= std::max(0.1f, std::abs(ey) / dy);
+            py *= band(std::abs(ey) / dy);
     }
     result.afterDeadzone = { px, py };
 
-    const float fx = !config_.maskX && std::isfinite(trackedFeedforward.x)
+    // C: low-pass the velocity feedforward so raising FF stops injecting the
+    // tracker's per-frame velocity noise straight into the output (f-shake).
+    constexpr float kFeedforwardCutoffHz = 15.0f;
+    const float ffAlpha = dt / (dt + 1.0f / (2.0f * 3.14159265f * kFeedforwardCutoffHz));
+    const float rawFx = !config_.maskX && std::isfinite(trackedFeedforward.x)
         ? std::max(0.0f, config_.feedforwardX) * static_cast<float>(trackedFeedforward.x) : 0.0f;
-    const float fy = !config_.maskY && std::isfinite(trackedFeedforward.y)
+    const float rawFy = !config_.maskY && std::isfinite(trackedFeedforward.y)
         ? std::max(0.0f, config_.feedforwardY) * static_cast<float>(trackedFeedforward.y) : 0.0f;
-    const float maxPixel = std::max(0.0f, config_.smoothMaxPixel);
+    ffFilterX_ += ffAlpha * (rawFx - ffFilterX_);
+    ffFilterY_ += ffAlpha * (rawFy - ffFilterY_);
+    const float fx = ffFilterX_;
+    const float fy = ffFilterY_;
     const float segment = config_.segmentEnabled && std::isfinite(config_.segment)
         ? std::clamp(config_.segment, 1.0f, 10.0f) : 3.0f;
     const float x = std::clamp(px + fx, -maxPixel, maxPixel) / segment;
@@ -173,8 +228,8 @@ void RecoveredPid::resetIntegral()
 
 void RecoveredPid::resetAxes(bool x, bool y)
 {
-    if (x) { integralX_ = previousX_ = carryX_ = dFilterX_ = 0.0f; seedResetX_ = true; }
-    if (y) { integralY_ = previousY_ = carryY_ = dFilterY_ = 0.0f; seedResetY_ = true; }
+    if (x) { integralX_ = previousX_ = carryX_ = dFilterX_ = ffFilterX_ = 0.0f; seedResetX_ = true; }
+    if (y) { integralY_ = previousY_ = carryY_ = dFilterY_ = ffFilterY_ = 0.0f; seedResetY_ = true; }
 }
 
 void RecoveredPid::reset()
@@ -183,6 +238,7 @@ void RecoveredPid::reset()
     previousX_ = previousY_ = 0.0f;
     carryX_ = carryY_ = 0.0f;
     dFilterX_ = dFilterY_ = 0.0f;
+    ffFilterX_ = ffFilterY_ = 0.0f;
     configured_ = false;
     skipOutputOnce_ = false;
     seedResetX_ = seedResetY_ = false;

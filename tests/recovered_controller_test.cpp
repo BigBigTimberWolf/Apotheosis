@@ -215,8 +215,11 @@ int main()
     config.feedforwardX = config.feedforwardY = 1.0f;
     pid.setConfig(config);
     const auto withFeedforward = pid.update({ 8, -4 }, { 2, -2 }, 0.0625);
-    check(withFeedforward.counts.x == 3 && withFeedforward.counts.y == -2,
-          "feedforward joins after PID deadzone (77)");
+    // FF still joins after the deadzone; the X count is now 2 (was 3) because the
+    // feedforward is low-pass filtered (attenuated on its first frame) and the
+    // deadzone ramps from a true zero instead of a 0.1 floor.
+    check(withFeedforward.counts.x == 2 && withFeedforward.counts.y == -2,
+          "feedforward joins after PID deadzone (filtered)");
     config.segment = 1.0f;
     pid.setConfig(config);
     const auto changed = pid.update({ 8, -4 }, {}, 0.0625);
@@ -559,6 +562,59 @@ int main()
         const auto sat=p.update({100,0},{},0.004);
         check(std::abs(sat.integral.x)<1e-9 && std::abs(sat.pid.x-200.0)<1e-6,
               "pure-P tune builds no integral under saturation (no anti-windup injection)");
+    }
+    // B: usable, decoupled integral. A sustained small (non-saturating) error
+    // builds the integral up to the decoupled ceiling (0.1*smoothMaxPixel) and
+    // clamps there, independent of Ki.
+    {
+        RecoveredPid p; RecoveredPidConfig c;
+        c.kpX=c.kpY=0; c.kiX=c.kiY=1; c.kdX=c.kdY=0; c.smoothMaxPixel=50;
+        c.deadzoneX=c.deadzoneY=0; c.preserveIntegralOnReverse=true; p.setConfig(c);
+        RecoveredPidStep s;
+        for(int n=0;n<600;++n) s=p.update({3,0},{},0.004);
+        check(s.integral.x>4.0 && s.integral.x<=5.0001,
+              "integral is usable and bounded by the decoupled ceiling (0.1*smoothMaxPixel)");
+    }
+    // B: conditional integration. While the P term saturates the integral must
+    // NOT wind up, and the output must still drive fully toward the target (the
+    // old back-calculation injected an opposing integral and stalled here).
+    {
+        RecoveredPid p; RecoveredPidConfig c;
+        c.kpX=c.kpY=2; c.kiX=c.kiY=1; c.kdX=c.kdY=0; c.smoothMaxPixel=50;
+        c.deadzoneX=c.deadzoneY=0; c.preserveIntegralOnReverse=true; p.setConfig(c);
+        RecoveredPidStep sat;
+        for(int n=0;n<50;++n) sat=p.update({100,0},{},0.004); // 2*100 >> 50, saturates
+        check(std::abs(sat.integral.x)<0.5,
+              "conditional integration blocks windup while the P term saturates");
+        check(sat.pid.x>40.0,
+              "saturated output still drives fully toward the target (no stall)");
+    }
+    // C: feedforward low-pass. Alternating FF velocity (noise) must not swing the
+    // output frame to frame the way the raw +/-100 would.
+    {
+        RecoveredPid p; RecoveredPidConfig c;
+        c.kpX=c.kpY=0; c.kiX=c.kiY=0; c.kdX=c.kdY=0; c.feedforwardX=1;
+        c.smoothMaxPixel=1000; c.deadzoneX=c.deadzoneY=0; c.segmentEnabled=true; c.segment=1;
+        p.setConfig(c);
+        double maxAbs=0;
+        for(int n=0;n<60;++n){
+            const double v=(n%2 ? 100.0 : -100.0);
+            const auto s=p.update({0,0},{v,0},0.004);
+            if(n>10) maxAbs=std::max(maxAbs,std::abs(double(s.beforeRounding.x)));
+        }
+        check(maxAbs<60.0,
+              "feedforward low-pass keeps alternating FF noise from swinging the output");
+    }
+    // D: true-zero inner deadband. Deep inside the deadzone the output is exactly
+    // zero (settles, no tremor); it ramps back up toward the deadzone edge.
+    {
+        RecoveredPid p; RecoveredPidConfig c;
+        c.kpX=c.kpY=1; c.kiX=c.kiY=0; c.kdX=c.kdY=0; c.deadzoneX=c.deadzoneY=10;
+        c.smoothMaxPixel=1000; c.segmentEnabled=true; c.segment=1; p.setConfig(c);
+        check(p.update({1,0},{},0.004).afterDeadzone.x==0.0,
+              "true-zero inner deadband gives no output deep inside the deadzone");
+        check(p.update({8,0},{},0.004).afterDeadzone.x>0.0,
+              "output ramps back up toward the deadzone edge");
     }
     return failures ? 1 : 0;
 }
