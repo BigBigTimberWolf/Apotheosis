@@ -7,6 +7,7 @@
 #include "macro/rule_executor.h"
 #include "macro/rule_sources.h"
 #include "macro/control_directive.h"
+#include "macro/input_diagnostics.h"
 #include "runtime/aim_telemetry.h"
 #include "config/config_profiles.h"
 #include <QApplication>
@@ -277,7 +278,18 @@ void ensureExecutor() {
     if(executor)return;
     RuleHost host;
     host.button=[](bool keyboard,int code,bool down){return button(keyboard,code,down);};
+    host.inputError=[](bool keyboard,int code) {
+        std::lock_guard<std::mutex> device(inputDeviceMutex);
+        const mouse_driver::IDriver* driver=backend=="FERRUM"?ferrumDriver.get():
+            backend=="CAT"?catDriver.get():backend=="WINDOWS"?windowsDriver.get():
+            backend=="DHZBOX_MINI"?dhzboxDriver.get():nullptr;
+        if (driver || backend=="FERRUM" || backend=="CAT" || backend=="WINDOWS" || backend=="DHZBOX_MINI")
+            return inputFailure(backend,driver,keyboard,code);
+        return backend+(keyboard?u8" 键盘命令失败，请检查独立键盘连接或固件能力":u8" 鼠标按钮命令失败，请检查设备连接");
+    };
     host.action=hostAction;host.asyncAction=beginSystemAction;
+    host.nowMs=[] {return std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now().time_since_epoch()).count();};
     host.acquire=[] {releaseFlash();const auto orphaned=job.held;for(const auto& key:orphaned)if(!button(key.first,key.second,false))return false;
         if(!runtime::aim_loop::prepareForMacro())return false;outputOwned=true;return true;};
     host.release=[](bool moved){runtime::aim_loop::finishMacroControl(moved);outputOwned=false;};

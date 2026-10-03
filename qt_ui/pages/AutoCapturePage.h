@@ -34,6 +34,7 @@ private:
     void buildStatusCard();
 
     ToggleSwitch* m_enabled{};
+    ToggleSwitch* m_triggerOnly{};
     QLabel* m_configHint{};
 
     ToggleSwitch*   m_useHigh{};

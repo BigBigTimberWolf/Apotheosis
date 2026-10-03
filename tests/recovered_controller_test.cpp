@@ -215,11 +215,9 @@ int main()
     config.feedforwardX = config.feedforwardY = 1.0f;
     pid.setConfig(config);
     const auto withFeedforward = pid.update({ 8, -4 }, { 2, -2 }, 0.0625);
-    // FF still joins after the deadzone; the X count is now 2 (was 3) because the
-    // feedforward is low-pass filtered (attenuated on its first frame) and the
-    // deadzone ramps from a true zero instead of a 0.1 floor.
-    check(withFeedforward.counts.x == 2 && withFeedforward.counts.y == -2,
-          "feedforward joins after PID deadzone (filtered)");
+    // FF joins after the PID deadzone with no extra output filter.
+    check(withFeedforward.counts.x == 3 && withFeedforward.counts.y == -2,
+          "feedforward joins immediately after PID deadzone");
     config.segment = 1.0f;
     pid.setConfig(config);
     const auto changed = pid.update({ 8, -4 }, {}, 0.0625);
@@ -589,21 +587,51 @@ int main()
         check(sat.pid.x>40.0,
               "saturated output still drives fully toward the target (no stall)");
     }
-    // C: feedforward low-pass. Alternating FF velocity (noise) must not swing the
-    // output frame to frame the way the raw +/-100 would.
+    // Output FF must respond in this update, including reversal and stop.
     {
         RecoveredPid p; RecoveredPidConfig c;
-        c.kpX=c.kpY=0; c.kiX=c.kiY=0; c.kdX=c.kdY=0; c.feedforwardX=1;
+        c.kpX=c.kpY=c.kiX=c.kiY=c.kdX=c.kdY=0; c.feedforwardX=1;
         c.smoothMaxPixel=1000; c.deadzoneX=c.deadzoneY=0; c.segmentEnabled=true; c.segment=1;
         p.setConfig(c);
-        double maxAbs=0;
-        for(int n=0;n<60;++n){
-            const double v=(n%2 ? 100.0 : -100.0);
-            const auto s=p.update({0,0},{v,0},0.004);
-            if(n>10) maxAbs=std::max(maxAbs,std::abs(double(s.beforeRounding.x)));
+        check(p.update({0,0},{100,0},.004).counts.x==100,
+              "FF has full first-update output without a second filter");
+        check(p.update({0,0},{-100,0},.004).counts.x==-100,
+              "FF reverses without old-direction filter residue");
+        check(p.update({0,0},{0,0},.004).counts.x==0,
+              "stopped FF leaves no output-filter tail");
+        c.smoothMaxPixel=50; p.setConfig(c);
+        auto limited=p.update({0,0},{100,0},.004);
+        check(limited.counts.x==50 && limited.feedforward.x==100 && limited.saturation.x==1,
+              "saturation uses the FF actually added to the output");
+        c.hardDeadzoneX=5; p.setConfig(c);
+        const auto held=p.update({1,0},{100,0},.004);
+        check(held.counts.x==0 && held.feedforward.x==0 && held.saturation.x==0,
+              "free-wiggle zone suppresses FF and cannot falsely freeze compensation");
+        c.hardDeadzoneX=0; c.kpX=1; p.setConfig(c);
+        const auto skipped=p.update({100,0},{100,0},.004);
+        check(skipped.counts.x==0 && skipped.saturation.x==0,
+              "config-skipped output is not reported as a saturated send");
+    }
+    // Per-axis measured gains cancel a stationary target's self-motion.
+    {
+        RecoveredTracker calibrated, legacy;
+        RecoveredTrackerConfig c; c.motionPixelsPerCount={1.7,.6}; calibrated.setConfig(c);
+        Vec2 center{400,400};
+        for(int n=0;n<15;++n) {
+            const Vec2 sent=n==0 ? Vec2{} : Vec2{10,10};
+            center+=Vec2{-1.7*sent.x,-.6*sent.y};
+            const std::vector<Candidate> candidates{{{center.x-40,center.y-40,80,80},0,.9}};
+            const auto a=calibrated.update(candidates,.01,sent);
+            const auto b=legacy.update(candidates,.01,sent);
+            check(std::abs(a.front().velocity.x)<1e-6 && std::abs(a.front().velocity.y)<1e-6,
+                  "calibrated XY conversion does not turn self-motion into target velocity");
+            if(n==14) check(b.front().velocity.norm()>1,
+                  "fixed conversion yields spurious target velocity when sensitivity differs");
         }
-        check(maxAbs<60.0,
-              "feedforward low-pass keeps alternating FF noise from swinging the output");
+        RecoveredPidConfig bad; bad.motionPixelsPerCountX=0; bad.motionDelayMs=999;
+        RecoveredPid p; p.setConfig(bad);
+        check(p.config().motionPixelsPerCountX==.91f && p.config().motionDelayMs==200,
+              "invalid calibration is sanitized before reaching the tracker");
     }
     // D: true-zero inner deadband. Deep inside the deadzone the output is exactly
     // zero (settles, no tremor); it ramps back up toward the deadzone edge.

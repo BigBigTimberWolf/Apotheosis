@@ -182,6 +182,9 @@ int main() {
         in.observationTimeUs=1000000+n*10000;
         in.candidates={Candidate{{285+std::sin(n*.1),280,80,80},0,.9}};
         auto actual=controller.update(in);
+        // Match the controller's target-acquisition rule; otherwise the bare
+        // reference invents a first-frame D spike against an initial zero.
+        if (n==0) reference.seedDerivativeAfterPause();
         auto expected=reference.update(actual.anchor-in.cross,actual.trackedVelocity,in.dtSec);
         same &= actual.controlAnchor.x==actual.anchor.x && actual.controlAnchor.y==actual.anchor.y &&
             actual.counts.x==expected.counts.x && actual.counts.y==expected.counts.y;

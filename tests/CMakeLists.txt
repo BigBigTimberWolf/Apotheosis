@@ -39,6 +39,7 @@ endfunction()
 
 add_logic_test(latency_probe_test "${APP_SOURCE_ROOT}/runtime/tests/latency_probe_test.cpp")
 add_logic_test(frame_crosshair_test "${CMAKE_CURRENT_LIST_DIR}/frame_crosshair_test.cpp")
+add_logic_test(auto_capture_policy_test "${CMAKE_CURRENT_LIST_DIR}/auto_capture_policy_test.cpp")
 add_logic_test(am_centroid_test "${CMAKE_CURRENT_LIST_DIR}/am_centroid_test.cpp")
 add_logic_test(latest_control_worker_test "${CMAKE_CURRENT_LIST_DIR}/latest_control_worker_test.cpp")
 add_logic_test(am_trigger_test "${CMAKE_CURRENT_LIST_DIR}/am_trigger_test.cpp")
@@ -55,6 +56,31 @@ if(WIN32 AND OPENCV_LIB AND TARGET CUDA::cudart)
     copy_runtime(macro_sources_test "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
 endif()
 if(Qt6Widgets_FOUND)
+    add_executable(auto_capture_ui_test "${CMAKE_CURRENT_LIST_DIR}/auto_capture_ui_test.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs/macro_page_stubs.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs/config/config_bridge.h"
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs/config/config_profiles.h"
+        "${CMAKE_CURRENT_LIST_DIR}/auto_capture_stubs/config/ConfigManager.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/pages/AutoCapturePage.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/pages/AutoCapturePage.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/CardWidget.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/FormKit.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/IconFont.cpp")
+    target_include_directories(auto_capture_ui_test BEFORE PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/auto_capture_stubs" "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs"
+        "${APP_SOURCE_ROOT}" "${APP_SOURCE_ROOT}/config" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_compile_features(auto_capture_ui_test PRIVATE cxx_std_20)
+    target_link_libraries(auto_capture_ui_test PRIVATE Qt6::Widgets)
+    set_target_properties(auto_capture_ui_test PROPERTIES AUTOMOC ON)
+    if(MSVC)
+        target_compile_options(auto_capture_ui_test PRIVATE /utf-8 /Zc:char8_t-)
+    else()
+        target_compile_options(auto_capture_ui_test PRIVATE -fno-char8_t)
+    endif()
+    add_test(NAME auto_capture_ui_test COMMAND auto_capture_ui_test)
+    set_tests_properties(auto_capture_ui_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
     add_executable(macro_rule_ui_test "${CMAKE_CURRENT_LIST_DIR}/macro_rule_ui_test.cpp"
         "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroRuleEditor.cpp"
         "${CMAKE_SOURCE_DIR}/qt_ui/widgets/FormKit.cpp"
@@ -351,6 +377,13 @@ add_logic_test(recovered_controller_test "${CMAKE_CURRENT_LIST_DIR}/recovered_co
 add_logic_test(trigger_snap_return_test "${CMAKE_CURRENT_LIST_DIR}/trigger_snap_return_test.cpp"
     "${APP_SOURCE_ROOT}/control/types.cpp")
 add_logic_test(motion_feedback_window_test "${CMAKE_CURRENT_LIST_DIR}/motion_feedback_window_test.cpp")
+add_logic_test(ff_calibration_test "${CMAKE_CURRENT_LIST_DIR}/ff_calibration_test.cpp")
+if(Qt6Widgets_FOUND)
+    add_logic_test(ff_calibration_ui_test "${CMAKE_CURRENT_LIST_DIR}/ff_calibration_ui_test.cpp")
+    target_include_directories(ff_calibration_ui_test PRIVATE "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(ff_calibration_ui_test PRIVATE Qt6::Widgets)
+    set_tests_properties(ff_calibration_ui_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
 add_logic_test(aimpoint_prediction_test "${CMAKE_CURRENT_LIST_DIR}/aimpoint_prediction_test.cpp"
     "${APP_SOURCE_ROOT}/control/types.cpp"
     "${APP_SOURCE_ROOT}/control/anchor.cpp"

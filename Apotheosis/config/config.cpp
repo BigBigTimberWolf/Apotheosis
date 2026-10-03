@@ -407,6 +407,17 @@ bool Config::loadConfig(const std::string& filename)
         return std::isfinite(value) ? static_cast<float>(std::clamp(value, 0.0, 50.0)) : 0.0f;
     };
 
+    auto get_motion_gain = [&](const char* section, const char* key, float fallback) {
+        const double value = get_double(section, key, fallback);
+        return std::isfinite(value) && value >= 0.02 && value <= 20.0
+            ? static_cast<float>(value) : 0.91f;
+    };
+    auto get_motion_delay = [&](const char* section, const char* key, float fallback) {
+        const double value = get_double(section, key, fallback);
+        return std::isfinite(value) && value >= 0.0
+            ? static_cast<float>(std::clamp(value, 0.0, 200.0)) : -1.0f;
+    };
+
     capture_device = get_string("", "capture_device", "");
     capture_source = get_string("", "capture_source", "device");
     if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp" &&
@@ -504,6 +515,7 @@ bool Config::loadConfig(const std::string& filename)
         ? std::clamp(storedReplaySpeed, 0.05f, 2.0f) : 0.25f;
 
     auto_capture_enabled    = get_bool("",   "auto_capture_enabled",    false);
+    auto_capture_trigger_only = get_bool("", "auto_capture_trigger_only", false);
     auto_capture_use_high   = get_bool("",   "auto_capture_use_high",   true);
     auto_capture_high_conf  = std::clamp(
         static_cast<float>(get_double("", "auto_capture_high_conf", 0.85)), 0.0f, 1.0f);
@@ -846,6 +858,9 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_pid.hardDeadzoneY = static_cast<float>(get_double(sec, "recovered_pid_hard_deadzone_y", hk.recovered_pid.hardDeadzoneY));
             hk.recovered_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_pid_ff_x", hk.recovered_pid.feedforwardX));
             hk.recovered_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_pid_ff_y", hk.recovered_pid.feedforwardY));
+            hk.recovered_pid.motionPixelsPerCountX = get_motion_gain(sec, "recovered_pid_motion_px_per_count_x", hk.recovered_pid.motionPixelsPerCountX);
+            hk.recovered_pid.motionPixelsPerCountY = get_motion_gain(sec, "recovered_pid_motion_px_per_count_y", hk.recovered_pid.motionPixelsPerCountY);
+            hk.recovered_pid.motionDelayMs = get_motion_delay(sec, "recovered_pid_motion_delay_ms", hk.recovered_pid.motionDelayMs);
             hk.recovered_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_pid_smooth_max_pixel", hk.recovered_pid.smoothMaxPixel));
             hk.recovered_pid.followX = get_follow_strength(sec, "recovered_pid_follow_x");
             hk.recovered_pid.followY = get_follow_strength(sec, "recovered_pid_follow_y");
@@ -875,6 +890,9 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_secondary_pid.hardDeadzoneY = static_cast<float>(get_double(sec, "recovered_secondary_pid_hard_deadzone_y", hk.recovered_secondary_pid.hardDeadzoneY));
             hk.recovered_secondary_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_secondary_pid_ff_x", hk.recovered_secondary_pid.feedforwardX));
             hk.recovered_secondary_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_secondary_pid_ff_y", hk.recovered_secondary_pid.feedforwardY));
+            hk.recovered_secondary_pid.motionPixelsPerCountX = get_motion_gain(sec, "recovered_secondary_pid_motion_px_per_count_x", hk.recovered_secondary_pid.motionPixelsPerCountX);
+            hk.recovered_secondary_pid.motionPixelsPerCountY = get_motion_gain(sec, "recovered_secondary_pid_motion_px_per_count_y", hk.recovered_secondary_pid.motionPixelsPerCountY);
+            hk.recovered_secondary_pid.motionDelayMs = get_motion_delay(sec, "recovered_secondary_pid_motion_delay_ms", hk.recovered_secondary_pid.motionDelayMs);
             hk.recovered_secondary_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_secondary_pid_smooth_max_pixel", hk.recovered_secondary_pid.smoothMaxPixel));
             hk.recovered_secondary_pid.followX = get_follow_strength(sec, "recovered_secondary_pid_follow_x");
             hk.recovered_secondary_pid.followY = get_follow_strength(sec, "recovered_secondary_pid_follow_y");
@@ -893,6 +911,9 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_scope_pid.hardDeadzoneY = static_cast<float>(get_double(sec, "recovered_scope_pid_hard_deadzone_y", hk.recovered_scope_pid.hardDeadzoneY));
             hk.recovered_scope_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_scope_pid_ff_x", hk.recovered_scope_pid.feedforwardX));
             hk.recovered_scope_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_scope_pid_ff_y", hk.recovered_scope_pid.feedforwardY));
+            hk.recovered_scope_pid.motionPixelsPerCountX = get_motion_gain(sec, "recovered_scope_pid_motion_px_per_count_x", hk.recovered_scope_pid.motionPixelsPerCountX);
+            hk.recovered_scope_pid.motionPixelsPerCountY = get_motion_gain(sec, "recovered_scope_pid_motion_px_per_count_y", hk.recovered_scope_pid.motionPixelsPerCountY);
+            hk.recovered_scope_pid.motionDelayMs = get_motion_delay(sec, "recovered_scope_pid_motion_delay_ms", hk.recovered_scope_pid.motionDelayMs);
             hk.recovered_scope_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_scope_pid_smooth_max_pixel", hk.recovered_scope_pid.smoothMaxPixel));
             hk.recovered_scope_pid.followX = get_follow_strength(sec, "recovered_scope_pid_follow_x");
             hk.recovered_scope_pid.followY = get_follow_strength(sec, "recovered_scope_pid_follow_y");
@@ -1367,6 +1388,7 @@ bool Config::saveConfig(const std::string& filename)
 
     file << "# Auto capture (data collection harness)\n"
         << "auto_capture_enabled = "    << to_bool_str(auto_capture_enabled) << "\n"
+        << "auto_capture_trigger_only = " << to_bool_str(auto_capture_trigger_only) << "\n"
         << "auto_capture_use_high = "   << to_bool_str(auto_capture_use_high) << "\n"
         << "auto_capture_high_conf = "  << auto_capture_high_conf << "\n"
         << "auto_capture_use_low = "    << to_bool_str(auto_capture_use_low) << "\n"
@@ -1457,6 +1479,9 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_pid_hard_deadzone_y = " << recovered.hardDeadzoneY << "\n"
              << "recovered_pid_ff_x = " << recovered.feedforwardX << "\n"
              << "recovered_pid_ff_y = " << recovered.feedforwardY << "\n"
+             << "recovered_pid_motion_px_per_count_x = " << recovered.motionPixelsPerCountX << "\n"
+             << "recovered_pid_motion_px_per_count_y = " << recovered.motionPixelsPerCountY << "\n"
+             << "recovered_pid_motion_delay_ms = " << recovered.motionDelayMs << "\n"
              << "recovered_pid_smooth_max_pixel = " << recovered.smoothMaxPixel << "\n"
              << "recovered_pid_follow_x = " << recovered.followX << "\n"
              << "recovered_pid_follow_y = " << recovered.followY << "\n"
@@ -1479,6 +1504,9 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_secondary_pid_hard_deadzone_y = " << secondary.hardDeadzoneY << "\n"
              << "recovered_secondary_pid_ff_x = " << secondary.feedforwardX << "\n"
              << "recovered_secondary_pid_ff_y = " << secondary.feedforwardY << "\n"
+             << "recovered_secondary_pid_motion_px_per_count_x = " << secondary.motionPixelsPerCountX << "\n"
+             << "recovered_secondary_pid_motion_px_per_count_y = " << secondary.motionPixelsPerCountY << "\n"
+             << "recovered_secondary_pid_motion_delay_ms = " << secondary.motionDelayMs << "\n"
              << "recovered_secondary_pid_smooth_max_pixel = " << secondary.smoothMaxPixel << "\n"
              << "recovered_secondary_pid_follow_x = " << secondary.followX << "\n"
              << "recovered_secondary_pid_follow_y = " << secondary.followY << "\n"
@@ -1497,6 +1525,9 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_scope_pid_hard_deadzone_y = " << recoveredScope.hardDeadzoneY << "\n"
              << "recovered_scope_pid_ff_x = " << recoveredScope.feedforwardX << "\n"
              << "recovered_scope_pid_ff_y = " << recoveredScope.feedforwardY << "\n"
+             << "recovered_scope_pid_motion_px_per_count_x = " << recoveredScope.motionPixelsPerCountX << "\n"
+             << "recovered_scope_pid_motion_px_per_count_y = " << recoveredScope.motionPixelsPerCountY << "\n"
+             << "recovered_scope_pid_motion_delay_ms = " << recoveredScope.motionDelayMs << "\n"
              << "recovered_scope_pid_smooth_max_pixel = " << recoveredScope.smoothMaxPixel << "\n"
              << "recovered_scope_pid_follow_x = " << recoveredScope.followX << "\n"
              << "recovered_scope_pid_follow_y = " << recoveredScope.followY << "\n"

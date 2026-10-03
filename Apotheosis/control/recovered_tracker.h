@@ -35,6 +35,7 @@ struct RecoveredTrackerConfig
     float qualityAttenuation = 1.0f;
     int maxMissedFrames = 3;
     int frameMinDimension = 320;
+    Vec2 motionPixelsPerCount{0.91, 0.91};
 };
 
 class RecoveredTracker
@@ -53,6 +54,7 @@ public:
     };
 
     void setConfig(const RecoveredTrackerConfig& config) { config_ = config; }
+    const RecoveredTrackerConfig& config() const { return config_; }
     std::vector<RecoveredTrack> update(const std::vector<Candidate>& candidates,
                                        double dtSec, Vec2 eventSum = {});
     void reset();
@@ -71,6 +73,7 @@ public:
     std::vector<RecoveredTrack> update(const std::vector<Candidate>& candidates,
                                        double dtSec, Vec2 eventSum = {});
     void setFrameSize(int width, int height);
+    void setMotionConversion(Vec2 pixelsPerCount);
     void reset();
 
 private:
@@ -83,6 +86,7 @@ private:
     };
 
     RecoveredTracker motion_;
+    Vec2 motionPixelsPerCount_{0.91, 0.91};
     std::vector<BoxState> boxes_;
     int nextBoxId_ = 1;
 };

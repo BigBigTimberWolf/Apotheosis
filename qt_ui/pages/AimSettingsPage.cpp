@@ -48,6 +48,7 @@
 #include "widgets/TriggerWorkflowEditor.h"
 #include "widgets/TriggerTargetEditor.h"
 #include "widgets/NeuralCurveTrainer.h"
+#include "widgets/FfCalibrationDialog.h"
 #include "widgets/NeuralCurveFile.h"
 #include "widgets/XmCurveImport.h"
 #include "widgets/ToggleSwitch.h"
@@ -1031,6 +1032,46 @@ void AimSettingsPage::buildRecoveredControllerCard()
     auto* enabled = new QCheckBox(QString::fromUtf8(u8"启用瞄准移动"));
     enabled->setObjectName("ctlEnabled");
     layout->addWidget(enabled);
+    auto* calibrationButton = new QPushButton(QStringLiteral("FF 自动标定…"));
+    calibrationButton->setObjectName("ffCalibrationOpen");
+    layout->addWidget(calibrationButton);
+    connect(calibrationButton, &QPushButton::clicked, this, [this] {
+        const int index = currentRuntimeIndex();
+        HotkeyProfile original;
+        int resolution = 0, captureFps = 0;
+        std::string inputMethod, captureSource;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (index < 0 || index >= int(config.hotkeys.size())) return;
+            original = config.hotkeys[size_t(index)];
+            if (!original.ctl_enabled) {
+                QMessageBox::information(this, QStringLiteral("FF 标定"), QStringLiteral("请先启用该热键的瞄准移动。"));
+                return;
+            }
+            resolution = config.detection_resolution; captureFps = config.capture_fps;
+            inputMethod = config.input_method; captureSource = config.capture_source;
+        }
+        auto apply = [this, index, original, resolution, captureFps, inputMethod, captureSource]
+            (int bank, const control::FfCalibrationResult& result) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(configMutex);
+                if (!result.valid || bank < 0 || bank > 2 || index >= int(config.hotkeys.size()) ||
+                    config.detection_resolution != resolution || config.capture_fps != captureFps ||
+                    config.input_method != inputMethod || config.capture_source != captureSource) return false;
+                auto& h = config.hotkeys[size_t(index)];
+                if (h.name != original.name || h.group != original.group || h.keys != original.keys) return false;
+                auto& p = bank == 2 ? h.recovered_scope_pid : bank == 1 ? h.recovered_secondary_pid : h.recovered_pid;
+                p.motionPixelsPerCountX = float(result.pixelsPerCount.x);
+                p.motionPixelsPerCountY = float(result.pixelsPerCount.y);
+                p.motionDelayMs = float(result.delayMs);
+            }
+            ConfigBridge::instance().markDirty(); ConfigBridge::instance().flush();
+            reloadProfileToUi(); return true;
+        };
+        auto* calibration = new FfCalibrationDialog(index, QString::fromStdString(original.name),
+            {original.recovered_pid, original.recovered_secondary_pid, original.recovered_scope_pid}, apply, this);
+        calibration->setAttribute(Qt::WA_DeleteOnClose); calibration->open();
+    });
     auto* advancedButton = new QPushButton(QString::fromUtf8(u8"开镜独立参数…"));
     advancedButton->setCursor(Qt::PointingHandCursor);
     layout->addWidget(advancedButton);
@@ -1096,13 +1137,13 @@ void AimSettingsPage::buildRecoveredControllerCard()
                               suffix == QStringLiteral("FfY") ? 4 : 3);
             spin->setValue(row.value);
             if (suffix == QStringLiteral("KiX") || suffix == QStringLiteral("KiY"))
-                spin->setToolTip(QString::fromUtf8(u8"积累持续瞄准误差，积分上限等于 Ki。开启准星找色时保留反向旧积分。二次移植版在该轴 Ki 数值变化时清空该轴旧积分。"));
+                spin->setToolTip(QStringLiteral("积累持续瞄准误差；输出饱和时停止继续积累，死区内逐渐消退。积分上限为单帧限幅的 10%。Ki 变化清空该轴旧积分。"));
             if (suffix == QStringLiteral("HardDeadzoneX") || suffix == QStringLiteral("HardDeadzoneY"))
                 spin->setToolTip(QString::fromUtf8(u8"额外的自由死区：误差落在这个像素范围内时，该轴完全不输出，准星可以在里面随意晃动；X、Y 各自独立判断，0 关闭。与上面的“死区半径”互不影响（死区半径只是把输出按比例减弱）。自动扳机的死区绕过规则不会绕过它。"));
             if (suffix == QStringLiteral("FollowX") || suffix == QStringLiteral("FollowY"))
-                spin->setToolTip(QString::fromUtf8(u8"仅根据原瞄点与准星的持续误差积累补偿，不使用鼠标换算比例。越过原瞄点保留补偿并逐步调整；利用背景移动判断目标变向，确认后立即清空该轴旧补偿。背景不可靠时不触发变向清空。0 关闭，数值越大建立越快，过大仍可能过冲。"));
+                spin->setToolTip(QStringLiteral("根据原瞄点与准星的持续误差积累补偿。越过原瞄点保留并逐步调整；跟踪器确认目标反向或突然停止后清空对应轴旧补偿。实际 PID 输出限幅时暂停同方向积累。0 关闭，过大仍可能过冲。"));
             if (suffix == QStringLiteral("FfX") || suffix == QStringLiteral("FfY"))
-                spin->setToolTip(QString::fromUtf8(u8"二次移植版速度前馈：检测框画面速度与成功发送的鼠标运动事件合成，再经逐轴速度门控；0 关闭。"));
+                spin->setToolTip(QStringLiteral("检测框画面速度加回成功发送的鼠标运动，使用本档 X/Y 换算比例与响应延迟。保留跟踪器平滑和门控，末端不再额外滤波；0 关闭。"));
             grid->addWidget(FormKit::fieldRow(QString::fromUtf8(row.label), spin), line, column);
         };
         for (int i = 0; i < static_cast<int>(std::size(xRows)); ++i)
@@ -1118,6 +1159,19 @@ void AimSettingsPage::buildRecoveredControllerCard()
         check->setObjectName(prefix + "SegmentEnabled");
         grid->addWidget(check, 10, 0, 1, 2);
         targetLayout->addLayout(grid);
+        auto* conversion = new QGridLayout;
+        conversion->setColumnStretch(0, 1); conversion->setColumnStretch(1, 1);
+        auto field = [&](const char* suffix, const char* label, double lo, double hi, double value, int row, int col) {
+            auto* spin = new NoWheelDoubleSpinBox;
+            spin->setObjectName(prefix + QString::fromLatin1(suffix));
+            spin->setRange(lo, hi); spin->setDecimals(4); spin->setSingleStep(0.01); spin->setValue(value);
+            spin->setToolTip(QStringLiteral("由 FF 自动标定填写，也可手动调整。比例是图像像素/鼠标计数；延迟 -1 使用旧版估计窗口，非负值使用标定后的完整帧区间，不增加等待。灵敏度、采集尺寸或倍率变化后请重新标定。"));
+            conversion->addWidget(FormKit::fieldRow(QString::fromUtf8(label), spin), row, col);
+        };
+        field("MotionPxX", "FF 鼠标换算 X", .02, 20, .91, 0, 0);
+        field("MotionPxY", "FF 鼠标换算 Y", .02, 20, .91, 0, 1);
+        field("MotionDelay", "FF 响应延迟（ms，-1 自动估计）", -1, 200, -1, 1, 0);
+        targetLayout->addLayout(conversion);
     };
     addSet(layout, "recovered", QString::fromUtf8(u8"默认参数"));
     addSet(extraLayout, "recoveredScope", QString::fromUtf8(u8"开镜独立参数"));
@@ -1143,6 +1197,9 @@ void AimSettingsPage::buildRecoveredControllerCard()
             pid.smoothMaxPixel = read(prefix + "MaxPixel");
             pid.followX = read(prefix + "FollowX");
             pid.followY = read(prefix + "FollowY");
+            pid.motionPixelsPerCountX = read(prefix + "MotionPxX");
+            pid.motionPixelsPerCountY = read(prefix + "MotionPxY");
+            pid.motionDelayMs = read(prefix + "MotionDelay");
             pid.segment = read(prefix + "Segment");
             if (auto* check = findChild<QCheckBox*>(prefix + "SegmentEnabled"))
                 pid.segmentEnabled = check->isChecked();
@@ -1810,6 +1867,9 @@ void AimSettingsPage::reloadProfileToUi()
                 set("MaxPixel", pid.smoothMaxPixel); set("Segment", pid.segment);
                 set("FollowX", pid.followX);
                 set("FollowY", pid.followY);
+                set("MotionPxX", pid.motionPixelsPerCountX);
+                set("MotionPxY", pid.motionPixelsPerCountY);
+                set("MotionDelay", pid.motionDelayMs);
                 if (auto* check = findChild<QCheckBox*>(prefix + "SegmentEnabled"))
                     check->setChecked(pid.segmentEnabled);
             };

@@ -112,7 +112,9 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
     const double firstAlpha = base * 0.3;
     state.firstVelocity += (rawVelocity - state.firstVelocity) * firstAlpha;
     const double outputAlpha = std::clamp(std::max(base, 0.55) * 0.24, 0.12, 0.65);
-    const Vec2 compensated = rawVelocity + eventSum * (0.91 / std::max(velocityDt, 0.001));
+    const Vec2 compensated = rawVelocity + Vec2{
+        eventSum.x * config.motionPixelsPerCount.x / velocityDt,
+        eventSum.y * config.motionPixelsPerCount.y / velocityDt};
     const Vec2 next = state.track.velocity +
         (compensated - state.track.velocity) * outputAlpha;
     state.track.velocity = {
@@ -388,7 +390,17 @@ void RecoveredDualTracker::reset()
 void RecoveredDualTracker::setFrameSize(int width, int height)
 {
     RecoveredTrackerConfig config;
+    config.motionPixelsPerCount = motionPixelsPerCount_;
     config.frameMinDimension = std::max(1, std::min(width, height));
+    motion_.setConfig(config);
+}
+
+void RecoveredDualTracker::setMotionConversion(Vec2 pixelsPerCount)
+{
+    motionPixelsPerCount_ = pixelsPerCount;
+    // Preserve the frame-sized noise floor when changing only the conversion.
+    auto config = motion_.config();
+    config.motionPixelsPerCount = pixelsPerCount;
     motion_.setConfig(config);
 }
 

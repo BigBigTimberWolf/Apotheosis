@@ -2,6 +2,8 @@
 #define CAPTURE_AUTO_CAPTURE_H
 
 #include <atomic>
+#include <vector>
+#include "control/types.h"
 
 class GpuImage;
 namespace cv { class Mat; }
@@ -23,6 +25,8 @@ void reset_session_counter();
 void submit_frame(const GpuImage& frame, runtime::FrameContext context);
 void submit_frame(const cv::Mat& frame, runtime::FrameContext context);
 void clear_frames();
+// Only called after an automatic trigger down is accepted by the driver.
+void notify_trigger(runtime::FrameContext context, std::vector<control::Candidate> detections);
 
 }
 

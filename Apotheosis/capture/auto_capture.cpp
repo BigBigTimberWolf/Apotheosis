@@ -4,9 +4,11 @@
 #include <Windows.h>
 
 #include "capture/auto_capture.h"
+#include "capture/auto_capture_policy.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <cstdio>
 #include <deque>
@@ -58,6 +60,7 @@ std::mutex frame_cache_mutex;
 std::deque<SavedFrame> frame_cache;
 constexpr size_t kMaxCachedFrames = 16;
 constexpr size_t kMaxCachedBytes = 64ull * 1024 * 1024;
+TriggerSamples trigger_samples;
 
 size_t frame_bytes(const SavedFrame& frame)
 {
@@ -96,6 +99,7 @@ bool find_frame(runtime::FrameContext context, bool force, SavedFrame& out)
 struct CfgSnap
 {
     bool  enabled = false;
+    bool  trigger_only = false;
     bool  use_high = true;
     float high_conf = 0.85f;
     bool  use_low = false;
@@ -112,6 +116,7 @@ CfgSnap snapshot_cfg()
     CfgSnap s;
     std::lock_guard<std::recursive_mutex> lk(configMutex);
     s.enabled       = config.auto_capture_enabled;
+    s.trigger_only  = config.auto_capture_trigger_only;
     s.use_high      = config.auto_capture_use_high;
     s.high_conf     = config.auto_capture_high_conf;
     s.use_low       = config.auto_capture_use_low;
@@ -142,19 +147,6 @@ std::string make_filename_stem()
                   tm.tm_hour, tm.tm_min, tm.tm_sec,
                   static_cast<long long>(ms));
     return buf;
-}
-
-bool any_in_zone(const std::vector<float>& confs,
-                 bool use_high, float high,
-                 bool use_low,  float low)
-{
-    if (!use_high && !use_low) return false;
-    for (const float c : confs)
-    {
-        if (use_high && c >= high) return true;
-        if (use_low  && c <= low && c > 0.0f) return true;
-    }
-    return false;
 }
 
 bool write_yolo_label(const std::filesystem::path& path,
@@ -223,8 +215,15 @@ void submit_frame(const cv::Mat& frame, runtime::FrameContext context)
 
 void clear_frames()
 {
+    trigger_samples.clear();
     std::lock_guard<std::mutex> lk(frame_cache_mutex);
     frame_cache.clear();
+}
+
+void notify_trigger(runtime::FrameContext context, std::vector<control::Candidate> detections)
+{
+    trigger_samples.push({context, std::move(detections)});
+    detectionBuffer.cv.notify_all();
 }
 
 void auto_capture_thread()
@@ -253,6 +252,7 @@ void auto_capture_thread()
             std::unique_lock<std::mutex> lk(detectionBuffer.mutex);
             detectionBuffer.cv.wait_for(lk, std::chrono::milliseconds(50),
                 [&] { return detectionBuffer.version > last_version
+                              || trigger_samples.pending()
                               || shouldExit.load(); });
             if (shouldExit.load()) break;
             if (detectionBuffer.version > last_version)
@@ -274,28 +274,25 @@ void auto_capture_thread()
             continue;
         }
 
-        const bool force_held = isAnyKeyPressed(cfg.force_keys)
+        const bool force_held = !cfg.trigger_only && isAnyKeyPressed(cfg.force_keys)
                                 && !cfg.force_keys.empty();
         g_force_held.store(force_held);
-        // Force capture is checked on every timeout too: the detector may be
-        // stopped, slow, or publishing no results while the key is held.
-        if (!fresh && !force_held) continue;
-
-        if (boxes.empty() && !force_held) continue;
-
-        bool should_save = false;
-        if (force_held)
-            should_save = true;
-        else if (!boxes.empty())
-        {
-            if (cfg.any_detection)
-                should_save = true;
-            else
-                should_save = any_in_zone(confidences,
-                                          cfg.use_high, cfg.high_conf,
-                                          cfg.use_low,  cfg.low_conf);
-        }
-        if (!should_save) continue;
+        bool confirmed_trigger = false;
+        if (cfg.trigger_only) {
+            auto shot = trigger_samples.pop();
+            if (shot) {
+                confirmed_trigger = true; detection_context = shot->context;
+                boxes.clear(); classes.clear(); confidences.clear();
+                for (const auto& c : shot->detections) {
+                    boxes.emplace_back(int(std::round(c.box.x)), int(std::round(c.box.y)),
+                                       int(std::round(c.box.w)), int(std::round(c.box.h)));
+                    classes.push_back(c.classId); confidences.push_back(float(c.confidence));
+                }
+            }
+        } else trigger_samples.clear();
+        const Policy policy{cfg.enabled, cfg.trigger_only, cfg.any_detection,
+                            cfg.use_high, cfg.use_low, cfg.high_conf, cfg.low_conf};
+        if (!policy.accepts(fresh, force_held, confirmed_trigger, boxes.size(), confidences)) continue;
 
         const auto now = std::chrono::steady_clock::now();
         if (last_save_ts != std::chrono::steady_clock::time_point::min()

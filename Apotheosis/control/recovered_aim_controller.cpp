@@ -63,12 +63,20 @@ size_t chooseFresh(const std::vector<RecoveredTrack>& tracks,
 void RecoveredAimController::setConfig(const ControllerConfig& config,
                                        const RecoveredPidConfig& pid)
 {
+    const auto oldPid = pid_.config();
+    pid_.setConfig(pid);
+    const auto& cleanPid = pid_.config();
+    if (oldPid.motionPixelsPerCountX != cleanPid.motionPixelsPerCountX ||
+        oldPid.motionPixelsPerCountY != cleanPid.motionPixelsPerCountY ||
+        oldPid.motionDelayMs != cleanPid.motionDelayMs)
+        reset(); // never blend velocity learned under two different calibrations
     config_ = config;
     fov_.configure({double(config.fovWidth), double(config.fovHeight)},
                    config.dynamicFovEnabled, config.dynamicFovSize,
                    config.dynamicFovShrinkMs, config.dynamicFovExpandMs);
     tracker_.setFrameSize(config.frameWidth, config.frameHeight);
-    pid_.setConfig(pid);
+    tracker_.setMotionConversion({pid_.config().motionPixelsPerCountX,
+                                  pid_.config().motionPixelsPerCountY});
 }
 
 ControlOutput RecoveredAimController::update(const ControlInput& input)
@@ -279,8 +287,7 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
         out.followStrength, input.observationTimeUs, input.dtSec, target.maneuver);
     // Compensation telemetry remains original-error rate, independent of FF.
     out.followMotion = compensator_.errorRate();
-    // Restore the selected tracking record as the FF source. The user's
-    // no-0.91 requirement leaves mouse-event compensation disabled upstream.
+    // Selected track velocity includes frame-aligned, calibrated self-motion.
     const Vec2 velocityFeedforward = target.velocity;
     out.followStateX = compensator_.stateX();
     out.followStateY = compensator_.stateY();
@@ -308,14 +315,9 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
         movement+=macroCarry_;out.counts={int(std::trunc(movement.x)),int(std::trunc(movement.y))};
         macroCarry_=movement-Vec2{double(out.counts.x),double(out.counts.y)};
     } else macroSmoothed_=macroCarry_={};
-    const Vec2 beforeLimit = step.afterDeadzone + Vec2{
-        !pidConfig.maskX && std::isfinite(velocityFeedforward.x) ? pidConfig.feedforwardX * velocityFeedforward.x : 0.0,
-        !pidConfig.maskY && std::isfinite(velocityFeedforward.y) ? pidConfig.feedforwardY * velocityFeedforward.y : 0.0};
-    auto saturated = [&](double value) {
-        return std::abs(value) >= pidConfig.smoothMaxPixel
-            ? (value > 0.0 ? 1.0 : value < 0.0 ? -1.0 : 0.0) : 0.0;
-    };
-    compensator_.setSaturation({saturated(beforeLimit.x), saturated(beforeLimit.y)});
+    // Use the PID's actual clipping decision, including masks, free-wiggle
+    // deadzones and skipped sends. Never reconstruct FF in a second formula.
+    compensator_.setSaturation(step.saturation);
     out.derivativeRaw = step.derivativeRaw;
     out.engaged = true;
     return out;

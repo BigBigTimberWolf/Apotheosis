@@ -5,9 +5,10 @@
 namespace control {
 
 // Direct-output branch recovered from 0xAED20 and 0x15917D..0x15A530.
-// User-requested frozen baseline: this second-port PIDF (P/I/D, FF, deadzone,
-// clipping, segmentation, carry and configuration-state rules) must not be
-// changed by later controller work unless the user explicitly authorizes it.
+// Based on the user-requested second-port baseline. Later authorized changes
+// include D/I/deadzone stabilization and (2026-10-03) removal of the extra FF
+// filter, calibrated self-motion and shared saturation reporting. Further
+// formula changes still require explicit authorization.
 // Values are in image pixels until the final segment division and rounding.
 struct RecoveredPidConfig
 {
@@ -23,6 +24,10 @@ struct RecoveredPidConfig
     float hardDeadzoneX = 0.0f, hardDeadzoneY = 0.0f;
     // FF input is selected track velocity with successful-move feedback.
     float feedforwardX = 0.0f, feedforwardY = 0.0f;
+    // Measured image pixels per successful mouse count, independently per bank.
+    float motionPixelsPerCountX = 0.91f, motionPixelsPerCountY = 0.91f;
+    // Send-to-image lag in the capture timestamp domain; -1 keeps the legacy window.
+    float motionDelayMs = -1.0f;
     float smoothMaxPixel = 50.0f;
     bool segmentEnabled = false;
     float segment = 3.0f;
@@ -40,6 +45,8 @@ struct RecoveredPidStep
     Vec2 carry{};
     Vec2 integral{};
     Vec2 derivativeRaw{};
+    Vec2 feedforward{};
+    Vec2 saturation{}; // Sign of the actual pre-clip output; zero if not limited.
 };
 
 class RecoveredPid
@@ -60,8 +67,6 @@ private:
     float carryX_ = 0.0f, carryY_ = 0.0f;
     // Low-pass state for the always-on filtered derivative.
     float dFilterX_ = 0.0f, dFilterY_ = 0.0f;
-    // Low-pass state for the velocity feedforward term.
-    float ffFilterX_ = 0.0f, ffFilterY_ = 0.0f;
     bool configured_ = false;
     bool skipOutputOnce_ = false;
     bool seedResetX_ = false, seedResetY_ = false;

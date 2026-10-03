@@ -146,7 +146,7 @@ MacroPage::MacroPage(QWidget* parent):QWidget(parent) {
     conditions_->openAdvanced=[this]{ showAdvanced(true); };
 
     run_=new QPushButton(QStringLiteral("▶ 运行一次")); run_->setObjectName("macroRunOnce");
-    run_->setToolTip(QStringLiteral("会发送真实输入；需要切回目标窗口时，可在第一步添加等待。\n运行时暂时接管自动瞄准和扳机输出。移动单位是设备计数；右／下为正。"
+    run_->setToolTip(QStringLiteral("会发送真实输入；需要切回目标窗口时，可在第一步添加等待。\n键鼠输出动作暂时接管自动瞄准和扳机；修改瞄准参数的动作保持瞄准运行。移动单位是设备计数；右／下为正。"
         "停止会释放宏按住的键。键盘支持 Windows 原生、KMBox Net 或本项目固件的独立键盘设备。"));
     dl->addWidget(run_,0,Qt::AlignLeft);
 

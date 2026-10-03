@@ -3,6 +3,7 @@
 
 #include "control/recovered_aim_controller.h"
 #include "control/head_body_fusion.h"
+#include "capture/auto_capture.h"
 
 #include "mouse/aim_path.h"
 #include "mouse/auto_stop.h"
@@ -28,6 +29,7 @@
 #include "runtime/config_snapshot.h"
 #include "runtime/latency_probe.h"
 #include "runtime/motion_feedback_window.h"
+#include "runtime/ff_calibration_session.h"
 
 #include <algorithm>
 #include <atomic>
@@ -144,6 +146,7 @@ std::chrono::steady_clock::time_point g_last_tick{};
 bool g_first_tick = true;
 int64_t g_last_capture_ns = 0;
 runtime::MotionFeedbackWindow g_pidfFeedback;
+bool g_wasCalibrating = false;
 uint64_t g_frame_index = 0;
 int g_last_active_hotkey = -1;
 int g_flash_target_id = -1;
@@ -358,7 +361,18 @@ control::Vec2 resolveCrosshair(const Config& cfg, const HotkeyProfile& hk, bool&
 bool tick(int* consumedVersion)
 {
     std::lock_guard<std::recursive_mutex> outputLock(macros::outputMutex());
-    if (macros::ownsOutput()) { g_target_aim_hotkey = -1; resetAutoFlash(); return false; }
+    auto& calibration = runtime::FfCalibrationSession::instance();
+    if (macros::ownsOutput()) {
+        if (calibration.active()) calibration.fail("宏接管了输出，标定中止");
+        g_target_aim_hotkey = -1; resetAutoFlash(); return false;
+    }
+    if (g_wasCalibrating && !calibration.active()) {
+        if (auto* mouse = ensureMouse()) { mouse->clearQueuedMoves(); mouse->consumeMovementFeedback(); }
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_controller) g_controller->reset();
+        g_path.reset(); g_pidfFeedback.reset(); g_first_tick = true; g_last_capture_ns = 0;
+        g_wasCalibrating = false;
+    }
     // The post-shot timer must keep running even when the hotkey is released
     // or no detection is available on this frame.
     {
@@ -372,6 +386,7 @@ bool tick(int* consumedVersion)
     const auto snapshot = runtime_config::read();
     if (!snapshot)
     {
+        if (calibration.active()) calibration.fail("运行配置不可用，标定中止");
         g_target_aim_hotkey = -1;
         resetAutoFlash();
         return false;
@@ -408,11 +423,13 @@ bool tick(int* consumedVersion)
     const int activeIdx = runtime::g_active_hotkey_index.load();
     if (activeIdx < 0)
     {
+        if (calibration.active()) calibration.released();
         deactivateHotkey();
         return false;
     }
     if (activeIdx >= static_cast<int>(cfg.hotkeys.size()))
     {
+        if (calibration.active()) calibration.fail("所选热键已不存在，标定中止");
         deactivateHotkey();
         return false;
     }
@@ -424,6 +441,7 @@ bool tick(int* consumedVersion)
         ? hk.secondary_trigger : primaryTrigger;
     if (!hk.ctl_enabled && !trigger.trigger_enabled)
     {
+        if (calibration.active()) calibration.fail("所选热键已停用，标定中止");
         deactivateHotkey();
         return false;
     }
@@ -475,6 +493,8 @@ bool tick(int* consumedVersion)
     }
 
     std::vector<control::Candidate> candidates;
+    std::vector<control::Candidate> triggerCaptureDetections;
+    const bool captureOnTrigger = cfg.auto_capture_enabled && cfg.auto_capture_trigger_only;
     bool detectionFresh = false;
     bool detectionFrameFresh = false;
     int64_t captureNs = 0;
@@ -517,6 +537,12 @@ bool tick(int* consumedVersion)
             c.classId = (i < detectionBuffer.classes.size()) ? detectionBuffer.classes[i] : -1;
             c.confidence = (i < detectionBuffer.confidences.size())
                 ? static_cast<double>(detectionBuffer.confidences[i]) : 0.0;
+            if (captureOnTrigger) {
+                auto label = c;
+                // Keep the detector's original label geometry, before aim fusion/filtering.
+                label.box = {double(r.x), double(r.y), double(r.width), double(r.height)};
+                triggerCaptureDetections.push_back(label);
+            }
             if (c.confidence <= cfg.confidence_threshold) continue;
             candidates.push_back(c);
         }
@@ -532,6 +558,40 @@ bool tick(int* consumedVersion)
     bool crossFresh = false;
     const control::Vec2 cross = resolveCrosshair(cfg, hk, crossFresh,
                                                detectedFrame, detectedCrosshair, activeIdx, detectedVersion);
+    if (calibration.active()) {
+        MouseThread* mouse = ensureMouse();
+        if (!mouse || !mouse->supports(mouse_driver::kCapMove) || mouse->weaponSwitch31Busy()) {
+            calibration.fail("没有可用的鼠标位移设备，或设备正在切枪");
+            return false;
+        }
+        if (calibration.needsStart()) {
+            mouse->clearQueuedMoves(); mouse->consumeMovementFeedback();
+            releaseHeldButtons(); resetAutoFlash();
+            std::lock_guard<std::mutex> lk(g_mtx);
+            if (g_controller) g_controller->reset();
+            g_trigger.reset(); g_scope.forceRelease(); g_path.reset(); g_pidfFeedback.reset();
+            g_first_tick = true; g_last_capture_ns = 0;
+        }
+        g_wasCalibrating = true; g_target_aim_hotkey = -1;
+        std::vector<control::Candidate> selected;
+        if (detectionFrameFresh) for (const auto& c : candidates) {
+            const bool allowed = hk.aim_classes.empty() || std::any_of(hk.aim_classes.begin(), hk.aim_classes.end(),
+                [&](const HotkeyAimClass& a) { return a.class_id == c.classId && c.confidence >= a.min_conf; });
+            const auto center = c.box.center();
+            if (allowed && std::abs(center.x-cross.x) <= hk.fovX*0.5 &&
+                           std::abs(center.y-cross.y) <= hk.fovY*0.5) selected.push_back(c);
+        }
+        const auto feedback = mouse->consumeMovementFeedback();
+        std::vector<control::FfCalibrationMove> moves;
+        for (const auto& e : feedback.events) moves.push_back({e.timestamp_us, {e.dx, e.dy}});
+        const auto move = calibration.update(activeIdx, runtime::ffCalibrationNowUs(), captureNs/1000,
+                                              selected, moves, feedback.failed);
+        const bool sent = calibration.dispatch(move, [&](control::Counts counts) {
+            mouse->sendRawMove(counts.x, counts.y, captureNs);
+        });
+        if (!calibration.active()) mouse->clearQueuedMoves();
+        return sent;
+    }
     const bool flashTurning = triggerMode == 2 &&
         g_flashPost.phase() == boss::TriggerFlashPostController::Phase::Turn;
     if (flashTurning) {
@@ -710,7 +770,9 @@ bool tick(int* consumedVersion)
                 now.time_since_epoch()).count();
         for (const auto& event : movementFeedback.events)
             g_pidfFeedback.add({event.dx, event.dy, event.timestamp_us, event.source});
-        in.motionEventSum = g_pidfFeedback.sample(frameUs);
+        const auto& feedbackPid = scopeCtlActive ? hk.recovered_scope_pid
+            : secondaryCtlActive ? hk.recovered_secondary_pid : hk.recovered_pid;
+        in.motionEventSum = g_pidfFeedback.sample(frameUs, true, feedbackPid.motionDelayMs);
         in.observationTimeUs = frameUs;
         in.frameIndex = ++g_frame_index;
         in.detectionFresh = detectionFresh;
@@ -1252,6 +1314,8 @@ bool tick(int* consumedVersion)
                 g_autoStop.reset();
             if (sentShot)
             {
+                if (captureOnTrigger)
+                    AutoCapture::notify_trigger(detectedFrame, std::move(triggerCaptureDetections));
                 if (triggerMode != 0)
                     g_flashPost.shotSent(triggerTarget.classId, triggerTarget.box);
                 g_pendingSwitch31.onPress(true, switchCapable,
@@ -1295,6 +1359,8 @@ void reset()
 {
     macros::DevicePause macroPause;
     std::lock_guard<std::recursive_mutex> outputLock(macros::outputMutex());
+    runtime::FfCalibrationSession::instance().cancel("运行状态已重置，标定取消");
+    g_wasCalibrating = false;
     g_crosshairHold.reset();
     g_target_aim_hotkey = -1;
     g_aim_delay_target_id = -1;
@@ -1341,6 +1407,7 @@ void reset()
 void resetMouse()
 {
     std::lock_guard<std::recursive_mutex> outputLock(macros::outputMutex());
+    runtime::FfCalibrationSession::instance().cancel("鼠标设备已重置，标定取消");
     std::lock_guard<std::mutex> stateLock(g_mtx);
     g_aimpointRecoilGate.reset();
     g_flashPost.reset();

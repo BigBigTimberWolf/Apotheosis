@@ -10,8 +10,8 @@
 namespace runtime {
 
 // Match successful mouse sends to the frame whose observed target motion is
-// being differentiated. The source controller keeps a 128-event ring and
-// weights small source-0 moves before feeding them back into target velocity.
+// being differentiated. The legacy mode weights small source-0 moves; measured
+// mode retains complete counts and the longer calibrated response history.
 class MotionFeedbackWindow
 {
 public:
@@ -29,15 +29,38 @@ public:
             event.source < 0 || event.source > 1)
             return;
         events_.push_back(event);
-        if (events_.size() > 128) events_.pop_front();
+        if (events_.size() > 512) events_.pop_front();
     }
 
-    control::Vec2 sample(int64_t frameUs, bool weighted = true)
+    control::Vec2 sample(int64_t frameUs, bool weighted = true, double delayMs = -1.0)
     {
         if (frameUs <= 0) return {};
+        const double alignment = std::isfinite(delayMs) && delayMs >= 0.0
+            ? std::clamp(delayMs, 0.0, 200.0) : -1.0;
+        if (alignment != alignmentMs_) {
+            previousFrameUs_ = 0; smoothedIntervalUs_ = 0.0; alignmentMs_ = alignment;
+        }
         // A duplicated or older result must not replay an event into the
         // velocity estimate or move the interval clock backwards.
         if (previousFrameUs_ > 0 && frameUs <= previousFrameUs_) return {};
+        // Calibrated mode integrates the complete observed frame interval,
+        // shifted by the measured send-to-image lag. Small sends are not
+        // downweighted: the measured conversion already represents their gain.
+        if (std::isfinite(delayMs) && delayMs >= 0.0) {
+            const auto lag = static_cast<int64_t>(std::clamp(delayMs, 0.0, 200.0) * 1000.0);
+            control::Vec2 sum;
+            if (previousFrameUs_ > 0) {
+                const int64_t lower = previousFrameUs_ - lag, upper = frameUs - lag;
+                for (const auto& event : events_) {
+                    if (event.timestampUs > lower && event.timestampUs <= upper) {
+                        sum.x += event.dx;
+                        sum.y += event.dy;
+                    }
+                }
+            }
+            previousFrameUs_ = frameUs;
+            return sum;
+        }
         if (previousFrameUs_ > 0)
         {
             const double interval = static_cast<double>(
@@ -78,12 +101,14 @@ public:
         events_.clear();
         previousFrameUs_ = 0;
         smoothedIntervalUs_ = 0.0;
+        alignmentMs_ = -1.0;
     }
 
 private:
     std::deque<Event> events_;
     int64_t previousFrameUs_ = 0;
     double smoothedIntervalUs_ = 0.0;
+    double alignmentMs_ = -1.0;
 };
 
 } // namespace runtime

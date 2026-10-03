@@ -14,6 +14,11 @@ struct RuleHost {
     std::function<void(bool)> release;
     // A valid future suspends this flow until the UI operation completes.
     std::function<std::shared_future<std::string>(const Action&,std::shared_ptr<std::atomic<bool>>)> asyncAction;
+    // Explain transport/capability failures instead of reporting a silent no-op.
+    std::function<std::string(bool,int)> inputError;
+    // Same monotonic millisecond domain as snapshots. Input transports may
+    // block; requested hold/delay durations start after a successful send.
+    std::function<int64_t()> nowMs;
 };
 struct RunRecord { uint64_t uid=0;std::string rule,name,message;int step=0;bool dry=false; };
 struct RuleStats {uint64_t starts=0,completed=0,cancelled=0,steps=0;int64_t lastElapsedMs=0,totalElapsedMs=0;};
@@ -105,7 +110,7 @@ private:
         Program program;FlowMap flow;RuleSnapshot initial;
         uint64_t uid=0,parent=0,waitChild=0;size_t pc=0;
         int64_t started=0,deadline=0,waitStarted=0,motionStarted=0;
-        bool done=false,dry=false,manual=false,pulse=false,paused=false,moving=false;
+        bool done=false,dry=false,manual=false,pulse=false,paused=false,moving=false,ownsOutput=false;
         int target=-1,loopIndex=0,sentX=0,sentY=0;
         std::vector<std::pair<bool,int>> pulseKeys;
         std::set<std::pair<bool,int>> held;
@@ -125,6 +130,7 @@ private:
     std::map<std::string,RuleStats> stats_;
     int64_t now_=0;
     std::deque<std::string> log_;
+    std::string lastInputError_;
     uint64_t nextUid_=1;bool acquired_=false,moved_=false;
     void note(const std::string& s) {log_.push_back(s);while(log_.size()>200)log_.pop_front();}
     bool alive(uint64_t id) const {for(const auto& j:jobs_)if(j->uid==id&&!j->done)return true;return false;}
@@ -138,23 +144,35 @@ private:
         for(auto& child:jobs_)if(child->parent==j.uid&&!child->done)end(*child,u8"父流程已结束");
     }
     bool hold(Job& j,bool keyboard,int code,bool down) {
-        if(code<=0)return false;const auto key=std::make_pair(keyboard,code);
+        if(code<=0){lastInputError_=u8"按键无效，请重新选择键盘键或鼠标按钮";return false;}
+        const auto key=std::make_pair(keyboard,code);
         if(down==bool(j.held.count(key)))return true;
         if(j.dry) {if(down)j.held.insert(key);else j.held.erase(key);return true;}
         if(down) {
             j.held.insert(key);const bool first=owners_[key]++==0;
-            return !first||host_.button(keyboard,code,true);
+            const bool ok=!first||host_.button(keyboard,code,true);
+            if(!ok&&host_.inputError)lastInputError_=host_.inputError(keyboard,code);
+            return ok;
         }
         bool ok=true;auto it=owners_.find(key);
         if(it!=owners_.end()&&--it->second<=0) {ok=host_.button(keyboard,code,false);owners_.erase(it);}
-        j.held.erase(key);return ok;
+        j.held.erase(key);
+        if(!ok&&host_.inputError)lastInputError_=host_.inputError(keyboard,code);
+        return ok;
     }
     bool releasePulse(Job& j){bool ok=true;for(auto it=j.pulseKeys.rbegin();it!=j.pulseKeys.rend();++it)ok=hold(j,it->first,it->second,false)&&ok;j.pulseKeys.clear();return ok;}
-    void releaseHeld(Job& j) {const auto held=j.held;for(const auto& k:held)if(!hold(j,k.first,k.second,false))note(u8"设备未确认释放输入");}
+    void releaseHeld(Job& j) {
+        const auto held=j.held;
+        for(const auto& k:held)if(!hold(j,k.first,k.second,false))
+            note(j.program.name+u8"：设备未确认释放输入"+
+                 (lastInputError_.empty()?std::string{}:u8"："+lastInputError_));
+    }
     void cleanup() {
         for(auto& j:jobs_)if(j->done)releaseHeld(*j);
         jobs_.erase(std::remove_if(jobs_.begin(),jobs_.end(),[](const auto& j){return j->done;}),jobs_.end());
-        if(jobs_.empty()&&acquired_) {host_.release(moved_);acquired_=false;moved_=false;}
+        const bool outputNeeded=std::any_of(jobs_.begin(),jobs_.end(),
+            [](const auto& j){return !j->done&&!j->dry&&j->ownsOutput;});
+        if(!outputNeeded&&acquired_) {host_.release(moved_);acquired_=false;moved_=false;}
     }
     bool start(const Program& p,const RuleSnapshot& s,bool dry,uint64_t parent,bool branch=false) {
         if(jobs_.size()>=32){note(u8"并发流程已达 32 个上限");return false;}
@@ -187,7 +205,6 @@ private:
             }
         }
         cleanup();
-        if(!dry&&!acquired_) {if(!host_.acquire()){note(u8"自动输出尚未释放，请稍后重试");return false;}acquired_=true;}
         auto j=std::make_shared<Job>();j->program=p;j->flow=std::move(flow);j->initial=s;
         j->uid=nextUid_++;j->parent=parent;j->started=s.now;j->dry=dry;j->manual=parent!=0||dry;
         const int minimum=std::max(0,number(p,"delay_min_ms")),maximum=std::max(minimum,number(p,"delay_max_ms"));
@@ -198,10 +215,21 @@ private:
         note(p.name+(dry?u8"：开始模拟（不发送输入）":u8"：开始执行"));return true;
     }
     bool execute(Job& j,RuleSnapshot s) {
+        if(!j.dry&&host_.nowMs)s.now=std::max(s.now,host_.nowMs());
         const auto index=int(j.pc);const auto& a=j.program.actions[j.pc];size_t next=j.pc+1;
         ++stats_[j.program.id].steps;
         j.message=actionLabels()[int(a.type)];
+        lastInputError_.clear();
         const auto cond=[&](int n){return truth(j.program,s,n);};
+        if(!j.dry&&exclusiveOutput(a.type)) {
+            if(!acquired_) {
+                if(!host_.acquire || !host_.acquire()) {
+                    end(j,u8"自动输出尚未释放，请稍后重试");return false;
+                }
+                acquired_=true;
+            }
+            j.ownsOutput=true;
+        }
         bool ok=true;std::string error;
         switch(a.type) {
         case ActionType::Delay: {auto r=s.values.find("random.percent");double f=r==s.values.end()?0:r->second.number/100;
@@ -218,7 +246,9 @@ private:
             for(const auto& key:pulse)if(key.second<=0||j.held.count(key)||(!j.dry&&owners_.count(key))){ok=false;error=u8"点按键无效或已被宏按住，请先松开或错开执行时间";break;}
             if(!ok)break;
             for(const auto& key:pulse)if(!hold(j,key.first,key.second,true)){ok=false;break;}
-            j.pulse=ok;j.pulseKeys=std::move(pulse);j.deadline=s.now+std::clamp(a.b,1,60000);break;
+            j.pulse=ok;j.pulseKeys=std::move(pulse);
+            const auto sentAt=!j.dry&&host_.nowMs?std::max(s.now,host_.nowMs()):s.now;
+            j.deadline=sentAt+std::clamp(a.b,1,60000);break;
         }
         case ActionType::Loop:case ActionType::While:case ActionType::Retry:case ActionType::ForTargets: {
             auto& count=j.counters[index];
@@ -304,7 +334,10 @@ private:
             if(a.type==ActionType::MouseMove||a.type==ActionType::AbsoluteMove||a.type==ActionType::MoveToTarget||a.type==ActionType::MoveToPrediction)moved_=true;
             break;
         }
-        if(!ok) {end(j,error.empty()?u8"动作失败，已停止并释放本宏输入":error);return false;}
+        if(!ok) {
+            if(error.empty())error=lastInputError_.empty()?u8"动作失败，已停止并释放本宏输入":lastInputError_;
+            end(j,u8"步骤 "+std::to_string(index+1)+u8"（"+j.message+u8"）："+error);return false;
+        }
         note((j.dry?u8"[模拟] ":"")+j.program.name+u8" · 步骤 "+std::to_string(index+1)+u8"："+j.message);
         j.pc=next;
         if(!j.manual&&j.program.mode==Mode::Sequence&&j.pc<j.program.actions.size())j.paused=true;

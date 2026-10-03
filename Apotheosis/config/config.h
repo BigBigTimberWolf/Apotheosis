@@ -390,6 +390,7 @@ public:
     bool verbose = false;
 
     bool   auto_capture_enabled    = false;
+    bool   auto_capture_trigger_only = false;
     bool   auto_capture_use_high   = true;
     float  auto_capture_high_conf  = 0.85f;
     bool   auto_capture_use_low    = false;

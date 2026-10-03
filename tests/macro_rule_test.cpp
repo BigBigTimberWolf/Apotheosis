@@ -1,4 +1,6 @@
 #include "macro/rule_executor.h"
+#include "macro/input_diagnostics.h"
+#include "mouse/ferrum_protocol.h"
 #include <cstdio>
 using namespace macros;
 int main(){int failures=0;auto check=[&](bool b,const char* n){if(!b){++failures;std::printf("FAIL %s\n",n);}};
@@ -18,7 +20,9 @@ int main(){int failures=0;auto check=[&](bool b,const char* n){if(!b){++failures
     host.button=[&](bool,int k,bool down){buttons.push_back({k,down});return true;};
     host.action=[](const Action&,const RuleSnapshot&,std::string&){return true;};
     RuleExecutor engine(host);engine.configure({p});check(engine.run(p.id,s),"manual start");
-    engine.tick(s,true);check(buttons.empty(),"wait does not press early");s.now+=49;engine.tick(s,true);check(buttons.empty(),"49ms remains waiting");
+    engine.tick(s,true);check(buttons.empty(),"wait does not press early");
+    check(acquired==0,"initial delay does not prematurely suspend automatic aim");
+    s.now+=49;engine.tick(s,true);check(buttons.empty(),"49ms remains waiting");
     ++s.now;engine.tick(s,true);check(buttons.size()==1&&buttons[0]==std::make_pair(hidKey("U"),true),"U pressed at 50ms");
     s.now+=50;engine.tick(s,true);check(buttons.size()==2&&!buttons.back().second&&!engine.active(),"U released after 50ms and completes");
     check(acquired==1&&released==1,"output ownership balanced");
@@ -89,4 +93,71 @@ int main(){int failures=0;auto check=[&](bool b,const char* n){if(!b){++failures
     host.asyncAction=[&](const Action& action,std::shared_ptr<std::atomic<bool>> flag){if(action.type!=ActionType::ExportConfig)return std::shared_future<std::string>{};alive=flag;return future;};
     RuleExecutor asyncEngine(host);p.options.clear();p.conditions.clear();Action exportAction;exportAction.type=ActionType::ExportConfig;p.actions={exportAction,press};asyncEngine.configure({p});buttons.clear();asyncEngine.run(p.id,s);asyncEngine.tick(s,true);++s.now;asyncEngine.tick(s,true);
     check(buttons.empty()&&asyncEngine.active(),"flow waits for asynchronous system action");completed.set_value({});++s.now;asyncEngine.tick(s,true);check(buttons.size()==1,"next action starts only after async completion");asyncEngine.stop();check(alive&&!alive->load(),"stop cancels queued system action token");
+    // A looping prediction/aim-parameter macro must leave the consumer running.
+    {
+        bool outputOwned=false;int controls=0,presses=0;
+        RuleHost h;h.acquire=[&]{outputOwned=true;return true;};h.release=[&](bool){outputOwned=false;};
+        h.action=[&](const Action&,const RuleSnapshot&,std::string&){++controls;return true;};
+        h.button=[&](bool,int,bool){++presses;return true;};
+        RuleExecutor e(h);Program control;control.id="control";control.enabled=true;
+        control.trigger="F1";control.mode=Mode::Hold;control.options["parallel"]="1";
+        Action prediction;prediction.type=ActionType::Prediction;prediction.value=20;
+        control.actions={prediction};Program physical=control;physical.id="physical";
+        physical.trigger="F2";physical.mode=Mode::Once;physical.actions={press};
+        e.configure({control,physical});RuleSnapshot input;input.now=1000;
+        e.tick(input);input.keys.insert("F1");++input.now;e.tick(input);
+        check(e.active()&&controls==1&&!outputOwned,"held control macro changes parameters without stopping aim");
+        input.now+=30;e.tick(input);input.now+=30;e.tick(input);
+        check(controls>=2&&!outputOwned,"looping control macro remains effective while aim continues");
+        input.keys.insert("F2");++input.now;e.tick(input);
+        check(outputOwned&&presses==1,"physical macro still acquires exclusive input ownership");
+        input.now+=60;e.tick(input);
+        check(e.active()&&!outputOwned&&presses==2,
+              "finishing physical macro resumes aim even while parallel control macro remains active");
+        input.keys.clear();++input.now;e.tick(input);check(!e.active(),"held macro ends when its key is released");
+    }
+    // Ferrum COM writes can outlast the requested press. Never count queue /
+    // transport time as the key's actual hold, including a down + wait + up flow.
+    for(bool keyboard:{true,false}) {
+        int64_t clock=5000;
+        std::vector<std::pair<std::string,int64_t>> wire;
+        RuleHost h;h.nowMs=[&]{return clock;};
+        h.acquire=[&]{clock+=25;return true;};h.release=[](bool){};
+        h.button=[&](bool key,int code,bool pressed) {
+            clock+=80;
+            const auto command=key?mouse_driver::ferrum_protocol::keyCommand({code},pressed):
+                std::string("km.left(")+(pressed?"1)":"0)");
+            wire.push_back({command,clock});return true;
+        };
+        RuleExecutor e(h);Program flow;flow.id="fe";flow.enabled=true;
+        Action click;click.type=keyboard?ActionType::KeyPress:ActionType::MouseClick;
+        click.key="U";click.a=1;click.b=50;flow.actions={click};
+        e.configure({flow});RuleSnapshot input;input.now=clock;e.run(flow.id,input);e.tick(input,true);
+        check(wire.size()==1,"slow FE send emits a down command before scheduling its release");
+        const auto pressedAt=clock;input.now=clock=pressedAt+49;e.tick(input,true);
+        check(wire.size()==1,"FE press stays down for the full requested hold after send completion");
+        input.now=clock=pressedAt+50;e.tick(input,true);
+        check(wire.size()==2&&!e.active()&&wire[1].second-wire[0].second>=50,
+              "keyboard and mouse FE presses release only after the requested duration");
+        check(wire[0].first==(keyboard?"km.down(24)":"km.left(1)")&&
+              wire[1].first==(keyboard?"km.up(24)":"km.left(0)"),
+              "FE emits the official press and release commands with HID/button units");
+
+        wire.clear();click.type=keyboard?ActionType::KeyDown:ActionType::MouseDown;
+        Action up=click;up.type=keyboard?ActionType::KeyUp:ActionType::MouseUp;
+        flow.actions={click,wait,up};e.configure({flow});input.now=clock;e.run(flow.id,input);e.tick(input,true);
+        const auto downAt=clock;input.now=clock=downAt+49;e.tick(input,true);
+        check(wire.size()==1,"wait after a slow FE down starts after its transport completes");
+        input.now=clock=downAt+50;e.tick(input,true);
+        check(wire.size()==2&&!e.active(),"FE down-wait-up sequence releases without a leaked hold");
+    }
+    {
+        RuleHost h;h.acquire=[] {return true;};h.release=[](bool){};
+        h.button=[](bool,int,bool){return false;};
+        h.inputError=[](bool,int){return std::string("FE command failed: check serial connection");};
+        RuleExecutor e(h);Program flow;flow.id="failure";flow.enabled=true;flow.actions={press};
+        e.configure({flow});e.run(flow.id,s);e.tick(s,true);
+        check(!e.active()&&e.log().back().find("FE command failed")!=std::string::npos,
+              "input transport failure reaches the macro's failing-step diagnostics");
+    }
     std::printf("macro rules: %d failures\n",failures);return failures?1:0;}

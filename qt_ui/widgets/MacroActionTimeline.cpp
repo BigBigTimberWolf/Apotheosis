@@ -72,7 +72,8 @@ MacroActionTimeline::MacroActionTimeline(QWidget* parent)
     auto* body = contentLayout();
     body->setSpacing(8);
     body->addWidget(macro_ui::hint(QStringLiteral(
-        "从上到下依次执行。直接在每一行里修改，移动单位是设备计数（右 / 下为正）。")));
+        "从上到下依次执行。直接在每一行里修改，移动单位是设备计数（右 / 下为正）。\n"
+        "“按下”会在流程结束时自动松开；需要保持时在后面添加等待，或使用带保持时长的点按动作。")));
     rows_ = new QVBoxLayout;
     rows_->setSpacing(6);
     body->addLayout(rows_);

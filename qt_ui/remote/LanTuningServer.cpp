@@ -98,6 +98,9 @@ void pidFields(Fields& f, control::RecoveredPidConfig& p, const QString& prefix,
     f.number(prefix+"kdY", "微分 Kd · Y", section, p.kdY, 0, 10, .01);
     f.number(prefix+"ffX", "速度前馈 FF · X", section, p.feedforwardX, 0, 10, .0005);
     f.number(prefix+"ffY", "速度前馈 FF · Y", section, p.feedforwardY, 0, 10, .0005);
+    f.number(prefix+"motionPxX", "FF 鼠标换算 · X（px/count）", section, p.motionPixelsPerCountX, .02, 20, .01);
+    f.number(prefix+"motionPxY", "FF 鼠标换算 · Y（px/count）", section, p.motionPixelsPerCountY, .02, 20, .01);
+    f.number(prefix+"motionDelayMs", "FF 响应延迟（ms，-1 使用旧窗口）", section, p.motionDelayMs, -1, 200, 1);
     f.number(prefix+"deadzoneX", "死区半径 · X", section, p.deadzoneX, 0, 200, .5);
     f.number(prefix+"deadzoneY", "死区半径 · Y", section, p.deadzoneY, 0, 200, .5);
     f.number(prefix+"hardDeadzoneX", "XY 轴死区 · X（内部不输出）", section, p.hardDeadzoneX, 0, 200, .5);

@@ -58,6 +58,17 @@ std::string write_global_config(const std::string& path, const std::string& glob
 int main()
 {
     {
+        Config trigger;
+        check(trigger.loadConfig(write_global_config("trigger_capture.ini", "auto_capture_enabled = true\nauto_capture_trigger_only = true\n")),
+              "trigger-only capture config loads");
+        check(trigger.auto_capture_enabled && trigger.auto_capture_trigger_only,"trigger-only capture is independent of global enable");
+        check(trigger.saveConfig("trigger_capture_roundtrip.ini"),"trigger-only capture config saves");
+        Config restored;restored.loadConfig("trigger_capture_roundtrip.ini");
+        check(restored.auto_capture_trigger_only,"trigger-only capture survives restart");
+        Config legacy;legacy.loadConfig(write_global_config("trigger_capture_legacy.ini", ""));
+        check(!legacy.auto_capture_trigger_only,"existing configs retain normal auto capture");
+    }
+    {
         Config c;
         c.loadConfig(write_config("curve_full_seed.ini", "aim_path_mode = 2\n"));
         std::vector<float> samples(32768);
@@ -558,6 +569,38 @@ int main()
                   std::abs(loaded.hotkeys[0].recovered_secondary_pid.hardDeadzoneX - 6.0f) < 1e-4f &&
                   std::abs(loaded.hotkeys[0].recovered_scope_pid.hardDeadzoneY - 7.5f) < 1e-4f,
                   "XY 轴死区在三套 PID 档中都能保存回读");
+    }
+
+    {
+        Config calibrated;
+        check(calibrated.loadConfig(write_config("ff_calibration_seed.ini",
+            "recovered_pid_motion_px_per_count_x = 1.35\n"
+            "recovered_pid_motion_px_per_count_y = 0.72\n"
+            "recovered_pid_motion_delay_ms = 37\n"
+            "recovered_secondary_pid_motion_px_per_count_x = 0.55\n"
+            "recovered_secondary_pid_motion_delay_ms = 24\n"
+            "recovered_scope_pid_motion_px_per_count_y = 1.8\n"
+            "recovered_scope_pid_motion_delay_ms = 42\n")), "calibrated FF config loads");
+        check(calibrated.saveConfig("ff_calibration_roundtrip.ini"), "calibrated FF config saves");
+        Config restored; restored.loadConfig("ff_calibration_roundtrip.ini");
+        const auto& h=restored.hotkeys.at(0);
+        check(std::abs(h.recovered_pid.motionPixelsPerCountX-1.35)<1e-5 &&
+              std::abs(h.recovered_pid.motionPixelsPerCountY-.72)<1e-5 &&
+              h.recovered_pid.motionDelayMs==37 &&
+              std::abs(h.recovered_secondary_pid.motionPixelsPerCountX-.55)<1e-5 &&
+              h.recovered_secondary_pid.motionDelayMs==24 &&
+              std::abs(h.recovered_scope_pid.motionPixelsPerCountY-1.8)<1e-5 &&
+              h.recovered_scope_pid.motionDelayMs==42,
+              "all three FF calibration banks survive save/reload independently");
+        Config legacy; legacy.loadConfig(write_config("ff_calibration_legacy.ini"));
+        check(legacy.hotkeys.at(0).recovered_pid.motionPixelsPerCountX==.91f &&
+              legacy.hotkeys.at(0).recovered_pid.motionDelayMs==-1,
+              "existing configs retain legacy conversion until calibrated");
+        Config invalid; invalid.loadConfig(write_config("ff_calibration_invalid.ini",
+            "recovered_pid_motion_px_per_count_x = -2\nrecovered_pid_motion_delay_ms = 999\n"));
+        check(invalid.hotkeys.at(0).recovered_pid.motionPixelsPerCountX==.91f &&
+              invalid.hotkeys.at(0).recovered_pid.motionDelayMs==200,
+              "invalid calibration values are sanitized on load");
     }
 
     std::printf("\n[5] ★★ 已删除的瞄准控制键: 不报错、不污染活着的键\n");

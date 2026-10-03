@@ -102,6 +102,13 @@ void RecoveredPid::setConfig(const RecoveredPidConfig& config)
     clean.hardDeadzoneY = finiteRange(clean.hardDeadzoneY, 0.0f, 200.0f);
     clean.feedforwardX = finiteRange(clean.feedforwardX, 0.0f, 10.0f);
     clean.feedforwardY = finiteRange(clean.feedforwardY, 0.0f, 10.0f);
+    auto conversion = [](float value) {
+        return std::isfinite(value) && value >= 0.02f && value <= 20.0f ? value : 0.91f;
+    };
+    clean.motionPixelsPerCountX = conversion(clean.motionPixelsPerCountX);
+    clean.motionPixelsPerCountY = conversion(clean.motionPixelsPerCountY);
+    clean.motionDelayMs = std::isfinite(clean.motionDelayMs) && clean.motionDelayMs >= 0.0f
+        ? std::clamp(clean.motionDelayMs, 0.0f, 200.0f) : -1.0f;
     clean.smoothMaxPixel = finiteRange(clean.smoothMaxPixel, 50.0f, 1000.0f);
     clean.segment = std::isfinite(clean.segment)
         ? std::clamp(clean.segment, 1.0f, 10.0f) : 3.0f;
@@ -133,8 +140,8 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     const float ey = static_cast<float>(error.y);
     // A macro axis reset has no historical sample. Seed it from the next
     // observation instead of differentiating against an invented zero.
-    if (seedResetX_) { previousX_ = ex; dFilterX_ = ffFilterX_ = 0.0f; seedResetX_ = false; }
-    if (seedResetY_) { previousY_ = ey; dFilterY_ = ffFilterY_ = 0.0f; seedResetY_ = false; }
+    if (seedResetX_) { previousX_ = ex; dFilterX_ = 0.0f; seedResetX_ = false; }
+    if (seedResetY_) { previousY_ = ey; dFilterY_ = 0.0f; seedResetY_ = false; }
     // Always-on stabilizers, baked to fixed good values (no new knobs):
     //  A  ~20 Hz low-pass on the derivative -> usable kd, higher kp.
     //  B  integral ceiling decoupled from ki (a small fraction of the output
@@ -157,7 +164,7 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     if (config_.maskX) {
         integralX_ = carryX_ = 0.0f;
         previousX_ = ex;
-        dFilterX_ = ffFilterX_ = 0.0f;
+        dFilterX_ = 0.0f;
     } else px = axisPid(ex, config_.kpX, config_.kiX, config_.kdX, dt,
                        config_.preserveIntegralOnReverse,
                        tuneFor(config_.deadzoneX, config_.hardDeadzoneX),
@@ -165,7 +172,7 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     if (config_.maskY) {
         integralY_ = carryY_ = 0.0f;
         previousY_ = ey;
-        dFilterY_ = ffFilterY_ = 0.0f;
+        dFilterY_ = 0.0f;
     } else py = axisPid(ey, config_.kpY, config_.kiY, config_.kdY, dt,
                        config_.preserveIntegralOnReverse,
                        tuneFor(config_.deadzoneY, config_.hardDeadzoneY),
@@ -212,22 +219,15 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     if (holdY) py = 0.0f;
     result.afterDeadzone = { px, py };
 
-    // C: low-pass the velocity feedforward so raising FF stops injecting the
-    // tracker's per-frame velocity noise straight into the output (f-shake).
-    constexpr float kFeedforwardCutoffHz = 15.0f;
-    const float ffAlpha = dt / (dt + 1.0f / (2.0f * 3.14159265f * kFeedforwardCutoffHz));
-    const float rawFx = !config_.maskX && std::isfinite(trackedFeedforward.x)
+    // The tracker already smooths and gates velocity. Do not add another lag
+    // after it: a stopped/reversed FF must take effect on this control update.
+    const float fx = !config_.maskX && !holdX && std::isfinite(trackedFeedforward.x)
         ? std::max(0.0f, config_.feedforwardX) * static_cast<float>(trackedFeedforward.x) : 0.0f;
-    const float rawFy = !config_.maskY && std::isfinite(trackedFeedforward.y)
+    const float fy = !config_.maskY && !holdY && std::isfinite(trackedFeedforward.y)
         ? std::max(0.0f, config_.feedforwardY) * static_cast<float>(trackedFeedforward.y) : 0.0f;
-    ffFilterX_ += ffAlpha * (rawFx - ffFilterX_);
-    ffFilterY_ += ffAlpha * (rawFy - ffFilterY_);
-    // Inside the free-wiggle zone the feedforward is cleared too (and its filter
-    // restarts from zero) so it ramps in smoothly on leaving instead of kicking.
-    if (holdX) ffFilterX_ = carryX_ = 0.0f;
-    if (holdY) ffFilterY_ = carryY_ = 0.0f;
-    const float fx = ffFilterX_;
-    const float fy = ffFilterY_;
+    if (holdX) carryX_ = 0.0f;
+    if (holdY) carryY_ = 0.0f;
+    result.feedforward = {fx, fy};
     const float segment = config_.segmentEnabled && std::isfinite(config_.segment)
         ? std::clamp(config_.segment, 1.0f, 10.0f) : 3.0f;
     const float x = std::clamp(px + fx, -maxPixel, maxPixel) / segment;
@@ -238,6 +238,10 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
         result.carry = { carryX_, carryY_ };
         return result;
     }
+    auto saturation = [maxPixel](float value) {
+        return value != 0.0f && std::abs(value) >= maxPixel ? (value > 0.0f ? 1.0 : -1.0) : 0.0;
+    };
+    result.saturation = {saturation(px + fx), saturation(py + fy)};
     result.beforeRounding = { x, y };
     result.counts = { quantize(x, carryX_), quantize(y, carryY_) };
     result.carry = { carryX_, carryY_ };
@@ -251,8 +255,8 @@ void RecoveredPid::resetIntegral()
 
 void RecoveredPid::resetAxes(bool x, bool y)
 {
-    if (x) { integralX_ = previousX_ = carryX_ = dFilterX_ = ffFilterX_ = 0.0f; seedResetX_ = true; }
-    if (y) { integralY_ = previousY_ = carryY_ = dFilterY_ = ffFilterY_ = 0.0f; seedResetY_ = true; }
+    if (x) { integralX_ = previousX_ = carryX_ = dFilterX_ = 0.0f; seedResetX_ = true; }
+    if (y) { integralY_ = previousY_ = carryY_ = dFilterY_ = 0.0f; seedResetY_ = true; }
 }
 
 void RecoveredPid::reset()
@@ -261,7 +265,6 @@ void RecoveredPid::reset()
     previousX_ = previousY_ = 0.0f;
     carryX_ = carryY_ = 0.0f;
     dFilterX_ = dFilterY_ = 0.0f;
-    ffFilterX_ = ffFilterY_ = 0.0f;
     configured_ = false;
     skipOutputOnce_ = false;
     seedResetX_ = seedResetY_ = false;

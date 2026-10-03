@@ -21,6 +21,19 @@ enum class ActionType { Delay, KeyDown, KeyUp, KeyPress, MouseMove,
     Jump };
 enum class Mode { Once, Hold, Toggle, Sequence };
 
+// Parameter directives need the aim loop running. Only input injection takes
+// exclusive keyboard/mouse ownership; the scheduler's waits stay nonblocking.
+inline bool exclusiveOutput(ActionType type) {
+    switch (type) {
+    case ActionType::KeyDown: case ActionType::KeyUp: case ActionType::KeyPress:
+    case ActionType::MouseDown: case ActionType::MouseUp: case ActionType::MouseClick:
+    case ActionType::MouseMove: case ActionType::Wheel: case ActionType::Text:
+    case ActionType::AbsoluteMove: case ActionType::SmoothMove: case ActionType::CurveMove:
+    case ActionType::MoveToTarget: case ActionType::MoveToPrediction: return true;
+    default: return false;
+    }
+}
+
 struct Action {
     ActionType type = ActionType::Delay;
     std::string key = "Key1";

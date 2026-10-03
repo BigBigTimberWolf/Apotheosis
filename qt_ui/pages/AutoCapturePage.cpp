@@ -53,6 +53,9 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
         QString::fromUtf8("\xe5\x90\xaf\xe7\x94\xa8\xe8\x87\xaa\xe5\x8a\xa8\xe9\x87\x87\xe9\x9b\x86"),
         false, m_enabled));
     m_configHint = new QLabel;
+    tcl->addWidget(FormKit::toggleRow(QStringLiteral("仅在自动扳机实际开火时采集"), false, m_triggerOnly));
+    m_triggerOnly->setObjectName("autoCaptureTriggerOnly");
+    m_triggerOnly->setToolTip(QStringLiteral("自动扳机成功发送开火按下后，按采集间隔保存对应画面和标签。此模式以实际开火为条件，置信度门槛和强制采集键暂不使用。"));
     m_configHint->setObjectName("autoCaptureConfigHint");
     m_configHint->setWordWrap(true);
     tcl->addWidget(m_configHint);
@@ -171,6 +174,10 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
         connect(w, sig, this, &AutoCapturePage::saveToConfig);
     };
     wire_save(m_enabled,       &ToggleSwitch::toggled);
+    wire_save(m_triggerOnly,   &ToggleSwitch::toggled);
+    connect(m_triggerOnly, &ToggleSwitch::toggled, this, [hSl, lSl](bool only) {
+        hSl->setEnabled(!only); lSl->setEnabled(!only);
+    });
     wire_save(m_useHigh,       &ToggleSwitch::toggled);
     wire_save(m_useLow,        &ToggleSwitch::toggled);
     wire_save(m_anyDetection,  &ToggleSwitch::toggled);
@@ -220,6 +227,7 @@ void AutoCapturePage::onLoadConfig()
     std::lock_guard<std::recursive_mutex> lk(configMutex);
 
     m_enabled->setChecked(config.auto_capture_enabled);
+    m_triggerOnly->setChecked(config.auto_capture_trigger_only);
     m_useHigh->setChecked(config.auto_capture_use_high);
     m_highConf->setValue(static_cast<double>(config.auto_capture_high_conf));
     m_useLow->setChecked(config.auto_capture_use_low);
@@ -241,6 +249,7 @@ void AutoCapturePage::saveToConfig()
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         config.auto_capture_enabled     = m_enabled->isChecked();
+        config.auto_capture_trigger_only = m_triggerOnly->isChecked();
         config.auto_capture_use_high    = m_useHigh->isChecked();
         config.auto_capture_high_conf   = static_cast<float>(m_highConf->value());
         config.auto_capture_use_low     = m_useLow->isChecked();
@@ -259,9 +268,18 @@ void AutoCapturePage::saveToConfig()
 
 void AutoCapturePage::refreshConfigHint()
 {
+    const bool triggerOnly = m_triggerOnly->isChecked();
+    for (auto* widget : {static_cast<QWidget*>(m_useHigh), static_cast<QWidget*>(m_highConf),
+                        static_cast<QWidget*>(m_useLow), static_cast<QWidget*>(m_lowConf),
+                        static_cast<QWidget*>(m_anyDetection), static_cast<QWidget*>(m_forceKeys)})
+        widget->setEnabled(!triggerOnly);
     if (!m_enabled->isChecked())
     {
         m_configHint->setText(QString::fromUtf8("自动采集已关闭。"));
+        return;
+    }
+    if (triggerOnly) {
+        m_configHint->setText(QStringLiteral("等待自动扳机成功发送开火；按采集间隔保存对应画面与标签。请同时启用所用热键的自动扳机。"));
         return;
     }
     const bool force = !splitKeysQ(m_forceKeys->text()).empty();
