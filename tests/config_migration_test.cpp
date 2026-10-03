@@ -530,6 +530,10 @@ int main()
         saved.hotkeys[0].recovered_pid.segmentEnabled = true;
         saved.hotkeys[0].recovered_pid.segment = 2.0f;
         saved.hotkeys[0].recovered_scope_pid.kpX = 0.31f;
+        saved.hotkeys[0].recovered_pid.hardDeadzoneX = 4.5f;
+        saved.hotkeys[0].recovered_pid.hardDeadzoneY = 2.5f;
+        saved.hotkeys[0].recovered_secondary_pid.hardDeadzoneX = 6.0f;
+        saved.hotkeys[0].recovered_scope_pid.hardDeadzoneY = 7.5f;
         check(saved.saveConfig("x_offset_roundtrip.ini"), "X 偏移能保存");
         Config loaded;
         check(loaded.loadConfig("x_offset_roundtrip.ini"), "X 偏移能回读");
@@ -548,6 +552,12 @@ int main()
                   std::abs(loaded.hotkeys[0].recovered_pid.segment - 2.0f) < 1e-4f &&
                   std::abs(loaded.hotkeys[0].recovered_scope_pid.kpX - 0.31f) < 1e-4f,
                   "移植版 PID 默认档和开镜档可保存回读");
+        if (!loaded.hotkeys.empty())
+            check(std::abs(loaded.hotkeys[0].recovered_pid.hardDeadzoneX - 4.5f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].recovered_pid.hardDeadzoneY - 2.5f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].recovered_secondary_pid.hardDeadzoneX - 6.0f) < 1e-4f &&
+                  std::abs(loaded.hotkeys[0].recovered_scope_pid.hardDeadzoneY - 7.5f) < 1e-4f,
+                  "XY 轴死区在三套 PID 档中都能保存回读");
     }
 
     std::printf("\n[5] ★★ 已删除的瞄准控制键: 不报错、不污染活着的键\n");

@@ -839,6 +839,8 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_pid.kdY = static_cast<float>(get_double(sec, "recovered_pid_kd_y", hk.recovered_pid.kdY));
             hk.recovered_pid.deadzoneX = static_cast<float>(get_double(sec, "recovered_pid_deadzone_x", hk.recovered_pid.deadzoneX));
             hk.recovered_pid.deadzoneY = static_cast<float>(get_double(sec, "recovered_pid_deadzone_y", hk.recovered_pid.deadzoneY));
+            hk.recovered_pid.hardDeadzoneX = static_cast<float>(get_double(sec, "recovered_pid_hard_deadzone_x", hk.recovered_pid.hardDeadzoneX));
+            hk.recovered_pid.hardDeadzoneY = static_cast<float>(get_double(sec, "recovered_pid_hard_deadzone_y", hk.recovered_pid.hardDeadzoneY));
             hk.recovered_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_pid_ff_x", hk.recovered_pid.feedforwardX));
             hk.recovered_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_pid_ff_y", hk.recovered_pid.feedforwardY));
             hk.recovered_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_pid_smooth_max_pixel", hk.recovered_pid.smoothMaxPixel));
@@ -866,6 +868,8 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_secondary_pid.kdY = static_cast<float>(get_double(sec, "recovered_secondary_pid_kd_y", hk.recovered_secondary_pid.kdY));
             hk.recovered_secondary_pid.deadzoneX = static_cast<float>(get_double(sec, "recovered_secondary_pid_deadzone_x", hk.recovered_secondary_pid.deadzoneX));
             hk.recovered_secondary_pid.deadzoneY = static_cast<float>(get_double(sec, "recovered_secondary_pid_deadzone_y", hk.recovered_secondary_pid.deadzoneY));
+            hk.recovered_secondary_pid.hardDeadzoneX = static_cast<float>(get_double(sec, "recovered_secondary_pid_hard_deadzone_x", hk.recovered_secondary_pid.hardDeadzoneX));
+            hk.recovered_secondary_pid.hardDeadzoneY = static_cast<float>(get_double(sec, "recovered_secondary_pid_hard_deadzone_y", hk.recovered_secondary_pid.hardDeadzoneY));
             hk.recovered_secondary_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_secondary_pid_ff_x", hk.recovered_secondary_pid.feedforwardX));
             hk.recovered_secondary_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_secondary_pid_ff_y", hk.recovered_secondary_pid.feedforwardY));
             hk.recovered_secondary_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_secondary_pid_smooth_max_pixel", hk.recovered_secondary_pid.smoothMaxPixel));
@@ -882,6 +886,8 @@ bool Config::loadConfig(const std::string& filename)
             hk.recovered_scope_pid.kdY = static_cast<float>(get_double(sec, "recovered_scope_pid_kd_y", hk.recovered_scope_pid.kdY));
             hk.recovered_scope_pid.deadzoneX = static_cast<float>(get_double(sec, "recovered_scope_pid_deadzone_x", hk.recovered_scope_pid.deadzoneX));
             hk.recovered_scope_pid.deadzoneY = static_cast<float>(get_double(sec, "recovered_scope_pid_deadzone_y", hk.recovered_scope_pid.deadzoneY));
+            hk.recovered_scope_pid.hardDeadzoneX = static_cast<float>(get_double(sec, "recovered_scope_pid_hard_deadzone_x", hk.recovered_scope_pid.hardDeadzoneX));
+            hk.recovered_scope_pid.hardDeadzoneY = static_cast<float>(get_double(sec, "recovered_scope_pid_hard_deadzone_y", hk.recovered_scope_pid.hardDeadzoneY));
             hk.recovered_scope_pid.feedforwardX = static_cast<float>(get_double(sec, "recovered_scope_pid_ff_x", hk.recovered_scope_pid.feedforwardX));
             hk.recovered_scope_pid.feedforwardY = static_cast<float>(get_double(sec, "recovered_scope_pid_ff_y", hk.recovered_scope_pid.feedforwardY));
             hk.recovered_scope_pid.smoothMaxPixel = static_cast<float>(get_double(sec, "recovered_scope_pid_smooth_max_pixel", hk.recovered_scope_pid.smoothMaxPixel));
@@ -1186,6 +1192,7 @@ bool Config::loadConfig(const std::string& filename)
             a.kpY != b.kpY || a.kiY != b.kiY || a.kdY != b.kdY ||
             a.followX != b.followX || a.followY != b.followY ||
             a.deadzoneX != b.deadzoneX || a.deadzoneY != b.deadzoneY ||
+            a.hardDeadzoneX != b.hardDeadzoneX || a.hardDeadzoneY != b.hardDeadzoneY ||
             a.feedforwardX != b.feedforwardX || a.feedforwardY != b.feedforwardY ||
             a.smoothMaxPixel != b.smoothMaxPixel || a.segmentEnabled != b.segmentEnabled ||
             a.segment != b.segment;
@@ -1442,6 +1449,8 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_pid_kd_y = " << recovered.kdY << "\n"
              << "recovered_pid_deadzone_x = " << recovered.deadzoneX << "\n"
              << "recovered_pid_deadzone_y = " << recovered.deadzoneY << "\n"
+             << "recovered_pid_hard_deadzone_x = " << recovered.hardDeadzoneX << "\n"
+             << "recovered_pid_hard_deadzone_y = " << recovered.hardDeadzoneY << "\n"
              << "recovered_pid_ff_x = " << recovered.feedforwardX << "\n"
              << "recovered_pid_ff_y = " << recovered.feedforwardY << "\n"
              << "recovered_pid_smooth_max_pixel = " << recovered.smoothMaxPixel << "\n"
@@ -1462,6 +1471,8 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_secondary_pid_kd_y = " << secondary.kdY << "\n"
              << "recovered_secondary_pid_deadzone_x = " << secondary.deadzoneX << "\n"
              << "recovered_secondary_pid_deadzone_y = " << secondary.deadzoneY << "\n"
+             << "recovered_secondary_pid_hard_deadzone_x = " << secondary.hardDeadzoneX << "\n"
+             << "recovered_secondary_pid_hard_deadzone_y = " << secondary.hardDeadzoneY << "\n"
              << "recovered_secondary_pid_ff_x = " << secondary.feedforwardX << "\n"
              << "recovered_secondary_pid_ff_y = " << secondary.feedforwardY << "\n"
              << "recovered_secondary_pid_smooth_max_pixel = " << secondary.smoothMaxPixel << "\n"
@@ -1478,6 +1489,8 @@ bool Config::saveConfig(const std::string& filename)
              << "recovered_scope_pid_kd_y = " << recoveredScope.kdY << "\n"
              << "recovered_scope_pid_deadzone_x = " << recoveredScope.deadzoneX << "\n"
              << "recovered_scope_pid_deadzone_y = " << recoveredScope.deadzoneY << "\n"
+             << "recovered_scope_pid_hard_deadzone_x = " << recoveredScope.hardDeadzoneX << "\n"
+             << "recovered_scope_pid_hard_deadzone_y = " << recoveredScope.hardDeadzoneY << "\n"
              << "recovered_scope_pid_ff_x = " << recoveredScope.feedforwardX << "\n"
              << "recovered_scope_pid_ff_y = " << recoveredScope.feedforwardY << "\n"
              << "recovered_scope_pid_smooth_max_pixel = " << recoveredScope.smoothMaxPixel << "\n"

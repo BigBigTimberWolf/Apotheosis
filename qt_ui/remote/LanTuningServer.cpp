@@ -100,6 +100,8 @@ void pidFields(Fields& f, control::RecoveredPidConfig& p, const QString& prefix,
     f.number(prefix+"ffY", "速度前馈 FF · Y", section, p.feedforwardY, 0, 10, .0005);
     f.number(prefix+"deadzoneX", "死区半径 · X", section, p.deadzoneX, 0, 200, .5);
     f.number(prefix+"deadzoneY", "死区半径 · Y", section, p.deadzoneY, 0, 200, .5);
+    f.number(prefix+"hardDeadzoneX", "XY 轴死区 · X（内部不输出）", section, p.hardDeadzoneX, 0, 200, .5);
+    f.number(prefix+"hardDeadzoneY", "XY 轴死区 · Y（内部不输出）", section, p.hardDeadzoneY, 0, 200, .5);
     f.number(prefix+"followX", "跟随补偿 · X", section, p.followX, 0, 50, .1);
     f.number(prefix+"followY", "跟随补偿 · Y", section, p.followY, 0, 50, .1);
     f.number(prefix+"maxPixel", "单帧限幅", section, p.smoothMaxPixel, 0, 1000, 1);

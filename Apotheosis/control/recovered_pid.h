@@ -16,6 +16,11 @@ struct RecoveredPidConfig
     float kpX = 0.4f, kiX = 0.02f, kdX = 0.12f;
     float kpY = 0.4f, kiY = 0.02f, kdY = 0.12f;
     float deadzoneX = 5.0f, deadzoneY = 5.0f;
+    // Extra per-axis free-wiggle zone (separate from the radius above, which is
+    // left exactly as it was). While |error| on an axis is within this value the
+    // axis outputs nothing at all, so the crosshair can move freely inside it.
+    // X and Y are judged independently; 0 = off.
+    float hardDeadzoneX = 0.0f, hardDeadzoneY = 0.0f;
     // FF input is selected track velocity with successful-move feedback.
     float feedforwardX = 0.0f, feedforwardY = 0.0f;
     float smoothMaxPixel = 50.0f;

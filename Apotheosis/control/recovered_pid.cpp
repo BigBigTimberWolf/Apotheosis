@@ -11,6 +11,7 @@ struct AxisTune
 {
     float derivAlpha = 0.0f;     // low-pass coefficient for the D term (A)
     float deadzone = 0.0f;       // per-axis deadzone radius
+    float hardDeadzone = 0.0f;   // free-wiggle zone: no output at all inside (0 = off)
     float integralCeiling = 0.0f;// decoupled integral authority limit (B)
     float satLimit = 0.0f;       // PID output clip = smoothMaxPixel (B)
 };
@@ -39,7 +40,10 @@ float axisPid(float error, float kp, float ki, float kd, float dt,
     else dFilter = rawD;
     previous = error;
 
-    const bool inDeadzone = tune.deadzone > 0.0f && std::abs(error) < tune.deadzone;
+    // The free-wiggle zone also lets the integral bleed, so nothing is wound up
+    // to kick the crosshair the moment it leaves the zone.
+    const bool inDeadzone = (tune.deadzone > 0.0f && std::abs(error) < tune.deadzone) ||
+                            (tune.hardDeadzone > 0.0f && std::abs(error) <= tune.hardDeadzone);
     if (ki <= 0.0f)
     {
         integral = 0.0f; // pure-P tune: never any integral action
@@ -94,6 +98,8 @@ void RecoveredPid::setConfig(const RecoveredPidConfig& config)
     clean.kdY = finiteRange(clean.kdY, 0.12f, 10.0f);
     clean.deadzoneX = finiteRange(clean.deadzoneX, 5.0f, 200.0f);
     clean.deadzoneY = finiteRange(clean.deadzoneY, 5.0f, 200.0f);
+    clean.hardDeadzoneX = finiteRange(clean.hardDeadzoneX, 0.0f, 200.0f);
+    clean.hardDeadzoneY = finiteRange(clean.hardDeadzoneY, 0.0f, 200.0f);
     clean.feedforwardX = finiteRange(clean.feedforwardX, 0.0f, 10.0f);
     clean.feedforwardY = finiteRange(clean.feedforwardY, 0.0f, 10.0f);
     clean.smoothMaxPixel = finiteRange(clean.smoothMaxPixel, 50.0f, 1000.0f);
@@ -137,10 +143,11 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
     constexpr float kDerivativeCutoffHz = 20.0f;
     constexpr float kIntegralCeilingFraction = 0.1f;
     const float derivAlpha = dt / (dt + 1.0f / (2.0f * 3.14159265f * kDerivativeCutoffHz));
-    auto tuneFor = [&](float deadzone) {
+    auto tuneFor = [&](float deadzone, float hardDeadzone) {
         AxisTune tune;
         tune.derivAlpha = derivAlpha;
         tune.deadzone = deadzone;
+        tune.hardDeadzone = hardDeadzone;
         tune.integralCeiling = kIntegralCeilingFraction * maxPixel;
         tune.satLimit = maxPixel;
         return tune;
@@ -152,14 +159,16 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
         previousX_ = ex;
         dFilterX_ = ffFilterX_ = 0.0f;
     } else px = axisPid(ex, config_.kpX, config_.kiX, config_.kdX, dt,
-                       config_.preserveIntegralOnReverse, tuneFor(config_.deadzoneX),
+                       config_.preserveIntegralOnReverse,
+                       tuneFor(config_.deadzoneX, config_.hardDeadzoneX),
                        integralX_, previousX_, dFilterX_, rawDx);
     if (config_.maskY) {
         integralY_ = carryY_ = 0.0f;
         previousY_ = ey;
         dFilterY_ = ffFilterY_ = 0.0f;
     } else py = axisPid(ey, config_.kpY, config_.kiY, config_.kdY, dt,
-                       config_.preserveIntegralOnReverse, tuneFor(config_.deadzoneY),
+                       config_.preserveIntegralOnReverse,
+                       tuneFor(config_.deadzoneY, config_.hardDeadzoneY),
                        integralY_, previousY_, dFilterY_, rawDy);
     result.pid = { px, py };
     result.integral = { integralX_, integralY_ };
@@ -191,6 +200,16 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
         else if (dy > 0.0f && std::abs(ey) < dy)
             py *= band(std::abs(ey) / dy);
     }
+    // Free-wiggle zone (the extra X/Y zone): judged per axis AFTER the existing
+    // deadzone above, which is left exactly as it was. Inside it that axis
+    // outputs nothing (PID, feedforward and the fractional carry are all cleared).
+    // It is deliberately not bypassed by the auto-fire skipDeadzone rule.
+    const bool holdX = !config_.maskX && config_.hardDeadzoneX > 0.0f &&
+                       std::abs(ex) <= config_.hardDeadzoneX;
+    const bool holdY = !config_.maskY && config_.hardDeadzoneY > 0.0f &&
+                       std::abs(ey) <= config_.hardDeadzoneY;
+    if (holdX) px = 0.0f;
+    if (holdY) py = 0.0f;
     result.afterDeadzone = { px, py };
 
     // C: low-pass the velocity feedforward so raising FF stops injecting the
@@ -203,6 +222,10 @@ RecoveredPidStep RecoveredPid::update(Vec2 error, Vec2 trackedFeedforward,
         ? std::max(0.0f, config_.feedforwardY) * static_cast<float>(trackedFeedforward.y) : 0.0f;
     ffFilterX_ += ffAlpha * (rawFx - ffFilterX_);
     ffFilterY_ += ffAlpha * (rawFy - ffFilterY_);
+    // Inside the free-wiggle zone the feedforward is cleared too (and its filter
+    // restarts from zero) so it ramps in smoothly on leaving instead of kicking.
+    if (holdX) ffFilterX_ = carryX_ = 0.0f;
+    if (holdY) ffFilterY_ = carryY_ = 0.0f;
     const float fx = ffFilterX_;
     const float fy = ffFilterY_;
     const float segment = config_.segmentEnabled && std::isfinite(config_.segment)

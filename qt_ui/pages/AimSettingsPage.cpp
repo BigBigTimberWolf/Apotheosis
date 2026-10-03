@@ -1062,6 +1062,7 @@ void AimSettingsPage::buildRecoveredControllerCard()
         { "KdX", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
         { "FfX", "速度前馈 FF", 0.0, 10.0, 0.0005, 0.0 },
         { "DeadzoneX", "死区半径", 0.0, 200.0, 0.5, 5.0 },
+        { "HardDeadzoneX", "XY 轴死区", 0.0, 200.0, 0.5, 0.0 },
         { "FollowX", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
     };
     const Row yRows[] = {
@@ -1070,6 +1071,7 @@ void AimSettingsPage::buildRecoveredControllerCard()
         { "KdY", "微分 Kd", 0.0, 10.0, 0.01, 0.12 },
         { "FfY", "速度前馈 FF", 0.0, 10.0, 0.0005, 0.0 },
         { "DeadzoneY", "死区半径", 0.0, 200.0, 0.5, 5.0 },
+        { "HardDeadzoneY", "XY 轴死区", 0.0, 200.0, 0.5, 0.0 },
         { "FollowY", "跟随补偿", 0.0, 50.0, 0.1, 0.0 },
     };
 
@@ -1094,6 +1096,8 @@ void AimSettingsPage::buildRecoveredControllerCard()
             spin->setValue(row.value);
             if (suffix == QStringLiteral("KiX") || suffix == QStringLiteral("KiY"))
                 spin->setToolTip(QString::fromUtf8(u8"积累持续瞄准误差，积分上限等于 Ki。开启准星找色时保留反向旧积分。二次移植版在该轴 Ki 数值变化时清空该轴旧积分。"));
+            if (suffix == QStringLiteral("HardDeadzoneX") || suffix == QStringLiteral("HardDeadzoneY"))
+                spin->setToolTip(QString::fromUtf8(u8"额外的自由死区：误差落在这个像素范围内时，该轴完全不输出，准星可以在里面随意晃动；X、Y 各自独立判断，0 关闭。与上面的“死区半径”互不影响（死区半径只是把输出按比例减弱）。自动扳机的死区绕过规则不会绕过它。"));
             if (suffix == QStringLiteral("FollowX") || suffix == QStringLiteral("FollowY"))
                 spin->setToolTip(QString::fromUtf8(u8"仅根据原瞄点与准星的持续误差积累补偿，不使用鼠标换算比例。越过原瞄点保留补偿并逐步调整；利用背景移动判断目标变向，确认后立即清空该轴旧补偿。背景不可靠时不触发变向清空。0 关闭，数值越大建立越快，过大仍可能过冲。"));
             if (suffix == QStringLiteral("FfX") || suffix == QStringLiteral("FfY"))
@@ -1106,12 +1110,12 @@ void AimSettingsPage::buildRecoveredControllerCard()
             addNumeric(yRows[i], i + 1, 1);
         }
 
-        grid->addWidget(makeSectionTitle(QString::fromUtf8(u8"功能与输出")), 7, 0, 1, 2);
-        addNumeric({ "MaxPixel", "单帧限幅", 0.0, 1000.0, 1.0, 50.0 }, 8, 0);
-        addNumeric({ "Segment", "分段数", 1.0, 10.0, 0.1, 3.0 }, 8, 1);
+        grid->addWidget(makeSectionTitle(QString::fromUtf8(u8"功能与输出")), 8, 0, 1, 2);
+        addNumeric({ "MaxPixel", "单帧限幅", 0.0, 1000.0, 1.0, 50.0 }, 9, 0);
+        addNumeric({ "Segment", "分段数", 1.0, 10.0, 0.1, 3.0 }, 9, 1);
         auto* check = new QCheckBox(QString::fromUtf8(u8"启用自定义分段数（关闭时除以 3）"));
         check->setObjectName(prefix + "SegmentEnabled");
-        grid->addWidget(check, 9, 0, 1, 2);
+        grid->addWidget(check, 10, 0, 1, 2);
         targetLayout->addLayout(grid);
     };
     addSet(layout, "recovered", QString::fromUtf8(u8"默认参数"));
@@ -1130,9 +1134,11 @@ void AimSettingsPage::buildRecoveredControllerCard()
             pid.kpX = read(prefix + "KpX"); pid.kiX = read(prefix + "KiX");
             pid.kdX = read(prefix + "KdX"); pid.feedforwardX = read(prefix + "FfX");
             pid.deadzoneX = read(prefix + "DeadzoneX");
+            pid.hardDeadzoneX = read(prefix + "HardDeadzoneX");
             pid.kpY = read(prefix + "KpY"); pid.kiY = read(prefix + "KiY");
             pid.kdY = read(prefix + "KdY"); pid.feedforwardY = read(prefix + "FfY");
             pid.deadzoneY = read(prefix + "DeadzoneY");
+            pid.hardDeadzoneY = read(prefix + "HardDeadzoneY");
             pid.smoothMaxPixel = read(prefix + "MaxPixel");
             pid.followX = read(prefix + "FollowX");
             pid.followY = read(prefix + "FollowY");
@@ -1789,8 +1795,10 @@ void AimSettingsPage::reloadProfileToUi()
                 };
                 set("KpX", pid.kpX); set("KiX", pid.kiX); set("KdX", pid.kdX);
                 set("FfX", pid.feedforwardX); set("DeadzoneX", pid.deadzoneX);
+                set("HardDeadzoneX", pid.hardDeadzoneX);
                 set("KpY", pid.kpY); set("KiY", pid.kiY); set("KdY", pid.kdY);
                 set("FfY", pid.feedforwardY); set("DeadzoneY", pid.deadzoneY);
+                set("HardDeadzoneY", pid.hardDeadzoneY);
                 set("MaxPixel", pid.smoothMaxPixel); set("Segment", pid.segment);
                 set("FollowX", pid.followX);
                 set("FollowY", pid.followY);

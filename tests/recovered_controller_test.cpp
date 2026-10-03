@@ -616,5 +616,77 @@ int main()
         check(p.update({8,0},{},0.004).afterDeadzone.x>0.0,
               "output ramps back up toward the deadzone edge");
     }
+    // Extra XY free-wiggle zone. Off (0) must leave every output identical to a
+    // config that never heard of it, and the existing deadzone untouched.
+    {
+        RecoveredPidConfig base; base.kpX=base.kpY=1; base.kiX=base.kiY=.3f;
+        base.kdX=base.kdY=.1f; base.feedforwardX=base.feedforwardY=.5f;
+        base.deadzoneX=base.deadzoneY=8; base.smoothMaxPixel=200;
+        base.segmentEnabled=true; base.segment=2;
+        RecoveredPidConfig explicitOff=base; explicitOff.hardDeadzoneX=explicitOff.hardDeadzoneY=0;
+        RecoveredPid a,b; a.setConfig(base); b.setConfig(explicitOff);
+        bool same=true;
+        for(int n=0;n<80;++n){
+            const Vec2 e{6.0*std::sin(n*.3)+5, 4.0*std::cos(n*.2)-3};
+            const auto sa=a.update(e,{20,-10},0.004), sb=b.update(e,{20,-10},0.004);
+            same &= sa.counts.x==sb.counts.x && sa.counts.y==sb.counts.y &&
+                    sa.afterDeadzone.x==sb.afterDeadzone.x && sa.afterDeadzone.y==sb.afterDeadzone.y;
+        }
+        check(same,"XY free-wiggle zone off (0) leaves every output identical");
+    }
+    {
+        RecoveredPidConfig c; c.kpX=c.kpY=2; c.kiX=c.kiY=0; c.kdX=c.kdY=0;
+        c.deadzoneX=c.deadzoneY=0; c.smoothMaxPixel=1000; c.segmentEnabled=true; c.segment=1;
+        c.hardDeadzoneX=5; c.hardDeadzoneY=3;
+        RecoveredPid p; p.setConfig(c);
+        // Axes are judged independently: X inside its zone, Y outside its own.
+        auto s=p.update({4,20},{},0.004);
+        check(s.counts.x==0 && s.afterDeadzone.x==0.0 && s.counts.y!=0 && s.afterDeadzone.y>0.0,
+              "XY free-wiggle zone is judged per axis (X inside, Y outside)");
+        s=p.update({20,2},{},0.004);
+        check(s.counts.x!=0 && s.counts.y==0,"XY free-wiggle zone is judged per axis (Y inside, X outside)");
+        s=p.update({5,3},{},0.004); // exactly on the edge counts as inside
+        check(s.counts.x==0 && s.counts.y==0,"the zone edge itself is inside the free-wiggle zone");
+        s=p.update({6,4},{},0.004);
+        check(s.counts.x!=0 && s.counts.y!=0,"just outside the zone the axes output normally again");
+    }
+    {
+        // Inside the zone nothing leaks: not the integer carry, not the feedforward,
+        // not a wound-up integral.
+        RecoveredPidConfig c; c.kpX=c.kpY=.3f; c.kiX=c.kiY=2; c.kdX=c.kdY=0;
+        c.feedforwardX=c.feedforwardY=1; c.deadzoneX=c.deadzoneY=0; c.smoothMaxPixel=1000;
+        c.segmentEnabled=true; c.segment=1; c.preserveIntegralOnReverse=true;
+        c.hardDeadzoneX=c.hardDeadzoneY=6;
+        RecoveredPid p; p.setConfig(c);
+        double integralOutside=0;
+        for(int n=0;n<60;++n){ integralOutside=p.update({20,20},{0,0},0.004).integral.x; }
+        check(integralOutside>0.0,"integral builds outside the zone");
+        RecoveredPidStep inside;
+        for(int n=0;n<120;++n) inside=p.update({2,2},{300,300},0.004);
+        check(inside.counts.x==0 && inside.counts.y==0 && inside.carry.x==0.0 && inside.carry.y==0.0,
+              "inside the zone: no counts and no carried fraction, even with feedforward");
+        check(inside.integral.x<integralOutside*0.2,"inside the zone the integral bleeds away");
+    }
+    {
+        // The existing deadzone range is untouched: an error outside the new zone
+        // but inside the old radius gets exactly the same shaping as without it.
+        RecoveredPidConfig withZone; withZone.kpX=withZone.kpY=1; withZone.kiX=withZone.kiY=0;
+        withZone.kdX=withZone.kdY=0; withZone.deadzoneX=withZone.deadzoneY=10;
+        withZone.smoothMaxPixel=1000; withZone.segmentEnabled=true; withZone.segment=1;
+        RecoveredPidConfig without=withZone; withZone.hardDeadzoneX=withZone.hardDeadzoneY=3;
+        RecoveredPid a,b; a.setConfig(withZone); b.setConfig(without);
+        const auto sa=a.update({8,7},{},0.004), sb=b.update({8,7},{},0.004);
+        check(sa.afterDeadzone.x==sb.afterDeadzone.x && sa.afterDeadzone.y==sb.afterDeadzone.y &&
+              sa.afterDeadzone.x>0.0,
+              "existing deadzone radius behaves identically outside the new zone");
+        // Out-of-range / non-finite values are sanitized, never trusted.
+        withZone.hardDeadzoneX=-5; withZone.hardDeadzoneY=std::nanf("");
+        a.setConfig(withZone);
+        check(a.config().hardDeadzoneX==0.0f && a.config().hardDeadzoneY==0.0f,
+              "invalid free-wiggle zone values are sanitized to off");
+        withZone.hardDeadzoneX=9999;
+        a.setConfig(withZone);
+        check(a.config().hardDeadzoneX==200.0f,"free-wiggle zone is clamped to its 0..200 range");
+    }
     return failures ? 1 : 0;
 }
