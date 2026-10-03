@@ -271,9 +271,12 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     pid_.setConfig(pidConfig);
     out.followStrength = {pidConfig.maskX ? 0.0 : pidConfig.followX,
                           pidConfig.maskY ? 0.0 : pidConfig.followY};
+    // A confirmed target maneuver (reversal/sudden stop, from the self-motion-
+    // compensated predict velocity) clears the follow lead immediately; normal
+    // movement across the aim point keeps it.
     const auto offset = compensator_.update(out.error,
         {double(config_.frameWidth), double(config_.frameHeight)},
-        out.followStrength, input.observationTimeUs, input.dtSec);
+        out.followStrength, input.observationTimeUs, input.dtSec, target.maneuver);
     // Compensation telemetry remains original-error rate, independent of FF.
     out.followMotion = compensator_.errorRate();
     // Restore the selected tracking record as the FF source. The user's

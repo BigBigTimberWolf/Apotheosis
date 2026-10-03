@@ -165,6 +165,7 @@ const char* followStateText(int state)
     case F::ErrorHolding: return "ERR-HOLD";
     case F::ErrorUnwinding: return "ERR-REDUCE";
     case F::ErrorDisabled: return "OFF";
+    case F::ErrorReversed: return "ERR-RESET";
     default: return "LEARN";
     }
 }

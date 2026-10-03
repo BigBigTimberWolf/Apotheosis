@@ -32,6 +32,19 @@ int main() {
     offset=c.update({0,5},{416,416},{10,10},7000000,.01);
     check(offset.x<0, "zero error neither reverses nor clears the rebuilt lead");
 
+    // Restored follow-clear: a confirmed maneuver (reversed.x != 0) clears that
+    // axis's lead in one frame, while the axis with no maneuver flag keeps its
+    // lead. The maneuver signal comes from the self-motion-compensated predict
+    // velocity, so normal aim-point crossings (no flag) never trigger it.
+    c.reset();
+    for (int n=0; n<200; ++n)
+        offset=c.update({5,5},{416,416},{10,10},12000000+n*10000,.01);
+    const double keepY=offset.y;
+    offset=c.update({5,5},{416,416},{10,10},14000000,.01,{1,0});
+    check(std::abs(offset.x)<1.0 && offset.y>=keepY*0.9 &&
+          c.stateX()==FollowCompensator::ErrorReversed,
+          "a confirmed maneuver clears that axis lead at once, other axis kept");
+
     c.reset();
     for (int n=0; n<200; ++n) {
         offset=c.update({5,0},{416,416},{10,0},5000000+n*10000,.01);

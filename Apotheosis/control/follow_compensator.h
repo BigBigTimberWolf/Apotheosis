@@ -7,18 +7,19 @@
 
 namespace control {
 
-// Learns lead from original aimpoint error. A sustained direction flip only
-// restarts persistence and unwinds the opposite error gradually; crossing the
-// aimpoint preserves the learned and applied lead.
+// Learns lead from original aimpoint error. Crossing the aim point during normal
+// movement preserves the learned and applied lead; a confirmed target maneuver
+// (reversal or sudden stop, supplied in `reversed`) clears that axis's lead
+// immediately so it does not linger past the turn or on a stopped target.
 class FollowCompensator
 {
 public:
     // Preserve old recording values; new recordings use explicit error states.
     enum State { Learning, Checking, Reversed, Stopped, Preset, Remembered, Uncertain, Burst,
-                 ErrorLearning, ErrorHolding, ErrorUnwinding, ErrorDisabled };
+                 ErrorLearning, ErrorHolding, ErrorUnwinding, ErrorDisabled, ErrorReversed };
 
     Vec2 update(Vec2 error, Vec2 frameSize, Vec2 strength,
-                int64_t observationUs, double controlDt)
+                int64_t observationUs, double controlDt, Vec2 reversed = {})
     {
         if (!finite(error) || !finite(frameSize) || frameSize.x <= 0.0 || frameSize.y <= 0.0 ||
             !std::isfinite(controlDt) || controlDt <= 0.0) {
@@ -51,8 +52,15 @@ public:
             errorRate_ += (rawRate - errorRate_) * rateAlpha;
             previousError_ = error;
             const double dt = std::clamp(imageDt, 0.000001, 0.05);
-            learn(x_,error.x,frameSize.x,strength.x,dt);
-            learn(y_,error.y,frameSize.y,strength.y,dt);
+            // A confirmed maneuver clears that axis's lead at once (reseeding from
+            // the current error); otherwise learn normally, which preserves lead
+            // through an ordinary aim-point crossing.
+            auto advance = [&](Axis& a, double e, double extent, double gain, bool reverse) {
+                if (reverse && gain > 0.0) { a = {}; seed(a, e, gain); a.state = ErrorReversed; }
+                else learn(a, e, extent, gain, dt);
+            };
+            advance(x_, error.x, frameSize.x, strength.x, reversed.x != 0.0);
+            advance(y_, error.y, frameSize.y, strength.y, reversed.y != 0.0);
             previousUs_ = observationUs;
         }
         auto apply = [&](Axis& axis) {

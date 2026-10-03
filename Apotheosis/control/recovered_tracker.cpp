@@ -124,11 +124,15 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
         state.track.velocity = {};
 
     // Separate maneuver-aware velocity for aim-point extrapolation only (the
-    // frozen FF `velocity` above is untouched). Built from pure observed screen
-    // motion so the lead reaches its ideal value on the first frame that reveals
-    // a reversal, sudden stop, or new target — the 1-frame observation floor.
+    // frozen FF `velocity` above is untouched). It is built from the SAME self-
+    // motion-compensated velocity as FF (observed image motion minus the moves we
+    // sent) so that swinging the view across a still target is not read as target
+    // motion -> no overshoot. It snaps on the first frame that reveals a reversal,
+    // sudden stop, or new target, and reports that maneuver so the follow
+    // compensator can clear its lead immediately.
     constexpr double steadyAlpha = 0.4; // baked: smooth when steady, auto-snaps on maneuvers
-    auto predictAxis = [&](double pv, double raw, double size, bool xAxis) {
+    auto predictAxis = [&](double pv, double raw, double size, bool xAxis, bool& maneuver) {
+        maneuver = false;
         if (!state.predictSeeded) return raw; // seed a new target immediately
         // noisePx is a per-frame pixel jitter budget; raw/pv are px/second, so
         // convert it to the same velocity units. Without the /velocityDt the gate
@@ -144,13 +148,15 @@ void updateMatched(RecoveredTracker::State& state, const Candidate& candidate,
         double alpha = steadyAlpha + (1.0 - steadyAlpha) * realness;
         const bool reversal = pv * raw < 0.0 && std::abs(raw) > noise;
         const bool suddenStop = std::abs(raw) <= noise && std::abs(pv) > 2.0 * noise;
-        if (reversal || suddenStop) alpha = 1.0;
+        if (reversal || suddenStop) { alpha = 1.0; maneuver = true; }
         return pv + alpha * innovation;
     };
+    bool maneuverX = false, maneuverY = false;
     state.track.predictVelocity = {
-        predictAxis(state.track.predictVelocity.x, rawVelocity.x, incoming.w, true),
-        predictAxis(state.track.predictVelocity.y, rawVelocity.y, incoming.h, false)
+        predictAxis(state.track.predictVelocity.x, compensated.x, incoming.w, true, maneuverX),
+        predictAxis(state.track.predictVelocity.y, compensated.y, incoming.h, false, maneuverY)
     };
+    state.track.maneuver = { maneuverX ? 1.0 : 0.0, maneuverY ? 1.0 : 0.0 };
     state.predictSeeded = true;
 
     state.lastObservation = incoming.center();
@@ -220,6 +226,7 @@ std::vector<RecoveredTrack> RecoveredTracker::update(
             tracks_[ti].track.velocity.x *= 0.74;
             tracks_[ti].track.velocity.y *= 0.68;
             tracks_[ti].track.predictVelocity = tracks_[ti].track.predictVelocity * 0.8;
+            tracks_[ti].track.maneuver = {}; // no observation -> no maneuver this frame
             tracks_[ti].firstVelocity = tracks_[ti].firstVelocity * 0.72;
         }
     std::erase_if(tracks_, [this](const State& state) {
@@ -362,6 +369,7 @@ std::vector<RecoveredTrack> RecoveredDualTracker::update(
         {
             published.velocity = motion[best].velocity;
             published.predictVelocity = motion[best].predictVelocity;
+            published.maneuver = motion[best].maneuver;
             used[best] = true;
         }
         visible.push_back(published);

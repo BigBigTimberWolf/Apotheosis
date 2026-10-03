@@ -19,6 +19,10 @@ struct RecoveredTrack
     // size-scaled noise gate keeps steady tracking smooth. The frozen FF path
     // keeps using `velocity`.
     Vec2 predictVelocity{};
+    // Per-axis one-shot flag: nonzero on the frame a reversal/sudden-stop is
+    // confirmed. The follow compensator uses it to clear its lead immediately
+    // (normal movement does not set it, so crossing the aim point is preserved).
+    Vec2 maneuver{};
     int missedFrames = 0;
 };
 
