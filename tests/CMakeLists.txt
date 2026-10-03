@@ -71,6 +71,68 @@ if(Qt6Widgets_FOUND)
     set_tests_properties(macro_rule_ui_test PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_macro_qt_bin}")
 endif()
+if(Qt6Widgets_FOUND)
+    # 宏编排页面：真实页面在离屏环境里按用户操作驱动（新建、触发方式、条件、动作），
+    # 并检查落盘的配置。页面依赖的全局（配置、引擎、热键屏蔽）用 macro_page_stubs/ 里的替身。
+    add_executable(macro_page_ui_test "${CMAKE_CURRENT_LIST_DIR}/macro_page_ui_test.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs/macro_page_stubs.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs/config/config_bridge.h"
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs/config/config_profiles.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/pages/MacroPage.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/pages/MacroPage.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroTriggerCard.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroTriggerCard.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroConditionList.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroConditionList.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroActionTimeline.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroActionTimeline.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroRuleEditor.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/MacroRuleEditor.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/FormKit.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/ToggleSwitch.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/CardWidget.cpp"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/CardWidget.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/IconFont.cpp")
+    # 替身目录必须排在最前，页面 include 的 Apotheosis.h / config_bridge.h 才会指向它们。
+    target_include_directories(macro_page_ui_test PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/macro_page_stubs" "${APP_SOURCE_ROOT}" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(macro_page_ui_test PRIVATE Qt6::Widgets)
+    target_compile_features(macro_page_ui_test PRIVATE cxx_std_20)
+    set_target_properties(macro_page_ui_test PROPERTIES AUTOMOC ON)
+    if(MSVC)
+        target_compile_options(macro_page_ui_test PRIVATE /utf-8 /Zc:char8_t-)
+    else()
+        target_compile_options(macro_page_ui_test PRIVATE -fno-char8_t)
+    endif()
+    add_test(NAME macro_page_ui_test COMMAND macro_page_ui_test)
+    get_target_property(_page_qt_core Qt6::Core IMPORTED_LOCATION_RELEASE)
+    if(_page_qt_core)
+        get_filename_component(_page_qt_bin "${_page_qt_core}" DIRECTORY)
+        set_tests_properties(macro_page_ui_test PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_page_qt_bin}")
+    else()
+        set_tests_properties(macro_page_ui_test PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
+    # 宏摘要文案与删除条件时的引用修正：纯逻辑，不创建控件。
+    add_executable(macro_summary_test "${CMAKE_CURRENT_LIST_DIR}/macro_summary_test.cpp")
+    target_include_directories(macro_summary_test PRIVATE "${APP_SOURCE_ROOT}" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_link_libraries(macro_summary_test PRIVATE Qt6::Widgets)
+    target_compile_features(macro_summary_test PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(macro_summary_test PRIVATE /utf-8 /Zc:char8_t-)
+    else()
+        target_compile_options(macro_summary_test PRIVATE -fno-char8_t)
+    endif()
+    add_test(NAME macro_summary_test COMMAND macro_summary_test)
+    if(_page_qt_core)
+        set_tests_properties(macro_summary_test PROPERTIES TIMEOUT 20
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_page_qt_bin}")
+    else()
+        set_tests_properties(macro_summary_test PROPERTIES TIMEOUT 20)
+    endif()
+endif()
 add_logic_test(ndi_latest_slot_test "${CMAKE_CURRENT_LIST_DIR}/ndi_latest_slot_test.cpp")
 add_logic_test(capture_card_caps_test "${APP_SOURCE_ROOT}/capture/tests/capture_card_caps_test.cpp")
 if(WIN32 AND OPENCV_LIB AND CUDAToolkit_FOUND)

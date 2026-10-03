@@ -1,5 +1,6 @@
 #include "MacroRuleEditor.h"
 #include "widgets/FormKit.h"
+#include "widgets/MacroUiCommon.h"
 #include <QComboBox>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -21,7 +22,7 @@ QDoubleSpinBox* real(){auto* w=new QDoubleSpinBox;w->setRange(-1000000000,100000
 MacroRuleEditor::MacroRuleEditor(QWidget* parent):QWidget(parent) {
     auto* layout=new QVBoxLayout(this);layout->setContentsMargins(0,0,0,0);
     event_=new QComboBox;for(const auto& c:macros::events())event_->addItem(q(c.label),q(c.id));
-    layout->addWidget(FormKit::fieldRow(QStringLiteral("触发事件"),event_));
+    eventRow_=FormKit::fieldRow(QStringLiteral("触发事件"),event_);layout->addWidget(eventRow_);
     auto* tabs=new QTabWidget;layout->addWidget(tabs);
     auto* panel=new QWidget;auto* body=new QVBoxLayout(panel);
     auto* help=new QLabel(QStringLiteral("默认全部条件同时满足。添加 AND / OR / NOT 等条件组，再把子条件的“父组编号”指向它，可组合嵌套逻辑。"));help->setWordWrap(true);body->addWidget(help);
@@ -62,14 +63,9 @@ MacroRuleEditor::MacroRuleEditor(QWidget* parent):QWidget(parent) {
     connect(settings_,&QTableWidget::itemChanged,this,[this](QTableWidgetItem* item){if(!loading_&&item->column()==1){program_.options[macros::settings()[item->row()].id]=item->text().toUtf8().toStdString();notify();}});
     connect(add,&QPushButton::clicked,this,[this]{if(program_.conditions.size()>=macros::maxConditions)return;program_.conditions.push_back({});rebuild();conditions_->selectRow(int(program_.conditions.size())-1);notify();});
     connect(remove,&QPushButton::clicked,this,[this]{const int r=conditions_->currentRow();if(r<0)return;
-        // Keep references stable by refusing deletion of a group in use.
-        for(const auto& c:program_.conditions)if(c.parent==r){runtime_->setPlainText(QStringLiteral("请先删除或移出这个组内的子条件。"));return;}
-        program_.conditions.erase(program_.conditions.begin()+r);for(auto& c:program_.conditions)if(c.parent>r)--c.parent;
-        for(auto& a:program_.actions)if(a.type==macros::ActionType::If||a.type==macros::ActionType::While||a.type==macros::ActionType::WaitCondition||a.type==macros::ActionType::Retry) {
-            if(a.a==r+1)a.a=-1;else if(a.a>r+1)--a.a;
-        }
-        for(auto& a:program_.actions)if(a.type==macros::ActionType::Jump){if(a.b==r+1)a.b=-1;else if(a.b>r+1)--a.b;}
-        const int cancel=macros::number(program_,"cancel_condition");if(cancel==r+1)program_.options["cancel_condition"]="-1";else if(cancel>r+1)program_.options["cancel_condition"]=std::to_string(cancel-1);
+        // Keeps references stable: refuses to delete a group that still has children,
+        // and repairs the condition numbers used by flow actions and the cancel condition.
+        if(!macro_ui::removeCondition(program_,r)){runtime_->setPlainText(QStringLiteral("请先删除或移出这个组内的子条件。"));return;}
         rebuild();notify();});
     connect(conditions_,&QTableWidget::itemSelectionChanged,this,[this]{if(!loading_)select();});
     for(auto* c:{metric_,comparison_})connect(c,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{commitCondition();});
@@ -94,4 +90,5 @@ void MacroRuleEditor::commitCondition(){if(loading_)return;const int r=condition
     auto& c=program_.conditions[r];c.metric=metric_->currentData().toString().toStdString();c.comparison=comparison_->currentData().toString().toStdString();
     c.value=value_->value();c.upper=upper_->value();c.classId=class_->value();c.parent=parent_->value()-1;c.text=text_->text().toUtf8().toStdString();for(int i=0;i<4;++i)c.region[i]=region_[i]->value();rebuild();notify();}
 void MacroRuleEditor::notify(){summary_->setText(q(macros::describeRule(program_)));if(changed)changed(program_);}
+void MacroRuleEditor::setEventRowVisible(bool visible){if(eventRow_)eventRow_->setVisible(visible);}
 void MacroRuleEditor::setRuntimeText(const QString& text){if(runtime_->toPlainText()!=text)runtime_->setPlainText(text);}

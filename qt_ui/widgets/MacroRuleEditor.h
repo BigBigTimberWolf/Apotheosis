@@ -8,12 +8,15 @@ public:
     explicit MacroRuleEditor(QWidget* parent=nullptr);
     void setProgram(const macros::Program& p);
     void setRuntimeText(const QString& text);
+    // The trigger card owns the event choice on the macro page; hide this copy there.
+    void setEventRowVisible(bool visible);
     std::function<void(const macros::Program&)> changed;
     std::function<void()> simulate;
 private:
     void rebuild();void select();void commitCondition();void notify();
     macros::Program program_;bool loading_=false;
     QComboBox *event_{},*metric_{},*comparison_{};
+    QWidget* eventRow_{};
     QTableWidget *conditions_{},*settings_{};
     QDoubleSpinBox *value_{},*upper_{};
     QSpinBox *class_{},*parent_{},*region_[4]{};
