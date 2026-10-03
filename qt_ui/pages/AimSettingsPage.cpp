@@ -49,6 +49,7 @@
 #include "widgets/TriggerTargetEditor.h"
 #include "widgets/NeuralCurveTrainer.h"
 #include "widgets/NeuralCurveFile.h"
+#include "widgets/XmCurveImport.h"
 #include "widgets/ToggleSwitch.h"
 
 namespace
@@ -1393,7 +1394,9 @@ void AimSettingsPage::buildTrajectoryCard()
         }
         reloadProfileToUi();
     };
-    connect(trainButton, &QPushButton::clicked, this, [this, applyNeural] {
+    // Opens the trainer for the current hotkey. With a path it also imports that
+    // ".xmcurve" file (another project's recorded strokes) and trains on it.
+    const auto openTrainer = [this, applyNeural](const QString& xmCurvePath) {
         const int profileIndex = currentRuntimeIndex();
         if (profileIndex < 0) return;
         auto* trainer = new NeuralCurveTrainerDialog(this);
@@ -1403,7 +1406,9 @@ void AimSettingsPage::buildTrajectoryCard()
             applyNeural(profileIndex, result);
         };
         trainer->show();
-    });
+        if (!xmCurvePath.isEmpty()) trainer->importXmCurve(xmCurvePath);
+    };
+    connect(trainButton, &QPushButton::clicked, this, [openTrainer] { openTrainer(QString()); });
     auto* randomButton = new QPushButton(QString::fromUtf8(u8"一键随机曲线"));
     randomButton->setObjectName("aimNeuralCurveRandom");
     cl->addWidget(randomButton);
@@ -1426,13 +1431,16 @@ void AimSettingsPage::buildTrajectoryCard()
     neuralFileLayout->addWidget(exportNeural);
     cl->addWidget(neuralFileRow);
     m_pathSectionNeuralRows.push_back(neuralFileRow);
-    connect(importNeural, &QPushButton::clicked, this, [this, applyNeural] {
+    connect(importNeural, &QPushButton::clicked, this, [this, applyNeural, openTrainer] {
         const int profileIndex = currentRuntimeIndex();
         if (profileIndex < 0) return;
         const QString path = QFileDialog::getOpenFileName(this,
             QString::fromUtf8(u8"导入神经曲线"), QString(),
-            QString::fromUtf8(u8"神经曲线 (*.ancurve *.json)"));
+            QString::fromUtf8(u8"神经曲线或轨迹数据 (*.ancurve *.json *.xmcurve)"));
         if (path.isEmpty()) return;
+        // 其他项目导出的 .xmcurve 是原始的真人轨迹而不是网络权重：交给训练弹窗，
+        // 先训练并预览拟合质量，确认后再应用到当前热键。
+        if (xm_curve_import::isXmCurveFile(path)) { openTrainer(path); return; }
         boss::NeuralCurveTrainResult model;
         QString error;
         if (!neural_curve_file::load(path, model, error)) {

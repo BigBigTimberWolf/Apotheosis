@@ -185,6 +185,29 @@ if(Qt6Widgets_FOUND)
             TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     endif()
 
+    # 其他项目导出的 .xmcurve 轨迹导入：只依赖 QtCore，不弹窗；
+    # 用合成文件覆盖像素网格还原、同口径归一化、坏文件与体量上限。
+    add_executable(xm_curve_import_test
+        "${CMAKE_CURRENT_LIST_DIR}/xm_curve_import_test.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/xm_curve_fixture.h"
+        "${CMAKE_SOURCE_DIR}/qt_ui/widgets/XmCurveImport.h")
+    target_include_directories(xm_curve_import_test PRIVATE
+        "${APP_SOURCE_ROOT}" "${CMAKE_SOURCE_DIR}/qt_ui")
+    target_compile_features(xm_curve_import_test PRIVATE cxx_std_20)
+    target_link_libraries(xm_curve_import_test PRIVATE Qt6::Core)
+    if(MSVC)
+        target_compile_options(xm_curve_import_test PRIVATE /utf-8 /Zc:char8_t-)
+    else()
+        target_compile_options(xm_curve_import_test PRIVATE -fno-char8_t)
+    endif()
+    add_test(NAME xm_curve_import_test COMMAND xm_curve_import_test)
+    if(_neural_qt_core)
+        set_tests_properties(xm_curve_import_test PROPERTIES
+            TIMEOUT 20 ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_neural_qt_bin}")
+    else()
+        set_tests_properties(xm_curve_import_test PROPERTIES TIMEOUT 20)
+    endif()
+
     add_executable(input_method_config_test
         "${CMAKE_CURRENT_LIST_DIR}/input_method_config_test.cpp"
         "${CMAKE_SOURCE_DIR}/qt_ui/config/ConfigManager.cpp"

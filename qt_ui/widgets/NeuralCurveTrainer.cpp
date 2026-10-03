@@ -1,6 +1,7 @@
 #include "widgets/NeuralCurveTrainer.h"
 
 #include "widgets/CurveCanvas.h"
+#include "widgets/XmCurveImport.h"
 
 #include <QCheckBox>
 #include <QFile>
@@ -28,7 +29,6 @@ namespace {
 constexpr int kPadding = 28;
 constexpr double kStartRadius = 18.0;
 constexpr double kTargetRadius = 15.0;
-constexpr int kTrainingSamples = 256;
 }
 
 NeuralCurveTrainingCanvas::NeuralCurveTrainingCanvas(QWidget* parent) : QWidget(parent)
@@ -44,9 +44,18 @@ void NeuralCurveTrainingCanvas::startRecording(int rounds, bool append)
     acceptedThisRun_ = 0;
     rejected_ = 0;
     rejectionReason_.clear();
-    if (!append) trajectories_.clear();
+    if (!append) { trajectories_.clear(); importedCount_ = 0; }
     recording_ = true;
     beginRound();
+}
+
+void NeuralCurveTrainingCanvas::addImportedTrajectories(std::vector<boss::NeuralTrajectory> imported)
+{
+    const size_t count = imported.size();
+    trajectories_.insert(trajectories_.begin() + static_cast<std::ptrdiff_t>(importedCount_),
+                         std::make_move_iterator(imported.begin()),
+                         std::make_move_iterator(imported.end()));
+    importedCount_ += count;
 }
 
 void NeuralCurveTrainingCanvas::stopRecording()
@@ -77,66 +86,16 @@ void NeuralCurveTrainingCanvas::beginRound()
 
 boss::NeuralTrajectory NeuralCurveTrainingCanvas::normalizeStroke(QString& reason) const
 {
-    boss::NeuralTrajectory sampled;
-    const QPointF delta = target_ - start_;
-    const double length = std::hypot(delta.x(), delta.y());
-    if (length < 50.0 || stroke_.size() < 3) {
-        reason = QString::fromUtf8(u8"轨迹采样太少，请从起点连续拖到目标");
-        return sampled;
-    }
-    double travelled = 0.0;
-    for (size_t i = 1; i < stroke_.size(); ++i)
-    {
-        const double step = QLineF(stroke_[i - 1], stroke_[i]).length();
-        travelled += step;
-    }
-    if (travelled > length * 4.0) {
-        reason = QString::fromUtf8(u8"轨迹绕行过多，请直接拖向目标");
-        return {};
-    }
-
-    const QPointF axis(delta.x() / length, delta.y() / length);
-    const QPointF perp(-axis.y(), axis.x());
-    boss::NeuralTrajectory monotonic;
-    monotonic.push_back({ 0.0, 0.0 });
-    double maxProgress = 0.0;
-    for (const QPointF& point : stroke_)
-    {
-        const QPointF rel = point - start_;
-        const double progress = std::clamp(
-            (rel.x() * axis.x() + rel.y() * axis.y()) / length, 0.0, 1.0);
-        const double deviation = std::clamp(
-            (rel.x() * perp.x() + rel.y() * perp.y()) / length, -1.0, 1.0);
-        if (progress > maxProgress + 0.002)
-        {
-            monotonic.push_back({ progress, deviation });
-            maxProgress = progress;
-        }
-    }
-    if (monotonic.size() < 3 || maxProgress < 1.0 - kTargetRadius / length - 1e-6) {
-        reason = QString::fromUtf8(u8"有效前进采样不足，请连续拖动后再松开");
-        return {};
-    }
-    monotonic.push_back({ 1.0, 0.0 });
-
-    sampled.reserve(kTrainingSamples);
-    size_t segment = 0;
-    for (int i = 0; i < kTrainingSamples; ++i)
-    {
-        const double t = static_cast<double>(i) / (kTrainingSamples - 1);
-        while (segment + 1 < monotonic.size() && monotonic[segment + 1].progress < t)
-            ++segment;
-        const size_t next = std::min(segment + 1, monotonic.size() - 1);
-        const double t0 = monotonic[segment].progress;
-        const double t1 = monotonic[next].progress;
-        const double f = t1 > t0 + 1e-9 ? (t - t0) / (t1 - t0) : 0.0;
-        const double y = monotonic[segment].deviation
-                       + (monotonic[next].deviation - monotonic[segment].deviation) * f;
-        sampled.push_back({ t, std::clamp(y, -1.0, 1.0) });
-    }
-    sampled.front().deviation = 0.0;
-    sampled.back().deviation = 0.0;
-    return sampled;
+    // The normalization itself lives in neural_curve.h so that live recordings and
+    // imported files are judged by exactly the same rules.
+    std::vector<boss::NeuralPoint2D> stroke;
+    stroke.reserve(stroke_.size());
+    for (const QPointF& point : stroke_) stroke.push_back({point.x(), point.y()});
+    std::string why;
+    auto trajectory = boss::normalizeNeuralStroke(
+        {start_.x(), start_.y()}, {target_.x(), target_.y()}, kTargetRadius, stroke, why);
+    if (trajectory.empty()) reason = QString::fromUtf8(why.c_str());
+    return trajectory;
 }
 
 void NeuralCurveTrainingCanvas::finishRound()
@@ -145,8 +104,9 @@ void NeuralCurveTrainingCanvas::finishRound()
     auto normalized = normalizeStroke(rejectionReason_);
     if (!normalized.empty())
     {
-        if (trajectories_.size() >= 200)
-            trajectories_.erase(trajectories_.begin());
+        // Only live recordings are windowed to the latest 200; imports stay.
+        if (trajectories_.size() - importedCount_ >= 200)
+            trajectories_.erase(trajectories_.begin() + static_cast<std::ptrdiff_t>(importedCount_));
         trajectories_.push_back(std::move(normalized));
         ++acceptedThisRun_;
     }
@@ -245,12 +205,13 @@ void NeuralCurveTrainingCanvas::paintEvent(QPaintEvent*)
 NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(parent)
 {
     setWindowTitle(QString::fromUtf8(u8"神经网络轨迹曲线训练"));
-    resize(740, 690);
+    resize(740, 780);
     auto* root = new QVBoxLayout(this);
     auto* hint = new QLabel(QString::fromUtf8(
         u8"用当前 Windows 桌面的鼠标，在金色起点按住左键拖到绿色目标。"
         u8"建议录制 100～200 条自然轨迹；左右镜像会对齐后学习典型弯曲，曲线只改变移动方向。"
-        u8"本窗口最多保留最近 200 条，关闭窗口后原始样本不保留。"));
+        u8"本窗口最多保留最近 200 条录制，关闭窗口后原始样本不保留。"
+        u8"也可以直接导入其他项目导出的 .xmcurve 真人轨迹文件，按同样的规则转换后训练本项目的曲线。"));
     hint->setWordWrap(true);
     root->addWidget(hint);
 
@@ -271,6 +232,12 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
     trainButton_->setObjectName("neuralTrainExisting");
     trainButton_->setEnabled(false);
     controls->addWidget(trainButton_);
+    importButton_ = new QPushButton(QString::fromUtf8(u8"导入 .xmcurve 轨迹…"));
+    importButton_->setObjectName("neuralImportXmCurve");
+    importButton_->setToolTip(QString::fromUtf8(
+        u8"读取其他项目导出的 .xmcurve 文件里的真人鼠标轨迹，转换后立即训练。\n"
+        u8"文件只作为数据读取，不会运行任何代码；导入后仍需点击“应用到当前热键”才会生效。"));
+    controls->addWidget(importButton_);
     controls->addStretch();
     root->addLayout(controls);
 
@@ -327,6 +294,7 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
         else
         {
             result_ = {};
+            importSummary_.clear();
             applyButton_->setEnabled(false);
             preview_->hide();
             quality_->hide();
@@ -343,6 +311,13 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
     };
     canvas_->collectionFinished = [this] { launchTraining(); };
     connect(trainButton_, &QPushButton::clicked, this, [this] { launchTraining(); });
+    connect(importButton_, &QPushButton::clicked, this, [this] {
+        if (importing_ || training_ || canvas_->recording()) return;
+        const QString path = QFileDialog::getOpenFileName(
+            this, QString::fromUtf8(u8"导入其他项目的 xmcurve 轨迹"), QString(),
+            QString::fromUtf8(u8"xmcurve 轨迹 (*.xmcurve);;所有文件 (*)"));
+        if (!path.isEmpty()) importXmCurve(path);
+    });
     connect(exportButton_, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getSaveFileName(
             this, QString::fromUtf8(u8"导出训练轨迹"),
@@ -372,10 +347,12 @@ NeuralCurveTrainerDialog::NeuralCurveTrainerDialog(QWidget* parent) : QDialog(pa
 
 void NeuralCurveTrainerDialog::setRecordingUi(bool recording)
 {
+    const bool idle = !recording && !training_ && !importing_;
     rounds_->setEnabled(!recording);
     append_->setEnabled(!recording);
-    trainButton_->setEnabled(!recording && !training_ && canvas_->trajectories().size() >= 5);
-    randomButton_->setEnabled(!recording && !training_);
+    trainButton_->setEnabled(idle && canvas_->trajectories().size() >= 5);
+    randomButton_->setEnabled(idle);
+    importButton_->setEnabled(idle);
     recordButton_->setText(recording ? QString::fromUtf8(u8"停止录制")
                                      : QString::fromUtf8(u8"开始录制"));
 }
@@ -392,6 +369,7 @@ void NeuralCurveTrainerDialog::launchTraining()
     recordButton_->setEnabled(false);
     trainButton_->setEnabled(false);
     randomButton_->setEnabled(false);
+    importButton_->setEnabled(false);
     status_->setText(QString::fromUtf8(u8"正在后台训练，并评估留出的轨迹…"));
     auto data = canvas_->trajectories();
     training_ = std::make_shared<TrainingState>();
@@ -414,8 +392,85 @@ void NeuralCurveTrainerDialog::launchTraining()
     pollTimer_->start();
 }
 
+void NeuralCurveTrainerDialog::importXmCurve(const QString& path)
+{
+    if (training_ || importing_ || canvas_->recording()) return;
+    result_ = {};
+    applyButton_->setEnabled(false);
+    preview_->hide();
+    quality_->hide();
+    importing_ = std::make_shared<ImportState>();
+    auto state = importing_;
+    setRecordingUi(false);
+    recordButton_->setEnabled(false);
+    status_->setText(QString::fromUtf8(u8"正在读取并转换 xmcurve 轨迹…"));
+    // Parsing can take a moment for a large file, so keep it off the UI thread.
+    const auto work = [path, state] {
+        std::vector<boss::NeuralTrajectory> trajectories;
+        xm_curve_import::Report report;
+        QString error;
+        const bool ok = xm_curve_import::load(path, trajectories, report, error);
+        QString summary;
+        if (ok) {
+            summary = QString::fromUtf8(u8"已导入 %1 / %2 条轨迹（还原画布 %3×%4 像素")
+                          .arg(report.accepted).arg(report.samples)
+                          .arg(report.canvasWidth).arg(report.canvasHeight);
+            if (!report.profileName.isEmpty())
+                summary += QString::fromUtf8(u8"，来自“%1”").arg(report.profileName);
+            summary += QString::fromUtf8(u8"）");
+            if (report.rejected > 0)
+                summary += QString::fromUtf8(u8"，%1 条未通过校验已跳过").arg(report.rejected);
+            if (report.unreadable > 0)
+                summary += QString::fromUtf8(u8"，%1 条无法还原坐标已跳过").arg(report.unreadable);
+            if (report.thinned > 0)
+                summary += QString::fromUtf8(u8"，为控制训练耗时均匀抽样 %1 条").arg(report.thinned);
+        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->ok = ok;
+        state->error = error;
+        state->summary = summary;
+        state->trajectories = std::move(trajectories);
+        state->ready = true;
+    };
+    try {
+        std::thread(work).detach();
+    } catch (const std::exception& e) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->error = QString::fromUtf8(u8"无法启动导入：") + QString::fromUtf8(e.what());
+        state->ready = true;
+    }
+    pollTimer_->start();
+}
+
 void NeuralCurveTrainerDialog::pollTraining()
 {
+    if (importing_) {
+        bool ok = false;
+        QString error, summary;
+        std::vector<boss::NeuralTrajectory> trajectories;
+        {
+            std::lock_guard<std::mutex> lock(importing_->mutex);
+            if (!importing_->ready) return;
+            ok = importing_->ok;
+            error = std::move(importing_->error);
+            summary = std::move(importing_->summary);
+            trajectories = std::move(importing_->trajectories);
+        }
+        importing_.reset();
+        pollTimer_->stop();
+        recordButton_->setEnabled(true);
+        setRecordingUi(false);
+        if (!ok) {
+            status_->setText(QString::fromUtf8(u8"导入失败：") + error);
+            return;
+        }
+        canvas_->addImportedTrajectories(std::move(trajectories));
+        exportButton_->setEnabled(true);
+        importSummary_ = summary;
+        launchTraining();
+        status_->setText(summary + QString::fromUtf8(u8"；正在后台训练，并评估留出的轨迹…"));
+        return;
+    }
     if (!training_) return;
     {
         std::lock_guard<std::mutex> lock(training_->mutex);
@@ -433,7 +488,8 @@ void NeuralCurveTrainerDialog::pollTraining()
     }
     showResult();
     showQuality(result_);
-    status_->setText(QString::fromUtf8(u8"训练完成。满意后点击「应用到当前热键」。"));
+    status_->setText((importSummary_.isEmpty() ? QString() : importSummary_ + QStringLiteral("\n")) +
+                     QString::fromUtf8(u8"训练完成。满意后点击「应用到当前热键」。"));
 }
 
 void NeuralCurveTrainerDialog::showResult()

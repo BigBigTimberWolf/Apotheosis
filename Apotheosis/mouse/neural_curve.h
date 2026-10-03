@@ -20,6 +20,87 @@ struct NeuralCurvePoint
 
 using NeuralTrajectory = std::vector<NeuralCurvePoint>;
 
+struct NeuralPoint2D
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
+// Number of equally spaced progress samples every normalized trajectory has.
+inline constexpr int kNeuralTrainingSamples = 256;
+
+// Turn one recorded stroke (pixel coordinates, isotropic) into the progress /
+// deviation form the trainer consumes. `stroke` must begin at `start`; a stroke
+// counts as arrived once it reaches `targetRadius` of `target`.
+//
+// This is the single place that defines the normalization, shared by the live
+// recording canvas and by file imports, so recorded and imported strokes are
+// treated identically. Returns an empty trajectory and fills `reason` (UTF-8,
+// shown to the user) when the stroke is unusable.
+inline NeuralTrajectory normalizeNeuralStroke(NeuralPoint2D start, NeuralPoint2D target,
+                                              double targetRadius,
+                                              const std::vector<NeuralPoint2D>& stroke,
+                                              std::string& reason)
+{
+    const double dx = target.x - start.x;
+    const double dy = target.y - start.y;
+    const double length = std::hypot(dx, dy);
+    if (length < 50.0 || stroke.size() < 3) {
+        reason = "轨迹采样太少，请从起点连续拖到目标";
+        return {};
+    }
+    double travelled = 0.0;
+    for (size_t i = 1; i < stroke.size(); ++i)
+        travelled += std::hypot(stroke[i].x - stroke[i - 1].x, stroke[i].y - stroke[i - 1].y);
+    if (travelled > length * 4.0) {
+        reason = "轨迹绕行过多，请直接拖向目标";
+        return {};
+    }
+
+    const NeuralPoint2D axis{dx / length, dy / length};
+    const NeuralPoint2D perp{-axis.y, axis.x};
+    NeuralTrajectory monotonic;
+    monotonic.push_back({0.0, 0.0});
+    double maxProgress = 0.0;
+    for (const NeuralPoint2D& point : stroke)
+    {
+        const double rx = point.x - start.x;
+        const double ry = point.y - start.y;
+        const double progress = std::clamp((rx * axis.x + ry * axis.y) / length, 0.0, 1.0);
+        const double deviation = std::clamp((rx * perp.x + ry * perp.y) / length, -1.0, 1.0);
+        if (progress > maxProgress + 0.002)
+        {
+            monotonic.push_back({progress, deviation});
+            maxProgress = progress;
+        }
+    }
+    if (monotonic.size() < 3 || maxProgress < 1.0 - targetRadius / length - 1e-6) {
+        reason = "有效前进采样不足，请连续拖动后再松开";
+        return {};
+    }
+    monotonic.push_back({1.0, 0.0});
+
+    NeuralTrajectory sampled;
+    sampled.reserve(kNeuralTrainingSamples);
+    size_t segment = 0;
+    for (int i = 0; i < kNeuralTrainingSamples; ++i)
+    {
+        const double t = static_cast<double>(i) / (kNeuralTrainingSamples - 1);
+        while (segment + 1 < monotonic.size() && monotonic[segment + 1].progress < t)
+            ++segment;
+        const size_t next = std::min(segment + 1, monotonic.size() - 1);
+        const double t0 = monotonic[segment].progress;
+        const double t1 = monotonic[next].progress;
+        const double f = t1 > t0 + 1e-9 ? (t - t0) / (t1 - t0) : 0.0;
+        const double y = monotonic[segment].deviation
+                       + (monotonic[next].deviation - monotonic[segment].deviation) * f;
+        sampled.push_back({t, std::clamp(y, -1.0, 1.0)});
+    }
+    sampled.front().deviation = 0.0;
+    sampled.back().deviation = 0.0;
+    return sampled;
+}
+
 struct NeuralCurveQuality
 {
     int trainingTrajectories = 0;
