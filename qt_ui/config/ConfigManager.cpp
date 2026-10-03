@@ -85,6 +85,15 @@ void ConfigManager::setCaptureNdiSource(const QString& v) {
     emit configChanged();
 }
 
+QString ConfigManager::captureDxgiOutput() const {
+    return m_settings->value("Capture/capture_dxgi_output", "").toString();
+}
+
+void ConfigManager::setCaptureDxgiOutput(const QString& v) {
+    m_settings->setValue("Capture/capture_dxgi_output", v);
+    emit configChanged();
+}
+
 void ConfigManager::setCaptureStreamUrl(const QString& v) {
     m_settings->setValue("Capture/capture_stream_url", v);
     emit configChanged();

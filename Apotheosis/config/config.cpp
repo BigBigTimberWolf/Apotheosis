@@ -308,6 +308,7 @@ void Config::writeDefaultsInPlace()
     capture_source = "device";
     capture_stream_url.clear();
     capture_ndi_source.clear();
+    capture_dxgi_output.clear();
     capture_format = "";
     capture_width = 0;
     capture_height = 0;
@@ -408,10 +409,12 @@ bool Config::loadConfig(const std::string& filename)
 
     capture_device = get_string("", "capture_device", "");
     capture_source = get_string("", "capture_source", "device");
-    if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp" && capture_source != "ndi")
+    if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp" &&
+        capture_source != "ndi" && capture_source != "dxgi")
         capture_source = "device";
     capture_stream_url = get_string("", "capture_stream_url", "");
     capture_ndi_source = get_string("", "capture_ndi_source", "");
+    capture_dxgi_output = get_string("", "capture_dxgi_output", "");
     capture_format = get_string("", "capture_format", "");
     capture_width  = static_cast<int>(get_long("", "capture_width", 0));
     capture_height = static_cast<int>(get_long("", "capture_height", 0));
@@ -1264,6 +1267,7 @@ bool Config::saveConfig(const std::string& filename)
         << "capture_source = " << capture_source << "\n"
         << "capture_stream_url = " << capture_stream_url << "\n"
         << "capture_ndi_source = " << capture_ndi_source << "\n"
+        << "capture_dxgi_output = " << capture_dxgi_output << "\n"
         << "capture_format = " << capture_format << "\n"
         << "capture_width = " << capture_width << "\n"
         << "capture_height = " << capture_height << "\n"

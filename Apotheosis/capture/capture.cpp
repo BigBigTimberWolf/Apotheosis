@@ -34,6 +34,7 @@
 #include "dshow_capture.h"
 #include "stream_capture.h"
 #include "ndi_capture.h"
+#include "dxgi_capture.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
 #include "runtime/config_snapshot.h"
@@ -75,6 +76,7 @@ struct CaptureThreadConfig
     std::string capture_source;
     std::string capture_stream_url;
     std::string capture_ndi_source;
+    std::string capture_dxgi_output;
     std::string capture_format;
     int  capture_width  = 0;
     int  capture_height = 0;
@@ -99,6 +101,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.capture_source = config.capture_source;
     snapshot.capture_stream_url = config.capture_stream_url;
     snapshot.capture_ndi_source = config.capture_ndi_source;
+    snapshot.capture_dxgi_output = config.capture_dxgi_output;
     snapshot.capture_format = config.capture_format;
     snapshot.capture_width  = config.capture_width;
     snapshot.capture_height = config.capture_height;
@@ -421,6 +424,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
                 if (cfg.capture_source == "ndi")
                     return ndi_capture::Create(cfg.capture_ndi_source, out_side);
+
+                if (cfg.capture_source == "dxgi")
+                    return dxgi_capture::Create(cfg.capture_dxgi_output, out_side);
 
                 if (stream_capture::IsNetworkSource(cfg.capture_source))
                     return stream_capture::Create(cfg.capture_source,

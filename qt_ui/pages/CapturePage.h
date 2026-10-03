@@ -31,6 +31,8 @@ private slots:
     void onStreamUrlEdited();
     void refreshNdiSources();
     void onNdiSourceEdited();
+    void refreshDxgiOutputs();
+    void onDxgiOutputChanged(int index);
 
 private:
     void applySelectionToConfig();
@@ -55,6 +57,10 @@ private:
     QPushButton*  m_ndiRefresh{};
     QWidget*      m_ndiRow{};
     bool          m_ndiSearching = false;
+    QComboBox*    m_dxgiOutput{};
+    QPushButton*  m_dxgiRefresh{};
+    QWidget*      m_dxgiRow{};
+    QLabel*       m_dxgiNote{};
     QComboBox*    m_devCombo{};
     QComboBox*    m_fmtCombo{};
     QComboBox*    m_resCombo{};

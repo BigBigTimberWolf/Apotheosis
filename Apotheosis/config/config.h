@@ -302,9 +302,11 @@ class Config
 {
 public:
     std::string capture_device;
-    std::string capture_source = "device"; // device | udp | tcp | ndi
+    std::string capture_source = "device"; // device | udp | tcp | ndi | dxgi
     std::string capture_stream_url;
     std::string capture_ndi_source;
+    // DXGI desktop capture: the monitor's device name (e.g. \\.\DISPLAY1); empty = primary monitor.
+    std::string capture_dxgi_output;
     std::string capture_format;
     int  capture_width  = 0;
     int  capture_height = 0;

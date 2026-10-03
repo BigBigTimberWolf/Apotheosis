@@ -134,6 +134,8 @@ if(Qt6Widgets_FOUND)
     endif()
 endif()
 add_logic_test(ndi_latest_slot_test "${CMAKE_CURRENT_LIST_DIR}/ndi_latest_slot_test.cpp")
+# DXGI 屏幕截图的纯逻辑：显示器选择、居中裁剪、QPC 时间换算、BGRA→BGR、帧率估计、失败恢复策略。
+add_logic_test(dxgi_capture_logic_test "${CMAKE_CURRENT_LIST_DIR}/dxgi_capture_logic_test.cpp")
 add_logic_test(capture_card_caps_test "${APP_SOURCE_ROOT}/capture/tests/capture_card_caps_test.cpp")
 if(WIN32 AND OPENCV_LIB AND CUDAToolkit_FOUND)
     add_executable(ndi_capture_test

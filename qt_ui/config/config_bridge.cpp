@@ -57,6 +57,7 @@ void ConfigBridge::syncToRuntime() {
     const std::string oldCaptureSource = config.capture_source;
     const std::string oldCaptureStreamUrl = config.capture_stream_url;
     const std::string oldCaptureNdiSource = config.capture_ndi_source;
+    const std::string oldCaptureDxgiOutput = config.capture_dxgi_output;
     const std::string oldCaptureFormat = config.capture_format;
     const int  oldCaptureWidth  = config.capture_width;
     const int  oldCaptureHeight = config.capture_height;
@@ -67,6 +68,7 @@ void ConfigBridge::syncToRuntime() {
     config.capture_source     = qs(cm.captureSource());
     config.capture_stream_url = qs(cm.captureStreamUrl());
     config.capture_ndi_source = qs(cm.captureNdiSource());
+    config.capture_dxgi_output = qs(cm.captureDxgiOutput());
     config.capture_format     = qs(cm.captureFormat());
     config.capture_width      = cm.captureWidth();
     config.capture_height     = cm.captureHeight();
@@ -184,6 +186,7 @@ void ConfigBridge::syncToRuntime() {
         || config.capture_source != oldCaptureSource
         || config.capture_stream_url != oldCaptureStreamUrl
         || config.capture_ndi_source != oldCaptureNdiSource
+        || config.capture_dxgi_output != oldCaptureDxgiOutput
         || config.capture_format != oldCaptureFormat
         || config.capture_width  != oldCaptureWidth
         || config.capture_height != oldCaptureHeight
@@ -220,6 +223,7 @@ void ConfigBridge::syncFromRuntime()
     cm.setCaptureSource(qstr(config.capture_source));
     cm.setCaptureStreamUrl(qstr(config.capture_stream_url));
     cm.setCaptureNdiSource(qstr(config.capture_ndi_source));
+    cm.setCaptureDxgiOutput(qstr(config.capture_dxgi_output));
     cm.setCaptureFormat(qstr(config.capture_format));
     cm.setCaptureWidth(config.capture_width);
     cm.setCaptureHeight(config.capture_height);

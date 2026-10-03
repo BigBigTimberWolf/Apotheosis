@@ -9,6 +9,7 @@
 #include "capture/magewell_capture.h"
 #include "capture/stream_capture.h"
 #include "capture/ndi_capture.h"
+#include "capture/dxgi_capture.h"
 
 #include <algorithm>
 #include <utility>
@@ -90,6 +91,7 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_sourceCombo->addItem(QStringLiteral("OBS / FFmpeg · UDP"), QStringLiteral("udp"));
     m_sourceCombo->addItem(QStringLiteral("OBS / FFmpeg · TCP"), QStringLiteral("tcp"));
     m_sourceCombo->addItem(QStringLiteral("NDI · 低延迟接收"), QStringLiteral("ndi"));
+    m_sourceCombo->addItem(QStringLiteral("DXGI · 屏幕截图（无需采集卡）"), QStringLiteral("dxgi"));
     m_cardCard->contentLayout()->addWidget(
         FormKit::fieldRow(QStringLiteral("采集来源"), m_sourceCombo));
     connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -128,6 +130,27 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_ndiRefresh, &QPushButton::clicked, this, &CapturePage::refreshNdiSources);
     connect(m_ndiSource->lineEdit(), &QLineEdit::editingFinished, this, &CapturePage::onNdiSourceEdited);
     connect(m_ndiSource, QOverload<int>::of(&QComboBox::activated), this, [this](int) { onNdiSourceEdited(); });
+
+    m_dxgiOutput = new QComboBox;
+    m_dxgiOutput->setToolTip(QStringLiteral(
+        "选择要截取的显示器；“主显示器”会自动跟随系统的主显示器。\n"
+        "送去检测的是该显示器正中心的正方形，边长等于检测分辨率。"));
+    m_dxgiRefresh = new QPushButton(QStringLiteral("刷新"));
+    auto* dxgiContent = new QWidget;
+    auto* dxgiLayout = new QHBoxLayout(dxgiContent);
+    dxgiLayout->setContentsMargins(0, 0, 0, 0);
+    dxgiLayout->addWidget(m_dxgiOutput, 1);
+    dxgiLayout->addWidget(m_dxgiRefresh);
+    m_dxgiRow = FormKit::fieldRow(QStringLiteral("显示器"), dxgiContent);
+    m_cardCard->contentLayout()->addWidget(m_dxgiRow);
+    m_dxgiNote = new QLabel(QStringLiteral(
+        "直接读取显卡正在输出的画面，不需要采集卡，也不含鼠标指针。独占全屏的游戏可能截不到，"
+        "请使用无边框窗口化；HDR 显示器和旋转的显示器暂不支持；锁屏或切换分辨率时会自动恢复。"));
+    m_dxgiNote->setWordWrap(true);
+    m_dxgiNote->setStyleSheet(QStringLiteral("color:#ABA697;font-size:12px;"));
+    m_cardCard->contentLayout()->addWidget(m_dxgiNote);
+    connect(m_dxgiRefresh, &QPushButton::clicked, this, &CapturePage::refreshDxgiOutputs);
+    connect(m_dxgiOutput, QOverload<int>::of(&QComboBox::activated), this, &CapturePage::onDxgiOutputChanged);
 
     m_devCombo = new QComboBox;
     m_devCombo->setToolTip(tr(
@@ -232,11 +255,16 @@ void CapturePage::showError(const QString& text) {
 void CapturePage::clearError() { showError(QString()); }
 
 void CapturePage::updateSourceUi() {
-    const bool network = m_sourceCombo->currentData().toString() != QStringLiteral("device");
-    const bool ndi = m_sourceCombo->currentData().toString() == QStringLiteral("ndi");
-    m_streamRow->setVisible(network && !ndi);
-    m_streamUrl->setEnabled(network && !ndi);
+    const QString source = m_sourceCombo->currentData().toString();
+    const bool network = source != QStringLiteral("device");
+    const bool stream = source == QStringLiteral("udp") || source == QStringLiteral("tcp");
+    const bool ndi = source == QStringLiteral("ndi");
+    const bool dxgi = source == QStringLiteral("dxgi");
+    m_streamRow->setVisible(stream);
+    m_streamUrl->setEnabled(stream);
     m_ndiRow->setVisible(ndi);
+    m_dxgiRow->setVisible(dxgi);
+    m_dxgiNote->setVisible(dxgi);
     m_devCombo->setEnabled(!network);
     m_refreshBtn->setEnabled(!network);
     m_fmtCombo->setEnabled(!network);
@@ -266,6 +294,7 @@ void CapturePage::onSourceChanged(int) {
     updateSourceUi();
     if (source == QStringLiteral("device")) refreshDevices();
     if (source == QStringLiteral("ndi")) refreshNdiSources();
+    if (source == QStringLiteral("dxgi")) refreshDxgiOutputs();
 }
 
 void CapturePage::onStreamUrlEdited() {
@@ -394,6 +423,41 @@ void CapturePage::refreshNdiSources() {
     });
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     worker->start();
+}
+
+void CapturePage::onDxgiOutputChanged(int) {
+    if (m_restoring || m_dxgiOutput->currentIndex() < 0) return;
+    ConfigManager::instance().setCaptureDxgiOutput(m_dxgiOutput->currentData().toString());
+    clearError();
+}
+
+// Listing monitors is quick (no device is opened), so it runs on the GUI thread.
+void CapturePage::refreshDxgiOutputs() {
+    const QString stored = ConfigManager::instance().captureDxgiOutput();
+    std::string error;
+    const auto outputs = dxgi_capture::EnumerateOutputs(error);
+    QSignalBlocker blocker(m_dxgiOutput);
+    m_dxgiOutput->clear();
+    m_dxgiOutput->addItem(QStringLiteral("主显示器（自动）"), QString());
+    int number = 0;
+    for (const auto& output : outputs) {
+        ++number;
+        QString label = QStringLiteral("显示器 %1 · %2×%3").arg(number).arg(output.width).arg(output.height);
+        if (output.primary) label += QStringLiteral(" · 主显示器");
+        if (output.rotated) label += QStringLiteral(" · 已旋转，不支持");
+        label += QStringLiteral(" · ") + QString::fromStdString(output.deviceName);
+        m_dxgiOutput->addItem(label, QString::fromStdString(output.deviceName));
+    }
+    int index = m_dxgiOutput->findData(stored);
+    if (index < 0) { // keep the saved choice visible even while that monitor is unplugged
+        m_dxgiOutput->addItem(QStringLiteral("未连接 · ") + stored, stored);
+        index = m_dxgiOutput->count() - 1;
+    }
+    m_dxgiOutput->setCurrentIndex(index);
+    if (m_sourceCombo->currentData().toString() != QStringLiteral("dxgi")) return;
+    if (!error.empty()) showError(QString::fromStdString(error));
+    else if (outputs.empty()) showError(QStringLiteral("没有找到可截取的显示器。"));
+    else clearError();
 }
 
 void CapturePage::onDeviceChanged(int) {
@@ -558,6 +622,12 @@ void CapturePage::updateCapabilitySummary() {
             .arg(ConfigManager::instance().detectionResolution()));
         return;
     }
+    if (m_sourceCombo->currentData().toString() == QStringLiteral("dxgi")) {
+        m_capSummary->setText(QStringLiteral("DXGI 屏幕截图：读取所选显示器的桌面画面，输出中心裁切画面。"));
+        m_recommend->setText(QStringLiteral("检测分辨率 %1×%1，取显示器正中心。游戏请用无边框窗口化；独占全屏、HDR 与旋转显示器可能无法截取。")
+            .arg(ConfigManager::instance().detectionResolution()));
+        return;
+    }
     if (m_sourceCombo->currentData().toString() != QStringLiteral("device")) {
         m_capSummary->setText(QStringLiteral("等待网络视频流；使用 FFmpeg 解码后输出中心裁切画面。"));
         m_recommend->setText(QStringLiteral("发送端使用 MPEG-TS 视频流，接收端地址与端口按上方设置。"));
@@ -610,4 +680,5 @@ void CapturePage::onLoadConfig() {
     m_restoring = false;
     updateSourceUi();
     if (cfg.captureSource() == QStringLiteral("ndi")) refreshNdiSources();
+    if (cfg.captureSource() == QStringLiteral("dxgi")) refreshDxgiOutputs();
 }

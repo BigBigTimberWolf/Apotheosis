@@ -24,6 +24,8 @@ public:
     QString captureStreamUrl() const;
     QString captureNdiSource() const;
     void setCaptureNdiSource(const QString& v);
+    QString captureDxgiOutput() const;
+    void setCaptureDxgiOutput(const QString& v);
     void setCaptureStreamUrl(const QString& v);
     QString captureFormat() const;
     void setCaptureFormat(const QString& v);
