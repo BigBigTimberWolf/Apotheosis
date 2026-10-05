@@ -74,6 +74,7 @@ struct CaptureThreadConfig
 {
     std::string capture_device;
     std::string capture_source;
+    std::string capture_device_api;
     std::string capture_stream_url;
     std::string capture_ndi_source;
     std::string capture_dxgi_output;
@@ -99,6 +100,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     CaptureThreadConfig snapshot;
     snapshot.capture_device = config.capture_device;
     snapshot.capture_source = config.capture_source;
+    snapshot.capture_device_api = config.capture_device_api;
     snapshot.capture_stream_url = config.capture_stream_url;
     snapshot.capture_ndi_source = config.capture_ndi_source;
     snapshot.capture_dxgi_output = config.capture_dxgi_output;
@@ -442,6 +444,35 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     return sdk_capture;
                 }
 
+                if (cfg.capture_device_api == "dshow") {
+                    const auto devices = dshow::EnumerateDevices();
+                    const auto* selected = dshow::FindByName(devices, cfg.capture_device);
+                    if (!selected) {
+                        std::cerr << "[Capture] Selected DirectShow device \"" << cfg.capture_device
+                                  << "\" is not present. No substitution is performed."
+                                  << std::endl;
+                        return nullptr;
+                    }
+                    std::string format = cfg.capture_format;
+                    int width = cfg.capture_width;
+                    int height = cfg.capture_height;
+                    int fps = cfg.capture_fps;
+                    MFDeviceInfo capability;
+                    capability.name = selected->name;
+                    capability.friendly_name = selected->name;
+                    capability.caps = selected->caps;
+                    if (!mfcap::Validate(capability, format, width, height, fps)) {
+                        std::string reason;
+                        if (!mfcap::PickBest(capability, width, height, fps,
+                                             format, width, height, fps, &reason)) {
+                            std::cerr << "[Capture] DirectShow has no usable mode for "
+                                      << cfg.capture_device << std::endl;
+                            return nullptr;
+                        }
+                    }
+                    return dshow::Create(selected->index, width, height, fps, format, out_side);
+                }
+
                 const auto devices = MFCapture::EnumerateDevices();
                 int device_index = -1;
                 for (const auto& d : devices)
@@ -457,35 +488,13 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     return nullptr;
                 }
 
-                auto probed = capture_card::ProbeOne(device_index);
+                auto probed = MFCapture::EnumerateDevicesWithCaps(device_index);
                 const MFDeviceInfo* selected = capture_card::FindByName(probed, cfg.capture_device);
-                if (selected && selected->directshow_fallback)
-                {
-                    std::string format = cfg.capture_format;
-                    int width = cfg.capture_width;
-                    int height = cfg.capture_height;
-                    int fps = cfg.capture_fps;
-                    if (!mfcap::Validate(*selected, format, width, height, fps))
-                    {
-                        std::string reason;
-                        if (!mfcap::PickBest(*selected, width, height, fps,
-                                             format, width, height, fps, &reason))
-                        {
-                            std::cerr << "[Capture] DirectShow has no usable mode for "
-                                      << cfg.capture_device << std::endl;
-                            return nullptr;
-                        }
-                        std::cout << "[Capture] DirectShow selected available mode: "
-                                  << format << " " << width << "x" << height
-                                  << "@" << fps << "fps" << std::endl;
-                    }
-                    std::cout << "[Capture] Media Foundation cannot activate this card; using DirectShow."
+                if (!selected || selected->caps.empty()) {
+                    std::cerr << "[Capture] Media Foundation could not negotiate a usable mode for "
+                              << cfg.capture_device << ". Check the selected API or device mode."
                               << std::endl;
-                    std::cout << "[Capture] DirectShow opening device #" << selected->directshow_index
-                              << " | " << format << " " << width << "x" << height
-                              << "@" << fps << "fps" << std::endl;
-                    return dshow::Create(selected->directshow_index, width,
-                                         height, fps, format, out_side);
+                    return nullptr;
                 }
 
                 if (cfg.verbose)

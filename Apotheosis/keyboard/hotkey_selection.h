@@ -42,6 +42,7 @@ inline std::vector<std::string> hotkeyBinding(const HotkeyProfile& profile)
 
 inline bool sameHotkeyBinding(const HotkeyProfile& a, const HotkeyProfile& b)
 {
+    if (!a.enabled || !b.enabled) return false;
     if (a.group != b.group || a.keys_chord != b.keys_chord) return false;
     const auto keys = hotkeyBinding(a);
     return !keys.empty() && keys == hotkeyBinding(b);
@@ -57,9 +58,10 @@ inline bool hasHotkeyConflict(const std::vector<HotkeyProfile>& profiles, int in
 
 inline int preferredHotkey(const std::vector<HotkeyProfile>& profiles, int index)
 {
-    if (index < 0 || index >= static_cast<int>(profiles.size())) return -1;
+    if (index < 0 || index >= static_cast<int>(profiles.size()) || !profiles[index].enabled) return -1;
     int fallback = index;
     for (int i = static_cast<int>(profiles.size()) - 1; i >= 0; --i) {
+        if (!profiles[i].enabled) continue;
         if (i != index && !sameHotkeyBinding(profiles[index], profiles[i])) continue;
         if (profiles[i].activation_selected) return i;
         fallback = std::max(fallback, i);
@@ -69,10 +71,11 @@ inline int preferredHotkey(const std::vector<HotkeyProfile>& profiles, int index
 
 inline bool activateHotkey(std::vector<HotkeyProfile>& profiles, int index)
 {
-    if (!hasHotkeyConflict(profiles, index)) return false;
+    if (index < 0 || index >= static_cast<int>(profiles.size()) || !profiles[index].enabled ||
+        !hasHotkeyConflict(profiles, index)) return false;
     bool changed = false;
     for (int i = 0; i < static_cast<int>(profiles.size()); ++i) {
-        if (i != index && !sameHotkeyBinding(profiles[index], profiles[i])) continue;
+        if (!profiles[i].enabled || (i != index && !sameHotkeyBinding(profiles[index], profiles[i]))) continue;
         const bool selected = i == index;
         changed |= profiles[i].activation_selected != selected;
         profiles[i].activation_selected = selected;
@@ -84,8 +87,10 @@ inline bool validActivationKey(const std::vector<HotkeyProfile>& profiles, int i
 {
     if (!hasHotkeyConflict(profiles, index)) return false;
     const auto& profile = profiles[index];
+    if (!profile.enabled) return false;
     if (profile.activation_key.empty() || profile.activation_key == "None") return false;
     for (const auto& other : profiles) {
+        if (!other.enabled) continue;
         if (other.group != profile.group) continue;
         if (std::find(other.keys.begin(), other.keys.end(), profile.activation_key) != other.keys.end())
             return false;
@@ -107,7 +112,7 @@ public:
             const auto& profile = profiles[i];
             auto& state = states_[i];
             const auto binding = hotkeyBinding(profile);
-            const bool enabled = profile.group == group && validActivationKey(profiles, i);
+            const bool enabled = profile.enabled && profile.group == group && validActivationKey(profiles, i);
             const bool changed = state.key != profile.activation_key || state.name != profile.name ||
                 state.group != profile.group || state.binding != binding || state.chord != profile.keys_chord;
             const bool down = enabled && pressed(profile.activation_key);
@@ -146,7 +151,7 @@ int selectActiveHotkeyIndex(const std::vector<HotkeyProfile>& hotkeys,
         {
             const size_t index = i - 1;
             const auto& hk = hotkeys[index];
-            if (hk.group != group || hk.keys_chord != chordPass) continue;
+            if (!hk.enabled || hk.group != group || hk.keys_chord != chordPass) continue;
             if (preferredHotkey(hotkeys, static_cast<int>(index)) != static_cast<int>(index)) continue;
             if (chordPass) {
                 if (hk.keys.size() != 2 || hk.keys[0].empty() || hk.keys[1].empty() ||

@@ -73,6 +73,7 @@ private:
     QLineEdit* m_kmboxNetUuid{};
     QComboBox* m_ferrumPort{};
     QComboBox* m_ferrumBaud{};
+    QComboBox* m_cpboxPort{};
     QLineEdit* m_catIp{};
     QSpinBox* m_catPort{};
     QLineEdit* m_catUuid{};

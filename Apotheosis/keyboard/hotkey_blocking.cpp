@@ -8,6 +8,7 @@
 #include "keyboard/hotkey_selection.h"
 #include "Apotheosis.h"
 #include "mouse/windows_driver.h"
+#include "mouse/cpbox_driver.h"
 #include "mouse/kmboxNetConnection.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/inference_session.h"
@@ -30,13 +31,17 @@ std::string axisBackend;
 std::bitset<2> axisApplied, axisUncertain, axisRequested;
 uint64_t axisGeneration=0;
 std::chrono::steady_clock::time_point axisRetryAt{};
+int axisActiveHotkey = -1;
+std::chrono::steady_clock::time_point axisActiveSince{};
 void reportAxes(const std::string& text) {
     std::lock_guard<std::mutex> lock(statusMutex); axisMessage=text;
 }
 std::bitset<6> hardwareButtons, uncertainButtons;
 std::bitset<256> hardwareKeys, uncertainKeys;
 std::shared_ptr<mouse_driver::IDriver> otherDriver(const std::string& backend) {
-    return backend=="FERRUM" ? ferrumDriver : backend=="DHZBOX_MINI" ? dhzboxDriver : backend=="CAT" ? catDriver : nullptr;
+    return backend=="FERRUM" ? ferrumDriver : backend=="DHZBOX_MINI" ? dhzboxDriver :
+        backend=="CAT" ? catDriver : backend=="CPBOX" ?
+            std::static_pointer_cast<mouse_driver::IDriver>(cpboxDriver) : nullptr;
 }
 bool setButton(const std::string& backend,int b,bool on) {
     if(backend=="MAKCU") return makcuSerial && makcuSerial->maskPhysicalButton(b,on);
@@ -48,6 +53,7 @@ bool setAxis(const std::string& backend,int axis,bool on) {
     if(backend=="MAKCU") return makcuSerial && makcuSerial->maskPhysicalAxis(axis,on);
     if(backend=="MAKCUNEW") return makcuNewSerial && makcuNewSerial->maskPhysicalAxis(axis,on);
     if(backend=="KMBOXNET") return kmboxNetSerial && kmboxNetSerial->maskPhysicalAxis(axis,on);
+    if(backend=="CPBOX") return cpboxDriver && cpboxDriver->maskPhysicalAxis(axis,on);
     auto driver=otherDriver(backend);
     return driver && driver->maskPhysicalAxis(axis,on);
 }
@@ -61,20 +67,36 @@ bool releaseAxes() { // inputDeviceMutex held; retain uncertain releases for ret
 }
 void updateAxes(const Config& cfg, bool editing) {
     std::bitset<2> wanted;
+    bool waitingForMaskDelay=false;
     const int index=runtime::aim_loop::activeTargetHotkey();
     const bool active=!editing && !session_stop_requested.load() &&
         g_inference_session && g_inference_session->running() &&
         index==runtime::g_active_hotkey_index.load();
-    if(active && index>=0 && index<static_cast<int>(cfg.hotkeys.size())) {
-        wanted[0]=cfg.hotkeys[index].mask_x;
-        wanted[1]=cfg.hotkeys[index].mask_y;
-    }
     const auto now=std::chrono::steady_clock::now();
+    if(active && index>=0 && index<static_cast<int>(cfg.hotkeys.size())) {
+        if(axisActiveHotkey!=index) {
+            axisActiveHotkey=index;
+            axisActiveSince=now;
+        }
+        const int delay=std::clamp(cfg.hotkeys[index].mask_delay_ms,0,5000);
+        if(now-axisActiveSince>=std::chrono::milliseconds(delay)) {
+            wanted[0]=cfg.hotkeys[index].mask_x;
+            wanted[1]=cfg.hotkeys[index].mask_y;
+        } else waitingForMaskDelay=cfg.hotkeys[index].mask_x||cfg.hotkeys[index].mask_y;
+    } else {
+        axisActiveHotkey=-1;
+        axisActiveSince={};
+    }
     std::lock_guard<std::mutex> lock(inputDeviceMutex);
     const uint64_t generation=cfg.input_method=="MAKCUNEW" && makcuNewSerial
         ? makcuNewSerial->sessionGeneration() : 0;
     const bool changed=axisBackend!=cfg.input_method || axisRequested!=wanted || axisGeneration!=generation;
-    if(!changed && now<axisRetryAt) return;
+    if(!changed && now<axisRetryAt) {
+        if(waitingForMaskDelay)
+            axisRetryAt=std::min(axisRetryAt,axisActiveSince+
+                std::chrono::milliseconds(std::clamp(cfg.hotkeys[index].mask_delay_ms,0,5000)));
+        return;
+    }
     axisRequested=wanted;
     axisRetryAt=now+std::chrono::milliseconds(500);
     if(axisBackend!=cfg.input_method) {
@@ -156,6 +178,7 @@ void clear() {
     bool ok = releaseAxes();
     if(!ok) ok=releaseAxes();
     axisRequested.reset(); axisGeneration=0; axisRetryAt={};
+    axisActiveHotkey=-1; axisActiveSince={};
     // DevicePause / shutdown are ownership boundaries. Each old driver retains
     // uncertain locks for its destructor; never apply them to a replacement device.
     axisApplied.reset(); axisUncertain.reset(); axisBackend.clear();
@@ -190,7 +213,7 @@ void update(const std::shared_ptr<const Config>& cfg, bool macroEditing) {
     };
     for (int i = 0; i < static_cast<int>(cfg->hotkeys.size()); ++i) {
         const auto& profile = cfg->hotkeys[i];
-        if (profile.block_hotkey && profile.group == cfg->active_hotkey_group &&
+        if (profile.enabled && profile.block_hotkey && profile.group == cfg->active_hotkey_group &&
             preferredHotkey(cfg->hotkeys, i) == i)
             for (const auto& key : profile.keys) add(key);
     }
@@ -203,7 +226,8 @@ void update(const std::shared_ptr<const Config>& cfg, bool macroEditing) {
     const bool native=cfg->input_method=="WINDOWS";
     const bool net=cfg->input_method=="KMBOXNET";
     const bool hardware=cfg->input_method=="MAKCU" || cfg->input_method=="MAKCUNEW" ||
-        cfg->input_method=="FERRUM" || cfg->input_method=="DHZBOX_MINI" || cfg->input_method=="CAT";
+        cfg->input_method=="FERRUM" || cfg->input_method=="DHZBOX_MINI" ||
+        cfg->input_method=="CAT" || cfg->input_method=="CPBOX";
     bool ok=true, pending=false;
     bool connected=!wanted, monitored=true;
     {

@@ -27,6 +27,7 @@
 #include "macro/macro_engine.h"
 #include "macro/macro_config.h"
 #include "mouse/windows_driver.h"
+#include "mouse/cpbox_driver.h"
 
 extern std::atomic<bool> shouldExit;
 extern std::atomic<bool> aiming;
@@ -102,6 +103,19 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
                 else if (key_name == "MiddleMouseButton") pressed = makcuNewSerial->physicalButtonPressed(3);
                 else if (key_name == "X1MouseButton")     pressed = makcuNewSerial->physicalButtonPressed(4);
                 else if (key_name == "X2MouseButton")     pressed = makcuNewSerial->physicalButtonPressed(5);
+            }
+        }
+        else if (cfg->input_method == "CPBOX")
+        {
+            if (cpboxDriver && cpboxDriver->isOpen()) {
+                const int button = key_name == "LeftMouseButton" ? 1 :
+                    key_name == "RightMouseButton" ? 2 : key_name == "MiddleMouseButton" ? 3 :
+                    key_name == "X1MouseButton" ? 4 : key_name == "X2MouseButton" ? 5 : 0;
+                if (button) pressed = cpboxDriver->physicalButtonPressed(button) > 0;
+                else {
+                    const int vk = KeyCodes::getKeyCode(key_name);
+                    if (vk > 0) pressed = mouse_driver::windowsPhysicalKeyPressed(vk);
+                }
             }
         }
         else if (cfg->input_method == "KMBOXNET")

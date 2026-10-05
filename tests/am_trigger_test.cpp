@@ -42,11 +42,9 @@ int main() {
         CHECK(!tick(f, 0, true, 20).press_left);
         CHECK(!tick(f, 19, true, 20, 0, 0, 2).press_left);
         CHECK(tick(f, 20, true, 20, 0, 0, 3).press_left); // IDs don't restart delay
-        CHECK(!tick(f, 29).release_left);
-        CHECK(tick(f, 30).release_left); // minimum down=10
-        CHECK(!tick(f, 39).press_left);
-        CHECK(!tick(f, 40).press_left); // minimum up=10 + cleanup
-        CHECK(tick(f, 41).press_left);
+        CHECK(tick(f, 21).release_left); // configured 1ms minimum down
+        CHECK(!tick(f, 22).press_left); // cooldown reaches due; cleanup observation
+        CHECK(tick(f, 23).press_left);
         CHECK(tick(f, 42, false).release_left);
         CHECK(!tick(f, 43, true, 20).press_left); // reacquisition restarts initial delay
         CHECK(tick(f, 63, true, 20).press_left);

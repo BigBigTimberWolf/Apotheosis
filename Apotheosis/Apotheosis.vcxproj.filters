@@ -12,6 +12,7 @@
     <ClCompile Include="mouse\Makcu.cpp" />
     <ClCompile Include="mouse\MakcuNew.cpp" />
     <ClCompile Include="mouse\mouse.cpp" />
+    <ClCompile Include="mouse\cpbox_driver.cpp" />
     <ClCompile Include="mouse\AimbotTarget.cpp" />
     <ClCompile Include="detector\trt_detector.cpp" />
     <ClCompile Include="detector\dml_detector.cpp" />

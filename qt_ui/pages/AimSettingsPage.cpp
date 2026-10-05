@@ -395,6 +395,11 @@ void AimSettingsPage::buildKeyBindCard()
     auto* card = new CardWidget(QStringLiteral("触发按键"), QStringLiteral("keyboard"));
     auto* cl = card->contentLayout();
 
+    auto* hotkeyEnabled = new QCheckBox(QStringLiteral("启用此热键"));
+    hotkeyEnabled->setObjectName("hotkeyEnabled");
+    hotkeyEnabled->setToolTip(QStringLiteral("停用后，此热键不会启动瞄准、扳机、开镜或相关输入屏蔽。"));
+    cl->addWidget(hotkeyEnabled);
+
     auto* combo = new QComboBox;
     for (int i = 0; kKeyEntries[i].id; ++i)
         combo->addItem(QString::fromUtf8(kKeyEntries[i].label), QString::fromUtf8(kKeyEntries[i].id));
@@ -435,6 +440,17 @@ void AimSettingsPage::buildKeyBindCard()
             config.hotkeys[ri].block_hotkey = checked;
         }
         ConfigBridge::instance().markDirty();
+    });
+    connect(hotkeyEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (m_loading) return;
+        const int ri = currentRuntimeIndex();
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            if (ri < 0 || ri >= static_cast<int>(config.hotkeys.size())) return;
+            config.hotkeys[ri].enabled = enabled;
+        }
+        ConfigBridge::instance().markDirty();
+        refreshActivation();
     });
 
     m_activationWidget = new HotkeyActivationWidget(card);
@@ -518,6 +534,11 @@ void AimSettingsPage::buildFovCard()
     aimDelay->setSuffix(QStringLiteral(" ms"));
     aimDelay->setObjectName("aimDelayMs");
     cl->addWidget(FormKit::fieldRow(QStringLiteral("延迟瞄准（识别到目标且按住热键后）"), aimDelay));
+    auto* maskDelay = new NoWheelSpinBox;
+    maskDelay->setRange(0, 5000);
+    maskDelay->setSuffix(QStringLiteral(" ms"));
+    maskDelay->setObjectName("maskDelayMs");
+    cl->addWidget(FormKit::fieldRow(QStringLiteral("延迟屏蔽 XY（开始瞄准后）"), maskDelay));
     auto* unlockX = new QCheckBox(QStringLiteral("解锁 X 轴（程序不横向瞄准）"));
     auto* unlockY = new QCheckBox(QStringLiteral("解锁 Y 轴（程序不纵向瞄准）"));
     unlockX->setObjectName("unlockX");
@@ -529,10 +550,11 @@ void AimSettingsPage::buildFovCard()
     unlockYDelay->setSuffix(QStringLiteral(" ms"));
     unlockYDelay->setObjectName("unlockYDelayMs");
     cl->addWidget(FormKit::fieldRow(QStringLiteral("解锁 Y 延迟（目标与热键同时生效后）"), unlockYDelay));
-    const QString axisHelp = QStringLiteral("屏蔽轴：有有效目标并开始瞄准时才拦截真实鼠标输入；丢失目标、松键或等待延迟期间解除。解锁轴：程序不控制该轴。延迟设为 0 即立即瞄准。");
+    const QString axisHelp = QStringLiteral("屏蔽轴：有有效目标并开始瞄准后，经过屏蔽延迟才拦截真实鼠标输入；丢失目标或松键时立即解除。解锁轴：程序不控制该轴。延迟设为 0 即立即生效。");
     unlockX->setToolTip(axisHelp);
     unlockY->setToolTip(axisHelp);
     unlockYDelay->setToolTip(axisHelp);
+    maskDelay->setToolTip(axisHelp);
     auto* axisStatus = makeHint(QString());
     cl->addWidget(axisStatus);
     auto* axisTimer = new QTimer(card);
@@ -555,6 +577,7 @@ void AimSettingsPage::buildFovCard()
         config.hotkeys[ri].unlock_y = findChild<QCheckBox*>("unlockY")->isChecked();
         config.hotkeys[ri].unlock_y_delay_ms = findChild<QSpinBox*>("unlockYDelayMs")->value();
         config.hotkeys[ri].aim_delay_ms = findChild<QSpinBox*>("aimDelayMs")->value();
+        config.hotkeys[ri].mask_delay_ms = findChild<QSpinBox*>("maskDelayMs")->value();
         ConfigBridge::instance().markDirty();
     };
     connect(fx, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
@@ -565,6 +588,7 @@ void AimSettingsPage::buildFovCard()
     connect(unlockY, &QCheckBox::toggled, this, [commit](bool) { commit(); });
     connect(unlockYDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
     connect(aimDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
+    connect(maskDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, [commit](int) { commit(); });
 
     m_rightLayout->addWidget(card);
 }
@@ -1131,10 +1155,13 @@ void AimSettingsPage::buildRecoveredControllerCard()
             auto* spin = new NoWheelDoubleSpinBox;
             spin->setObjectName(prefix + QString::fromLatin1(row.suffix));
             spin->setRange(row.minimum, row.maximum);
-            spin->setSingleStep(row.step);
             const QString suffix = QString::fromLatin1(row.suffix);
-            spin->setDecimals(suffix == QStringLiteral("FfX") ||
-                              suffix == QStringLiteral("FfY") ? 4 : 3);
+            const bool pidf = suffix == QStringLiteral("KpX") || suffix == QStringLiteral("KiX") ||
+                suffix == QStringLiteral("KdX") || suffix == QStringLiteral("FfX") ||
+                suffix == QStringLiteral("KpY") || suffix == QStringLiteral("KiY") ||
+                suffix == QStringLiteral("KdY") || suffix == QStringLiteral("FfY");
+            spin->setSingleStep(pidf ? 0.00001 : row.step);
+            spin->setDecimals(pidf ? 5 : 3);
             spin->setValue(row.value);
             if (suffix == QStringLiteral("KiX") || suffix == QStringLiteral("KiY"))
                 spin->setToolTip(QStringLiteral("积累持续瞄准误差；输出饱和时停止继续积累，死区内逐渐消退。积分上限为单帧限幅的 10%。Ki 变化清空该轴旧积分。"));
@@ -1819,6 +1846,7 @@ void AimSettingsPage::reloadProfileToUi()
                 const int k = c->findData(want);
                 c->setCurrentIndex(k >= 0 ? k : 0);
             }
+            if (auto* c = findChild<QCheckBox*>("hotkeyEnabled")) c->setChecked(hp.enabled);
             if (auto* c = findChild<QCheckBox*>("keyChord")) c->setChecked(hp.keys_chord);
             if (auto* c = findChild<QComboBox*>("keyComboSecond")) {
                 const QString want = hp.keys.size() > 1 ? QString::fromStdString(hp.keys[1]) : QString();
@@ -1835,6 +1863,7 @@ void AimSettingsPage::reloadProfileToUi()
             if (auto* c = findChild<QCheckBox*>("unlockY")) c->setChecked(hp.unlock_y);
             if (auto* s = findChild<QSpinBox*>("unlockYDelayMs")) s->setValue(hp.unlock_y_delay_ms);
             if (auto* s = findChild<QSpinBox*>("aimDelayMs")) s->setValue(hp.aim_delay_ms);
+            if (auto* s = findChild<QSpinBox*>("maskDelayMs")) s->setValue(hp.mask_delay_ms);
             if (auto* s = findChild<QSpinBox*>("dynFovShrinkMs")) s->setValue(hp.dynamic_fov_shrink_ms);
             if (auto* c = findChild<QComboBox*>("aimMode"))
                 c->setCurrentIndex(hp.crosshair_detect_enabled ? 3

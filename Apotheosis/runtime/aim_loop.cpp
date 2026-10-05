@@ -20,6 +20,7 @@
 #include "detector/detection_buffer.h"
 #include "mouse/mouse.h"
 #include "mouse/windows_driver.h"
+#include "mouse/cpbox_driver.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/aimpoint_recoil.h"
 #include "keyboard/keyboard_listener.h"
@@ -123,6 +124,7 @@ MouseThread* ensureMouse()
     std::shared_ptr<mouse_driver::IDriver> dhzbox;
     std::shared_ptr<mouse_driver::IDriver> ferrumDriverLocal;
     std::shared_ptr<mouse_driver::IDriver> catDriverLocal;
+    std::shared_ptr<mouse_driver::CpboxDriver> cpboxDriverLocal;
     std::shared_ptr<mouse_driver::IDriver> windowsDriverLocal;
     {
         std::lock_guard<std::mutex> lkDev(inputDeviceMutex);
@@ -133,13 +135,16 @@ MouseThread* ensureMouse()
         dhzbox = dhzboxDriver;
         ferrumDriverLocal = ferrumDriver;
         catDriverLocal = catDriver;
+        cpboxDriverLocal = cpboxDriver;
         windowsDriverLocal = windowsDriver;
     }
-    if (!makcu && !makcuNew && !kmboxNet && !dhzbox && !ferrumDriverLocal && !catDriverLocal && !windowsDriverLocal)
+    if (!makcu && !makcuNew && !kmboxNet && !dhzbox && !ferrumDriverLocal &&
+        !catDriverLocal && !cpboxDriverLocal && !windowsDriverLocal)
         return nullptr;
 
     g_mouse = std::make_unique<MouseThread>(params, makcu, makcuNew, kmboxNet,
-                                            makcuNewKbd, windowsDriverLocal ? windowsDriverLocal : dhzbox ? dhzbox : catDriverLocal ? catDriverLocal : ferrumDriverLocal);
+        makcuNewKbd, windowsDriverLocal ? windowsDriverLocal : cpboxDriverLocal ? cpboxDriverLocal :
+        dhzbox ? dhzbox : catDriverLocal ? catDriverLocal : ferrumDriverLocal);
     return g_mouse.get();
 }
 std::chrono::steady_clock::time_point g_last_tick{};

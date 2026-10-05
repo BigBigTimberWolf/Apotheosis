@@ -9,6 +9,8 @@ namespace capture_card
 {
 
 std::vector<MFDeviceInfo> ProbeAll();
+std::vector<MFDeviceInfo> ProbeMediaFoundation();
+std::vector<MFDeviceInfo> ProbeDirectShow();
 
 std::vector<MFDeviceInfo> ProbeOne(int device_index);
 

@@ -306,6 +306,7 @@ void Config::writeDefaultsInPlace()
 
     capture_device = "";
     capture_source = "device";
+    capture_device_api = "mf";
     capture_stream_url.clear();
     capture_ndi_source.clear();
     capture_dxgi_output.clear();
@@ -423,6 +424,9 @@ bool Config::loadConfig(const std::string& filename)
     if (capture_source != "device" && capture_source != "udp" && capture_source != "tcp" &&
         capture_source != "ndi" && capture_source != "dxgi")
         capture_source = "device";
+    capture_device_api = get_string("", "capture_device_api", "mf");
+    if (capture_device_api != "mf" && capture_device_api != "dshow")
+        capture_device_api = "mf";
     capture_stream_url = get_string("", "capture_stream_url", "");
     capture_ndi_source = get_string("", "capture_ndi_source", "");
     capture_dxgi_output = get_string("", "capture_dxgi_output", "");
@@ -442,7 +446,8 @@ bool Config::loadConfig(const std::string& filename)
 
     input_method = get_string("", "input_method", "MAKCU");
     if (input_method != "MAKCU" && input_method != "MAKCUNEW" && input_method != "KMBOXNET" &&
-        input_method != "FERRUM" && input_method != "DHZBOX_MINI" && input_method != "WINDOWS" && input_method != "CAT")
+        input_method != "FERRUM" && input_method != "DHZBOX_MINI" && input_method != "WINDOWS" &&
+        input_method != "CAT" && input_method != "CPBOX")
         input_method = "MAKCU";
     const auto finiteSetting = [&](const char* key, double fallback, double low, double high) {
         const double value = get_double("", key, fallback);
@@ -463,6 +468,7 @@ bool Config::loadConfig(const std::string& filename)
     kmbox_net_port = get_string("", "kmbox_net_port", "6234");
     ferrum_port = get_string("", "ferrum_port", "");
     ferrum_baudrate = std::clamp(static_cast<int>(get_long("", "ferrum_baudrate", 3000000)), 115200, 6000000);
+    cpbox_port = get_string("", "cpbox_port", "");
     cat_ip = get_string("", "cat_ip", "192.168.7.1");
     cat_port = std::clamp(static_cast<int>(get_long("", "cat_port", 8888)), 1, 65535);
     cat_uuid = get_string("", "cat_uuid", "");
@@ -766,6 +772,7 @@ bool Config::loadConfig(const std::string& filename)
             const char* sec = entry.second.c_str();
             HotkeyProfile hk;
             hk.name = get_string(sec, "name", hk.name);
+            hk.enabled = get_bool(sec, "enabled", true);
             hk.group = get_string(sec, "group", hk.group);
             if (hk.group.empty())
                 hk.group = u8"默认";
@@ -776,6 +783,7 @@ bool Config::loadConfig(const std::string& filename)
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.mask_x = get_bool(sec, "mask_x", false);
             hk.mask_y = get_bool(sec, "mask_y", false);
+            hk.mask_delay_ms = static_cast<int>(std::clamp(get_long(sec, "mask_delay_ms", 0), 0, 5000));
             hk.unlock_x = get_bool(sec, "unlock_x", false);
             hk.unlock_y = get_bool(sec, "unlock_y", false);
             hk.unlock_y_delay_ms = static_cast<int>(std::clamp(
@@ -1286,6 +1294,7 @@ bool Config::saveConfig(const std::string& filename)
             u8"# 组合对不上会直接报错, 不做任何替换)\n"
         << "capture_device = " << capture_device << "\n"
         << "capture_source = " << capture_source << "\n"
+        << "capture_device_api = " << capture_device_api << "\n"
         << "capture_stream_url = " << capture_stream_url << "\n"
         << "capture_ndi_source = " << capture_ndi_source << "\n"
         << "capture_dxgi_output = " << capture_dxgi_output << "\n"
@@ -1298,7 +1307,7 @@ bool Config::saveConfig(const std::string& filename)
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
 
     file << "# Hardware / input device\n"
-        << "# MAKCU | MAKCUNEW | KMBOXNET | FERRUM | DHZBOX_MINI | WINDOWS | CAT\n"
+        << "# MAKCU | MAKCUNEW | KMBOXNET | FERRUM | DHZBOX_MINI | WINDOWS | CAT | CPBOX\n"
         << "input_method = " << input_method << "\n"
         << "makcu_baudrate = " << makcu_baudrate << "\n"
         << "makcu_port = " << makcu_port << "\n"
@@ -1312,6 +1321,7 @@ bool Config::saveConfig(const std::string& filename)
         << "kmbox_net_uuid = " << kmbox_net_uuid << "\n"
         << "ferrum_port = " << ferrum_port << "\n"
         << "ferrum_baudrate = " << ferrum_baudrate << "\n"
+        << "cpbox_port = " << cpbox_port << "\n"
         << "cat_ip = " << cat_ip << "\n"
         << "cat_port = " << cat_port << "\n"
         << "cat_uuid = " << cat_uuid << "\n"
@@ -1433,6 +1443,7 @@ bool Config::saveConfig(const std::string& filename)
     {
         const auto& hk = hotkeys[i];
         file << "[hotkey." << i << "]\n";
+        file << "enabled = " << to_bool_str(hk.enabled) << "\n";
         file << "name = " << hk.name << "\n";
         file << "group = " << hk.group << "\n";
         file << "keys = " << joinStrings(hk.keys) << "\n";
@@ -1441,6 +1452,7 @@ bool Config::saveConfig(const std::string& filename)
         file << "fovX = " << hk.fovX << "\n";
         file << "mask_x = " << to_bool_str(hk.mask_x) << "\n"
              << "mask_y = " << to_bool_str(hk.mask_y) << "\n"
+             << "mask_delay_ms = " << std::clamp(hk.mask_delay_ms, 0, 5000) << "\n"
              << "unlock_x = " << to_bool_str(hk.unlock_x) << "\n"
              << "unlock_y = " << to_bool_str(hk.unlock_y) << "\n"
              << "unlock_y_delay_ms = " << std::clamp(hk.unlock_y_delay_ms, 0, 5000) << "\n"

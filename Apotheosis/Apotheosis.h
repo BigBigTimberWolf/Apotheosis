@@ -31,11 +31,14 @@ extern std::string kmboxNetLastError; // guarded by inputDeviceMutex
 extern std::shared_ptr<mouse_driver::IDriver> dhzboxDriver; // guarded by inputDeviceMutex
 extern std::shared_ptr<mouse_driver::IDriver> ferrumDriver; // guarded by inputDeviceMutex
 namespace mouse_driver { class WindowsDriver; }
+namespace mouse_driver { class CpboxDriver; }
 extern std::shared_ptr<mouse_driver::WindowsDriver> windowsDriver; // guarded by inputDeviceMutex
 extern std::shared_ptr<mouse_driver::IDriver> catDriver; // guarded by inputDeviceMutex
+extern std::shared_ptr<mouse_driver::CpboxDriver> cpboxDriver; // guarded by inputDeviceMutex
 extern std::string catLastError;
 extern std::string ferrumLastError;
 extern std::string dhzboxLastError;
+extern std::string cpboxLastError;
 extern std::atomic<bool> input_method_changed;
 extern std::atomic<bool> aiming;
 

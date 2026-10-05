@@ -22,6 +22,7 @@
 #include "keyboard/hotkey_blocking.h"
 #include "mouse/kmboxNetConnection.h"
 #include "mouse/windows_driver.h"
+#include "mouse/cpbox_driver.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/aim_loop.h"
@@ -54,6 +55,7 @@ int flashRequestHotkey = -1;
 bool flashCancelRequested = false;
 struct FlashPulse {
     bool active = false;
+    bool releasePending = false;
     bool keyboard = false;
     int code = 0;
     int aimHotkeyIndex = -1;
@@ -92,7 +94,7 @@ bool send(Output op,int a,int b=0) {
             if(h.second>=224 && h.second<=231) mods|=static_cast<uint8_t>(1u<<(h.second-224));
             else { if(n==keys.size()) return false; keys[n++]=static_cast<uint8_t>(h.second); }
         }
-        if(flash.active && flash.keyboard && (b || flash.code!=a)) {
+        if(flash.active && !flash.releasePending && flash.keyboard && (b || flash.code!=a)) {
             if(flash.code>=224 && flash.code<=231) mods|=static_cast<uint8_t>(1u<<(flash.code-224));
             else if(!job.held.count({true,flash.code})) {
                 if(n==keys.size()) return false;
@@ -127,7 +129,9 @@ bool send(Output op,int a,int b=0) {
         }
         return kmboxNetSerial->isOpen();
     }
-    auto driver=backend=="FERRUM" ? ferrumDriver : backend=="DHZBOX_MINI" ? dhzboxDriver : backend=="CAT" ? catDriver : nullptr;
+    auto driver=backend=="FERRUM" ? ferrumDriver : backend=="DHZBOX_MINI" ? dhzboxDriver :
+        backend=="CAT" ? catDriver : backend=="CPBOX" ?
+            std::static_pointer_cast<mouse_driver::IDriver>(cpboxDriver) : nullptr;
     if(!driver || !driver->isOpen()) return false;
     if(op==Output::Move) return driver->move(a,b);
     if(op==Output::Wheel) return driver->wheel(a);
@@ -147,9 +151,9 @@ bool button(bool keyboard,int code,bool down) {
 void releaseFlash() {
     if(!flash.active) return;
     std::lock_guard<std::recursive_mutex> output(outputLock);
-    const auto old=flash;
-    flash.active=false;
-    send(old.keyboard ? Output::Key : Output::Button,old.code,0);
+    flash.releasePending=true;
+    if(send(flash.keyboard ? Output::Key : Output::Button,flash.code,0))
+        flash=FlashPulse{};
 }
 void beginFlash(const std::string& key, int aimHotkeyIndex) {
     if(flash.active || outputOwned.load() || devicesChanging.load()) return;
@@ -194,18 +198,12 @@ void finish(const std::string& message) {
 bool pressed(const std::string& key) {
     const int vk=KeyCodes::getKeyCode(key);
     if(key.empty() || vk<=0) return false;
-    if(backend=="WINDOWS") return mouse_driver::windowsPhysicalKeyPressed(vk);
     const int hid=hidKey(key);
-    if(hid) {
-        if(mouse_driver::windowsPhysicalKeyPressed(vk)) return true;
-        if(hid>=0x10000)return false;
-        std::lock_guard<std::mutex> device(inputDeviceMutex);
-        if(backend=="FERRUM") return ferrumDriver && ferrumDriver->physicalKeyPressed(hid)>0;
-        if(backend=="CAT") return catDriver && catDriver->physicalKeyPressed(hid)>0;
-        return backend=="KMBOXNET" && kmboxNetSerial && kmboxNetSerial->isOpen() &&
-            kmboxNetSerial->monitorKeyboard(static_cast<short>(hid))>0;
-    }
-    if((GetAsyncKeyState(vk)&0x8000)!=0) return true;
+    // Use the same device-aware physical-input sampler as aim hotkeys. Keep
+    // macro-owned outputs out of the sampled trigger state, including hardware
+    // keyboards whose injected reports arrive through a separate HID device.
+    if(hid && (job.held.count({true,hid}) ||
+               (flash.active && flash.keyboard && flash.code==hid))) return false;
     return isAnyKeyPressed({key});
 }
 void systemResult(const std::string& text){std::lock_guard<std::mutex> lock(stateMutex);currentStatus.message=text;if(executor)executor->report(text);}
@@ -282,8 +280,9 @@ void ensureExecutor() {
         std::lock_guard<std::mutex> device(inputDeviceMutex);
         const mouse_driver::IDriver* driver=backend=="FERRUM"?ferrumDriver.get():
             backend=="CAT"?catDriver.get():backend=="WINDOWS"?windowsDriver.get():
-            backend=="DHZBOX_MINI"?dhzboxDriver.get():nullptr;
-        if (driver || backend=="FERRUM" || backend=="CAT" || backend=="WINDOWS" || backend=="DHZBOX_MINI")
+            backend=="DHZBOX_MINI"?dhzboxDriver.get():backend=="CPBOX"?cpboxDriver.get():nullptr;
+        if (driver || backend=="FERRUM" || backend=="CAT" || backend=="WINDOWS" ||
+            backend=="DHZBOX_MINI" || backend=="CPBOX")
             return inputFailure(backend,driver,keyboard,code);
         return backend+(keyboard?u8" 键盘命令失败，请检查独立键盘连接或固件能力":u8" 鼠标按钮命令失败，请检查设备连接");
     };
@@ -449,7 +448,7 @@ void tick() {
         cancelFlash=std::exchange(flashCancelRequested,false);
     }
     if(cancelFlash || (flash.active &&
-        (Clock::now()>=flash.deadline ||
+        (flash.releasePending || Clock::now()>=flash.deadline ||
          flash.aimHotkeyIndex!=runtime::g_active_hotkey_index.load()))) releaseFlash();
     if(!cancelFlash && !flashKey.empty() &&
         flashHotkey==runtime::g_active_hotkey_index.load()) beginFlash(flashKey,flashHotkey);

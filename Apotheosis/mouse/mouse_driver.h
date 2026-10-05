@@ -313,6 +313,7 @@ extern const char* const kBackendMakcuNew;
 extern const char* const kBackendKmboxNet;
 extern const char* const kBackendFerrum;
 extern const char* const kBackendDhzboxMini;
+extern const char* const kBackendCpbox;
 
 std::vector<std::string> backendNames();
 
@@ -327,7 +328,8 @@ OpenResult open(const std::string& backend,
                 const std::string& ferrumPort = "", unsigned int ferrumBaud = 3000000,
                 const std::string& dhzboxIp = "", unsigned short dhzboxPort = 8888, int dhzboxKey = 88,
                 const std::string& catIp = "", unsigned short catPort = 8888,
-                const std::string& catUuid = "", unsigned short catMonitorPort = 1234);
+                const std::string& catUuid = "", unsigned short catMonitorPort = 1234,
+                const std::string& cpboxPort = "");
 
 std::string describeStatus(const std::string& backend, bool open, const std::string& detail);
 

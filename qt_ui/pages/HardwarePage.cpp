@@ -1,6 +1,7 @@
 #include "pages/HardwarePage.h"
 
 #include "Apotheosis.h"
+#include "mouse/cpbox_driver.h"
 #include "runtime/config_snapshot.h"
 #include "config/ConfigManager.h"
 #include "widgets/CardWidget.h"
@@ -48,7 +49,7 @@ QString zh(const char* text)
 // MAKCU      : 纯 ASCII 鼠标固件。可单独用, 也可加一台键盘硬件 -> hybrid。
 // MAKCUNEW   : 二进制鼠标固件(与键盘那台同协议), 双硬件由 WrappedMakcuNewDriver 处理。
 // KMBOXNET   : 网络盒子。
-constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET", "FERRUM", "DHZBOX_MINI", "WINDOWS", "CAT"};
+constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET", "FERRUM", "DHZBOX_MINI", "WINDOWS", "CAT", "CPBOX"};
 constexpr int kInputMethodCount = sizeof(kInputMethodIds) / sizeof(kInputMethodIds[0]);
 
 // ── 串口枚举 ──────────────────────────────────────────────────────────────
@@ -159,6 +160,7 @@ HardwarePage::HardwarePage(QWidget* parent)
         ,zh(u8"DHZBox Mini（网络）")
         ,zh(u8"Windows 原生输入（SendInput）")
         ,zh(u8"CAT（加密网络）")
+        ,QStringLiteral("CPBOX")
     });
     inputCard->contentLayout()->addWidget(
         FormKit::fieldRow(zh(u8"方式"), m_inputMethodCombo));
@@ -345,6 +347,18 @@ HardwarePage::HardwarePage(QWidget* parent)
         m_catUuid->setToolTip(catHint);
         m_deviceStack->addWidget(page);
     }
+    {
+        auto* page = new QWidget;
+        auto* panel = new QVBoxLayout(page);
+        panel->setContentsMargins(0, 0, 0, 0);
+        panel->setSpacing(10);
+        m_cpboxPort = makePortCombo();
+        panel->addWidget(FormKit::fieldRow(zh(u8"CPBox 串口"), m_cpboxPort));
+        const QString cpboxHint = zh(u8"通过官方 cpbox_mouse_dll.dll 接入，使用 115200 波特率和 20 ms 超时。把同架构 DLL 放在程序 exe 同目录。支持相对移动、左右键输出、五种鼠标键监听和 XY 轴屏蔽；不支持键盘输出、中键/侧键输出或滚轮输出。");
+        page->setToolTip(cpboxHint);
+        m_cpboxPort->setToolTip(cpboxHint);
+        m_deviceStack->addWidget(page);
+    }
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
 
@@ -435,6 +449,9 @@ HardwarePage::HardwarePage(QWidget* parent)
     connect(m_ferrumBaud, &QComboBox::currentIndexChanged, this, [this](int) {
         ConfigManager::instance().setFerrumBaudrate(comboNumber(m_ferrumBaud));
     });
+    connect(m_cpboxPort, &QComboBox::currentIndexChanged, this, [this](int) {
+        ConfigManager::instance().setCpboxPort(comboText(m_cpboxPort));
+    });
     connect(m_dhzboxIp, &QLineEdit::textChanged, this, [](const QString& v) { ConfigManager::instance().setDhzboxIp(v); });
     connect(m_dhzboxPort, &QSpinBox::valueChanged, this, [](int v) { ConfigManager::instance().setDhzboxPort(v); });
     connect(m_dhzboxKey, &QSpinBox::valueChanged, this, [](int v) { ConfigManager::instance().setDhzboxKey(v); });
@@ -480,6 +497,7 @@ void HardwarePage::loadFieldsFromConfig()
     else if (method == QStringLiteral("DHZBOX_MINI")) index = 4;
     else if (method == QStringLiteral("WINDOWS")) index = 5;
     else if (method == QStringLiteral("CAT")) index = 6;
+    else if (method == QStringLiteral("CPBOX")) index = 7;
 
     m_inputMethodCombo->blockSignals(true);
     m_inputMethodCombo->setCurrentIndex(index);
@@ -504,6 +522,7 @@ void HardwarePage::loadFieldsFromConfig()
     selectByValue(m_makcuNewBaudKbd, cm.makcuNewBaudrateKbd());
     selectByValue(m_ferrumPort, cm.ferrumPort());
     selectByValue(m_ferrumBaud, cm.ferrumBaudrate());
+    selectByValue(m_cpboxPort, cm.cpboxPort());
     // 有端口即视为"接了键盘硬件"。空端口表示没有第二台 -> 不勾选, 面板隐藏。
     {
         const bool on = !cm.makcuNewPortKbd().isEmpty();
@@ -567,6 +586,7 @@ void HardwarePage::refreshPortLists()
     fill(m_makcuNewPort,    cm.makcuNewPort());
     fill(m_makcuNewPortKbd, cm.makcuNewPortKbd());
     fill(m_ferrumPort, cm.ferrumPort());
+    fill(m_cpboxPort, cm.cpboxPort());
 
     // 波特率: 档位是固定的, 但配置值可能不在档位里(手改过 ini) —— 补进去, 避免被冲掉。
     const auto ensureBaud = [&](QComboBox* box, int value) {
@@ -607,6 +627,7 @@ void HardwarePage::syncConfigToRuntime()
     config.kmbox_net_uuid = cm.kmboxNetUuid().toStdString();
     config.ferrum_port = cm.ferrumPort().toStdString();
     config.ferrum_baudrate = cm.ferrumBaudrate();
+    config.cpbox_port = cm.cpboxPort().toStdString();
     config.dhzbox_ip = cm.dhzboxIp().toStdString();
     config.dhzbox_port = cm.dhzboxPort();
     config.cat_ip = cm.catIp().toStdString();
@@ -651,6 +672,8 @@ extern MakcuConnection* makcuSerial;
 extern MakcuNewConnection* makcuNewSerial;
 extern MakcuNewConnection* makcuNewSerialKbd;
 extern KmboxNetConnection* kmboxNetSerial;
+extern std::shared_ptr<mouse_driver::CpboxDriver> cpboxDriver;
+extern std::string cpboxLastError;
 
 void HardwarePage::refreshStatus()
 {
@@ -717,6 +740,11 @@ void HardwarePage::refreshStatus()
         pointerExists = catDriver != nullptr;
         connected = pointerExists && catDriver->isOpen();
         break;
+    case 7:
+        deviceName = QStringLiteral("CPBox");
+        pointerExists = cpboxDriver != nullptr;
+        connected = pointerExists && cpboxDriver->isOpen();
+        break;
     case 5:
         deviceName = zh(u8"Windows 原生输入");
         pointerExists = windowsDriver != nullptr;
@@ -739,6 +767,7 @@ void HardwarePage::refreshStatus()
             status = zh(u8" — 系统接口就绪");
             if (!windowsDriver->lastError().empty()) status += zh(u8"；") + QString::fromStdString(windowsDriver->lastError());
         }
+        if (idx == 7) status += zh(u8"（官方 SDK）");
         m_statusText->setText(deviceName + status);
         m_statusText->setStyleSheet("color:" + color + "; font-size:13px;");
         m_connectBtn->setText(zh(u8"重连鼠标"));
@@ -755,6 +784,9 @@ void HardwarePage::refreshStatus()
         else if (idx == 4 && !dhzboxLastError.empty())
             m_statusText->setText(deviceName + zh(u8" — 初始化失败: ")
                                   + QString::fromStdString(dhzboxLastError));
+        else if (idx == 7 && !cpboxLastError.empty())
+            m_statusText->setText(deviceName + zh(u8" — 连接失败: ")
+                                  + QString::fromStdString(cpboxLastError));
         else
             m_statusText->setText(deviceName + (pointerExists
                 ? zh(u8" — 连接失败(检查IP/端口/UUID或串口号)")

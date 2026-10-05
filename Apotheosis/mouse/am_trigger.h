@@ -110,7 +110,8 @@ public:
     bool continuousActive() const { return mode_ == AmFireMode::Continuous && started_; }
 
 private:
-    int minPulse() const { return mode_ == AmFireMode::Burst ? 10 : 0; }
+    // Do not collapse configured durations/intervals through the old 10ms floor.
+    int minPulse() const { return mode_ == AmFireMode::Burst ? 1 : 0; }
     AmFireMode mode_ = AmFireMode::SmartContinuous;
     TriggerPhase phase_ = TriggerPhase::Idle;
     bool started_ = false;

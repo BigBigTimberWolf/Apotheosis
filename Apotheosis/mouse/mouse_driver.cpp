@@ -10,6 +10,7 @@
 #include "dhzbox_driver.h"
 #include "ferrum_driver.h"
 #include "cat_driver.h"
+#include "cpbox_driver.h"
 #include "windows_driver.h"
 
 namespace mouse_driver
@@ -20,6 +21,7 @@ const char* const kBackendMakcuNew  = "MAKCUNEW";
 const char* const kBackendKmboxNet  = "KMBOXNET";
 const char* const kBackendFerrum = "FERRUM";
 const char* const kBackendDhzboxMini = "DHZBOX_MINI";
+const char* const kBackendCpbox = "CPBOX";
 
 std::string describeCapabilities(uint32_t caps)
 {
@@ -41,7 +43,7 @@ std::string describeCapabilities(uint32_t caps)
 std::vector<std::string> backendNames()
 {
     return { kBackendMakcu, kBackendMakcuNew, kBackendKmboxNet,
-             kBackendFerrum, kBackendDhzboxMini, "WINDOWS", "CAT" };
+             kBackendFerrum, kBackendDhzboxMini, "WINDOWS", "CAT", kBackendCpbox };
 }
 
 std::string describeStatus(const std::string& backend, bool open, const std::string& detail)
@@ -408,7 +410,8 @@ OpenResult open(const std::string& backend,
                 const std::string& ferrumPort, unsigned int ferrumBaud,
                 const std::string& dhzboxIp, unsigned short dhzboxPort, int dhzboxKey,
                 const std::string& catIp, unsigned short catPort,
-                const std::string& catUuid, unsigned short catMonitorPort)
+                const std::string& catUuid, unsigned short catMonitorPort,
+                const std::string& cpboxPort)
 {
     OpenResult result;
     if (backend == "WINDOWS") {
@@ -434,6 +437,11 @@ OpenResult open(const std::string& backend,
         auto driver=std::make_unique<CatDriver>(catIp,catPort,catUuid,catMonitorPort);
         if(!driver->isOpen()) { result.error=driver->lastError(); return result; }
         result.driver=driver.release(); return result;
+    }
+    if (backend == kBackendCpbox) {
+        auto driver = std::make_unique<CpboxDriver>(cpboxPort);
+        if (!driver->isOpen()) { result.error = driver->lastError(); return result; }
+        result.driver = driver.release(); return result;
     }
     if (backend == kBackendFerrum)
     {

@@ -351,7 +351,7 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
     page->addStretch(); add(waitPage);
 
     auto* firePage = panelPage(zh(u8"05 · 执行开火"),
-        zh(u8"智能连点：进区即按下，离区即停止。连点：起始等待后循环，按住和松开各至少 10 ms。持续：首次触发后保持到停用。智能持续：离区超过宽限才松开。3-1 切枪使用短按。"), page);
+        zh(u8"智能连点：进区即按下，离区即停止。连点：起始等待后循环，按住时长按设置执行（最小 1 ms）。持续：首次触发后保持到停用。智能持续：离区超过宽限才松开。3-1 切枪使用短按。"), page);
     fireMode_ = new QComboBox;
     fireMode_->setObjectName("triggerFireMode");
     fireMode_->addItem(zh(u8"智能连点"), 0);
@@ -368,7 +368,7 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
     page->addStretch(); add(firePage);
 
     auto* cooldownPage = panelPage(zh(u8"06 · 冷却"),
-        zh(u8"AM 规则：从松开左键开始计时，到时经过一轮状态清理再允许下次按下。连点模式最少等待 10 ms。"), page);
+        zh(u8"从松开左键开始按设置的时长计时（最小 1 ms），到时经过一轮状态清理再允许下次按下。"), page);
     fireInterval_ = spin(0, 2000, 5, 200); row(page, u8"松开后等待 ms", fireInterval_);
     intervalJitter_ = spin(0, 500, 1, 0); intervalJitter_->setParent(this); intervalJitter_->hide();
     targetCooldown_ = spin(0, 2000, 5, 0); targetCooldown_->setParent(this); targetCooldown_->hide();

@@ -97,6 +97,16 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CapturePage::onSourceChanged);
 
+    m_deviceApiCombo = new QComboBox;
+    m_deviceApiCombo->addItem(QStringLiteral("Media Foundation (MF)"), QStringLiteral("mf"));
+    m_deviceApiCombo->addItem(QStringLiteral("DirectShow (DS)"), QStringLiteral("dshow"));
+    m_deviceApiCombo->setToolTip(QStringLiteral(
+        "选择打开采集卡时使用的 Windows 接口。MF 与 DS 分别枚举和打开设备，不会在打开失败时自动切换接口。"));
+    m_deviceApiRow = FormKit::fieldRow(QStringLiteral("采集卡接口"), m_deviceApiCombo);
+    m_cardCard->contentLayout()->addWidget(m_deviceApiRow);
+    connect(m_deviceApiCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &CapturePage::onDeviceApiChanged);
+
     m_streamUrl = new QLineEdit;
     m_streamUrl->setPlaceholderText(QStringLiteral("udp://0.0.0.0:23000"));
     m_streamUrl->setToolTip(QStringLiteral(
@@ -261,11 +271,15 @@ void CapturePage::updateSourceUi() {
     const bool ndi = source == QStringLiteral("ndi");
     const bool dxgi = source == QStringLiteral("dxgi");
     m_streamRow->setVisible(stream);
+    m_deviceApiRow->setVisible(!network);
     m_streamUrl->setEnabled(stream);
     m_ndiRow->setVisible(ndi);
     m_dxgiRow->setVisible(dxgi);
     m_dxgiNote->setVisible(dxgi);
     m_devCombo->setEnabled(!network);
+    const MFDeviceInfo* selected = currentDevice();
+    m_deviceApiCombo->setEnabled(!network &&
+        !(selected && magewell::IsDeviceKey(selected->friendly_name)));
     m_refreshBtn->setEnabled(!network);
     m_fmtCombo->setEnabled(!network);
     m_resCombo->setEnabled(!network);
@@ -273,6 +287,13 @@ void CapturePage::updateSourceUi() {
     m_gpuDecode->setEnabled(!network &&
         !(currentDevice() && magewell::IsDeviceKey(currentDevice()->friendly_name)));
     updateCapabilitySummary();
+}
+
+void CapturePage::onDeviceApiChanged(int) {
+    if (m_restoring || m_deviceApiCombo->currentIndex() < 0) return;
+    ConfigManager::instance().setCaptureDeviceApi(m_deviceApiCombo->currentData().toString());
+    clearError();
+    refreshDevices();
 }
 
 void CapturePage::onSourceChanged(int) {
@@ -331,7 +352,8 @@ void CapturePage::refreshDevices() {
     if (want.isEmpty())
         want = ConfigManager::instance().captureDevice();
 
-    m_devices = capture_card::ProbeAll();
+    m_devices = ConfigManager::instance().captureDeviceApi() == QStringLiteral("dshow")
+        ? capture_card::ProbeDirectShow() : capture_card::ProbeMediaFoundation();
     for (const auto& sdk : magewell::EnumerateDevices()) {
         MFDeviceInfo d;
         d.index = -1;
@@ -383,6 +405,7 @@ void CapturePage::refreshDevices() {
     rebuildFormatCombo();
     const MFDeviceInfo* selected = currentDevice();
     m_gpuDecode->setEnabled(!(selected && magewell::IsDeviceKey(selected->friendly_name)));
+    updateSourceUi();
 }
 
 void CapturePage::onNdiSourceEdited() {
@@ -468,6 +491,7 @@ void CapturePage::onDeviceChanged(int) {
     if (sdk)
         ConfigManager::instance().setCaptureDevice(
             QString::fromStdString(dev->friendly_name));
+    updateSourceUi();
     rebuildFormatCombo();
 }
 
@@ -634,6 +658,7 @@ void CapturePage::updateCapabilitySummary() {
         return;
     }
     const MFDeviceInfo* dev = currentDevice();
+    const auto& cfg = ConfigManager::instance();
 
     if (!dev) {
         m_capSummary->setText(QStringLiteral("—"));
@@ -643,13 +668,12 @@ void CapturePage::updateCapabilitySummary() {
 
     if (magewell::IsDeviceKey(dev->friendly_name) && dev->caps.empty())
         m_capSummary->setText(QStringLiteral("美乐威 SDK 已识别设备；当前无锁定的视频信号。"));
-    else if (dev->directshow_fallback)
-        m_capSummary->setText(QStringLiteral("DirectShow 回退：%1")
-                              .arg(QString::fromStdString(mfcap::Describe(*dev))));
     else
-        m_capSummary->setText(QString::fromStdString(mfcap::Describe(*dev)));
+        m_capSummary->setText(QStringLiteral("%1：%2")
+            .arg(cfg.captureDeviceApi() == QStringLiteral("dshow")
+                ? QStringLiteral("DirectShow") : QStringLiteral("Media Foundation"))
+            .arg(QString::fromStdString(mfcap::Describe(*dev))));
 
-    const auto& cfg = ConfigManager::instance();
     const int side = cfg.detectionResolution();
 
     std::string rf, why;
@@ -667,6 +691,12 @@ void CapturePage::onLoadConfig() {
     auto& cfg = ConfigManager::instance();
 
     m_gpuDecode->setChecked(cfg.captureGpuDecode());
+
+    {
+        QSignalBlocker blocker(m_deviceApiCombo);
+        const int apiIndex = m_deviceApiCombo->findData(cfg.captureDeviceApi());
+        m_deviceApiCombo->setCurrentIndex(apiIndex >= 0 ? apiIndex : 0);
+    }
 
     m_restoring = true;
     {

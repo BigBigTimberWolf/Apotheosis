@@ -72,6 +72,16 @@ void ConfigManager::setCaptureSource(const QString& v) {
     emit configChanged();
 }
 
+QString ConfigManager::captureDeviceApi() const {
+    const QString value = m_settings->value("Capture/capture_device_api", "mf").toString();
+    return value == QStringLiteral("dshow") ? value : QStringLiteral("mf");
+}
+
+void ConfigManager::setCaptureDeviceApi(const QString& v) {
+    m_settings->setValue("Capture/capture_device_api", v == QStringLiteral("dshow") ? v : QStringLiteral("mf"));
+    emit configChanged();
+}
+
 QString ConfigManager::captureStreamUrl() const {
     return m_settings->value("Capture/capture_stream_url", "").toString();
 }
@@ -165,7 +175,8 @@ void ConfigManager::setCircleMask(bool v) {
 QString ConfigManager::inputMethod() const {
     const QString value = m_settings->value("Hardware/input_method", "MAKCU").toString();
     if (value == QStringLiteral("MAKCUNEW") || value == QStringLiteral("KMBOXNET") ||
-        value == QStringLiteral("FERRUM") || value == QStringLiteral("DHZBOX_MINI") || value == QStringLiteral("WINDOWS") || value == QStringLiteral("CAT"))
+        value == QStringLiteral("FERRUM") || value == QStringLiteral("DHZBOX_MINI") ||
+        value == QStringLiteral("WINDOWS") || value == QStringLiteral("CAT") || value == QStringLiteral("CPBOX"))
         return value;
     return QStringLiteral("MAKCU");
 }
@@ -179,6 +190,8 @@ QString ConfigManager::ferrumPort() const { return m_settings->value("Hardware/f
 void ConfigManager::setFerrumPort(const QString& v) { m_settings->setValue("Hardware/ferrum_port", v); emit configChanged(); }
 int ConfigManager::ferrumBaudrate() const { return m_settings->value("Hardware/ferrum_baudrate", 3000000).toInt(); }
 void ConfigManager::setFerrumBaudrate(int v) { m_settings->setValue("Hardware/ferrum_baudrate", v); emit configChanged(); }
+QString ConfigManager::cpboxPort() const { return m_settings->value("Hardware/cpbox_port", "").toString(); }
+void ConfigManager::setCpboxPort(const QString& v) { m_settings->setValue("Hardware/cpbox_port", v); emit configChanged(); }
 QString ConfigManager::catIp() const { return m_settings->value("Hardware/cat_ip", "192.168.7.1").toString(); }
 void ConfigManager::setCatIp(const QString& v) { m_settings->setValue("Hardware/cat_ip", v); emit configChanged(); }
 int ConfigManager::catPort() const { return m_settings->value("Hardware/cat_port", 8888).toInt(); }
@@ -668,6 +681,7 @@ int ConfigManager::hotkeyCount() const {
 
 void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     auto prefix = QStringLiteral("Hotkey_%1/").arg(index);
+    m_settings->setValue(prefix + "enabled", data.enabled);
     m_settings->setValue(prefix + "name", data.name);
     m_settings->setValue(prefix + "group", data.group);
     m_settings->setValue(prefix + "keys", data.keys.join(","));
@@ -688,6 +702,7 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "unlock_y", data.unlockY);
     m_settings->setValue(prefix + "unlock_y_delay_ms", data.unlockYDelayMs);
     m_settings->setValue(prefix + "aim_delay_ms", data.aimDelayMs);
+    m_settings->setValue(prefix + "mask_delay_ms", data.maskDelayMs);
     m_settings->setValue(prefix + "ctl_enabled", data.ctlEnabled);
     m_settings->setValue(prefix + "ctl_y_offset", static_cast<double>(data.ctlYOffset));
     m_settings->setValue(prefix + "ctl_y_offset_max", static_cast<double>(data.ctlYOffsetMax));
@@ -700,6 +715,7 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     HotkeyData data;
     auto prefix = QStringLiteral("Hotkey_%1/").arg(index);
 
+    data.enabled = m_settings->value(prefix + "enabled", true).toBool();
     data.name = m_settings->value(prefix + "name", "Aim").toString();
     data.group = m_settings->value(prefix + "group", QString::fromUtf8(u8"\xe9\xbb\x98\xe8\xae\xa4")).toString();
     data.keys = m_settings->value(prefix + "keys", "RightMouseButton").toString().split(",", Qt::SkipEmptyParts);
@@ -720,6 +736,7 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.unlockY = m_settings->value(prefix + "unlock_y", false).toBool();
     data.unlockYDelayMs = std::clamp(m_settings->value(prefix + "unlock_y_delay_ms", 0).toInt(), 0, 5000);
     data.aimDelayMs = std::clamp(m_settings->value(prefix + "aim_delay_ms", 0).toInt(), 0, 2000);
+    data.maskDelayMs = std::clamp(m_settings->value(prefix + "mask_delay_ms", 0).toInt(), 0, 5000);
     data.ctlEnabled = m_settings->value(prefix + "ctl_enabled", false).toBool();
     data.ctlYOffset = m_settings->value(prefix + "ctl_y_offset", 0.5).toDouble();
     data.ctlYOffsetMax = m_settings->value(prefix + "ctl_y_offset_max", 0.5).toDouble();

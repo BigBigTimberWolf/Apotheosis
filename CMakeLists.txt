@@ -175,6 +175,7 @@ set(APP_SOURCES
     "${SRC_DIR}/mouse/dhzbox_driver.cpp"
     "${SRC_DIR}/mouse/ferrum_driver.cpp"
     "${SRC_DIR}/mouse/cat_driver.cpp"
+    "${SRC_DIR}/mouse/cpbox_driver.cpp"
     "${SRC_DIR}/mouse/windows_driver.cpp"
     "${SRC_DIR}/mouse/windows_driver.h"
     "${SRC_DIR}/mouse/mouse.cpp"
@@ -308,6 +309,20 @@ target_link_libraries(serial_embedded PUBLIC setupapi)
 
 add_executable(ai WIN32 ${APP_SOURCES})
 target_sources(ai PRIVATE "${QT_UI_DIR}/style/theme.qrc")
+
+# Optional official CPBox runtime. The SDK remains outside the source tree;
+# set CPBOX_SDK_ROOT to the extracted cpbox_sdk_final directory to stage its DLL.
+set(CPBOX_SDK_ROOT "" CACHE PATH "Root of the official CPBox SDK")
+if(CPBOX_SDK_ROOT)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(CPBOX_ARCH "x64")
+    else()
+        set(CPBOX_ARCH "x86")
+    endif()
+    set(CPBOX_DLL "${CPBOX_SDK_ROOT}/bin/${CPBOX_ARCH}/cpbox_mouse_dll.dll")
+    require_file("${CPBOX_DLL}" "CPBox SDK runtime DLL")
+    copy_runtime(ai "${CPBOX_DLL}")
+endif()
 
 # Optional official Magewell SDK. The SDK is installed separately; its files are
 # deliberately not copied into the source tree or packaged with the application.

@@ -752,6 +752,30 @@ std::vector<MFDeviceInfo> ProbeAll()
     return devices;
 }
 
+std::vector<MFDeviceInfo> ProbeMediaFoundation()
+{
+    return MFCapture::EnumerateDevicesWithCaps(-1);
+}
+
+std::vector<MFDeviceInfo> ProbeDirectShow()
+{
+    const auto directshow = dshow::EnumerateDevices();
+    std::vector<MFDeviceInfo> devices;
+    devices.reserve(directshow.size());
+    for (const auto& source : directshow) {
+        MFDeviceInfo device;
+        device.index = source.index;
+        device.name = source.name;
+        device.friendly_name = source.name;
+        device.caps = source.caps;
+        device.caps_probed = true;
+        device.directshow_fallback = true;
+        device.directshow_index = source.index;
+        devices.push_back(std::move(device));
+    }
+    return devices;
+}
+
 std::vector<MFDeviceInfo> ProbeOne(int device_index)
 {
     auto devices = MFCapture::EnumerateDevicesWithCaps(device_index);

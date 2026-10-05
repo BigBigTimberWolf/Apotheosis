@@ -30,6 +30,7 @@
 #include "mouse/dhzbox_driver.h"
 #include "mouse/ferrum_driver.h"
 #include "mouse/cat_driver.h"
+#include "mouse/cpbox_driver.h"
 #include "mouse/windows_driver.h"
 #include "Apotheosis.h"
 #include "keyboard_listener.h"
@@ -81,9 +82,11 @@ std::shared_ptr<mouse_driver::IDriver> dhzboxDriver;
 std::shared_ptr<mouse_driver::IDriver> ferrumDriver;
 std::shared_ptr<mouse_driver::WindowsDriver> windowsDriver;
 std::shared_ptr<mouse_driver::IDriver> catDriver;
+std::shared_ptr<mouse_driver::CpboxDriver> cpboxDriver;
 std::string catLastError;
 std::string ferrumLastError;
 std::string dhzboxLastError;
+std::string cpboxLastError;
 
 std::atomic<bool> detection_resolution_changed(false);
 std::atomic<bool> capture_method_changed(false);
@@ -154,6 +157,7 @@ void createInputDevices()
     std::shared_ptr<mouse_driver::IDriver> oldDhzbox;
     std::shared_ptr<mouse_driver::IDriver> oldFerrum;
     std::shared_ptr<mouse_driver::IDriver> oldCat;
+    std::shared_ptr<mouse_driver::CpboxDriver> oldCpbox;
     std::shared_ptr<mouse_driver::WindowsDriver> oldWindows;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
@@ -164,6 +168,7 @@ void createInputDevices()
         oldDhzbox = std::move(dhzboxDriver);
         oldFerrum = std::move(ferrumDriver);
         oldCat = std::move(catDriver);
+        oldCpbox = std::move(cpboxDriver);
         oldWindows = std::move(windowsDriver);
         makcuSerial = nullptr;
         makcuNewSerial = nullptr;
@@ -177,6 +182,7 @@ void createInputDevices()
     oldDhzbox.reset();
     oldFerrum.reset();
     oldCat.reset();
+    oldCpbox.reset();
     oldWindows.reset();
     std::unique_ptr<MakcuConnection> nextMakcu;
     std::unique_ptr<MakcuNewConnection> nextNew;
@@ -185,6 +191,7 @@ void createInputDevices()
     std::shared_ptr<mouse_driver::IDriver> nextDhzbox;
     std::shared_ptr<mouse_driver::IDriver> nextFerrum;
     std::shared_ptr<mouse_driver::IDriver> nextCat;
+    std::shared_ptr<mouse_driver::CpboxDriver> nextCpbox;
     std::shared_ptr<mouse_driver::WindowsDriver> nextWindows;
     if (cfg->input_method == "WINDOWS")
         nextWindows = std::make_shared<mouse_driver::WindowsDriver>();
@@ -286,6 +293,12 @@ void createInputDevices()
         { std::lock_guard<std::mutex> lock(inputDeviceMutex); ferrumLastError = nextFerrum->lastError(); }
         if (!nextFerrum->isOpen()) nextFerrum.reset();
     }
+    else if (cfg->input_method == "CPBOX")
+    {
+        nextCpbox = std::make_shared<mouse_driver::CpboxDriver>(cfg->cpbox_port);
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); cpboxLastError = nextCpbox->lastError(); }
+        if (!nextCpbox->isOpen()) nextCpbox.reset();
+    }
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
         makcuSerial = nextMakcu.release();
@@ -295,6 +308,7 @@ void createInputDevices()
         dhzboxDriver = std::move(nextDhzbox);
         ferrumDriver = std::move(nextFerrum);
         catDriver = std::move(nextCat);
+        cpboxDriver = std::move(nextCpbox);
         windowsDriver = std::move(nextWindows);
     }
     // 注意: 这里【不再】调用 resetMouse() —— 它已经在函数开头、销毁旧连接之前调过了。
@@ -317,6 +331,7 @@ void reconnectMouseDevice()
     std::shared_ptr<mouse_driver::IDriver> oldDhzbox;
     std::shared_ptr<mouse_driver::IDriver> oldFerrum;
     std::shared_ptr<mouse_driver::IDriver> oldCat;
+    std::shared_ptr<mouse_driver::CpboxDriver> oldCpbox;
     std::shared_ptr<mouse_driver::WindowsDriver> oldWindows;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
@@ -326,6 +341,7 @@ void reconnectMouseDevice()
         oldDhzbox = std::move(dhzboxDriver);
         oldFerrum = std::move(ferrumDriver);
         oldCat = std::move(catDriver);
+        oldCpbox = std::move(cpboxDriver);
         oldWindows = std::move(windowsDriver);
         makcuSerial = nullptr;
         makcuNewSerial = nullptr;
@@ -337,6 +353,7 @@ void reconnectMouseDevice()
     oldDhzbox.reset();
     oldFerrum.reset();
     oldCat.reset();
+    oldCpbox.reset();
     oldWindows.reset();
 
     std::unique_ptr<MakcuConnection> nextMakcu;
@@ -345,6 +362,7 @@ void reconnectMouseDevice()
     std::shared_ptr<mouse_driver::IDriver> nextDhzbox;
     std::shared_ptr<mouse_driver::IDriver> nextFerrum;
     std::shared_ptr<mouse_driver::IDriver> nextCat;
+    std::shared_ptr<mouse_driver::CpboxDriver> nextCpbox;
     std::shared_ptr<mouse_driver::WindowsDriver> nextWindows;
 
     if (cfg->input_method == "WINDOWS")
@@ -395,6 +413,12 @@ void reconnectMouseDevice()
         { std::lock_guard<std::mutex> lock(inputDeviceMutex); ferrumLastError = nextFerrum->lastError(); }
         if (!nextFerrum->isOpen()) nextFerrum.reset();
     }
+    else if (cfg->input_method == "CPBOX")
+    {
+        nextCpbox = std::make_shared<mouse_driver::CpboxDriver>(cfg->cpbox_port);
+        { std::lock_guard<std::mutex> lock(inputDeviceMutex); cpboxLastError = nextCpbox->lastError(); }
+        if (!nextCpbox->isOpen()) nextCpbox.reset();
+    }
 
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
@@ -404,6 +428,7 @@ void reconnectMouseDevice()
         dhzboxDriver = std::move(nextDhzbox);
         ferrumDriver = std::move(nextFerrum);
         catDriver = std::move(nextCat);
+        cpboxDriver = std::move(nextCpbox);
         windowsDriver = std::move(nextWindows);
     }
     // 注意: resetMouse() 已在函数开头调过(那时旧连接仍有效)。

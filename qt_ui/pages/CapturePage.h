@@ -28,6 +28,7 @@ private slots:
     void onResolutionChanged(int index);
     void onFpsChanged(int index);
     void onSourceChanged(int index);
+    void onDeviceApiChanged(int index);
     void onStreamUrlEdited();
     void refreshNdiSources();
     void onNdiSourceEdited();
@@ -51,6 +52,8 @@ private:
 
     CardWidget*   m_cardCard{};
     QComboBox*    m_sourceCombo{};
+    QComboBox*    m_deviceApiCombo{};
+    QWidget*      m_deviceApiRow{};
     QLineEdit*    m_streamUrl{};
     QWidget*      m_streamRow{};
     QComboBox*    m_ndiSource{};

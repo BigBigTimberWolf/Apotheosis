@@ -55,6 +55,7 @@ void ConfigBridge::syncToRuntime() {
 
     const std::string oldCaptureDevice = config.capture_device;
     const std::string oldCaptureSource = config.capture_source;
+    const std::string oldCaptureDeviceApi = config.capture_device_api;
     const std::string oldCaptureStreamUrl = config.capture_stream_url;
     const std::string oldCaptureNdiSource = config.capture_ndi_source;
     const std::string oldCaptureDxgiOutput = config.capture_dxgi_output;
@@ -66,6 +67,7 @@ void ConfigBridge::syncToRuntime() {
 
     config.capture_device     = qs(cm.captureDevice());
     config.capture_source     = qs(cm.captureSource());
+    config.capture_device_api = qs(cm.captureDeviceApi());
     config.capture_stream_url = qs(cm.captureStreamUrl());
     config.capture_ndi_source = qs(cm.captureNdiSource());
     config.capture_dxgi_output = qs(cm.captureDxgiOutput());
@@ -90,6 +92,7 @@ void ConfigBridge::syncToRuntime() {
     config.kmbox_net_uuid     = qs(cm.kmboxNetUuid());
     config.ferrum_port = qs(cm.ferrumPort());
     config.ferrum_baudrate = cm.ferrumBaudrate();
+    config.cpbox_port = qs(cm.cpboxPort());
     config.dhzbox_ip = qs(cm.dhzboxIp());
     config.dhzbox_port = cm.dhzboxPort();
     config.dhzbox_key = cm.dhzboxKey();
@@ -184,6 +187,7 @@ void ConfigBridge::syncToRuntime() {
     const bool captureDeviceChanged =
         config.capture_device != oldCaptureDevice
         || config.capture_source != oldCaptureSource
+        || config.capture_device_api != oldCaptureDeviceApi
         || config.capture_stream_url != oldCaptureStreamUrl
         || config.capture_ndi_source != oldCaptureNdiSource
         || config.capture_dxgi_output != oldCaptureDxgiOutput
@@ -221,6 +225,7 @@ void ConfigBridge::syncFromRuntime()
 
     cm.setCaptureDevice(qstr(config.capture_device));
     cm.setCaptureSource(qstr(config.capture_source));
+    cm.setCaptureDeviceApi(qstr(config.capture_device_api));
     cm.setCaptureStreamUrl(qstr(config.capture_stream_url));
     cm.setCaptureNdiSource(qstr(config.capture_ndi_source));
     cm.setCaptureDxgiOutput(qstr(config.capture_dxgi_output));
@@ -244,6 +249,7 @@ void ConfigBridge::syncFromRuntime()
     cm.setKmboxNetUuid(qstr(config.kmbox_net_uuid));
     cm.setFerrumPort(qstr(config.ferrum_port));
     cm.setFerrumBaudrate(config.ferrum_baudrate);
+    cm.setCpboxPort(qstr(config.cpbox_port));
     cm.setDhzboxIp(qstr(config.dhzbox_ip));
     cm.setDhzboxPort(config.dhzbox_port);
     cm.setDhzboxKey(config.dhzbox_key);
@@ -337,6 +343,7 @@ void ConfigBridge::syncFromRuntime()
     for (int i = 0; i < static_cast<int>(config.hotkeys.size()); ++i) {
         const auto& hp = config.hotkeys[i];
         ConfigManager::HotkeyData hd;
+        hd.enabled = hp.enabled;
         hd.name = qstr(hp.name);
         hd.group = qstr(hp.group);
         hd.keys.clear();
@@ -376,6 +383,7 @@ void ConfigBridge::syncFromRuntime()
         hd.unlockY = hp.unlock_y;
         hd.unlockYDelayMs = hp.unlock_y_delay_ms;
         hd.aimDelayMs = hp.aim_delay_ms;
+        hd.maskDelayMs = hp.mask_delay_ms;
         hd.ctlEnabled          = hp.ctl_enabled;
         hd.ctlYOffset          = hp.ctl_y_offset;
         hd.ctlYOffsetMax       = hp.ctl_y_offset_max;

@@ -21,6 +21,8 @@ public:
     void setCaptureDevice(const QString& v);
     QString captureSource() const;
     void setCaptureSource(const QString& v);
+    QString captureDeviceApi() const;
+    void setCaptureDeviceApi(const QString& v);
     QString captureStreamUrl() const;
     QString captureNdiSource() const;
     void setCaptureNdiSource(const QString& v);
@@ -68,6 +70,8 @@ public:
     void setFerrumPort(const QString& v);
     int ferrumBaudrate() const;
     void setFerrumBaudrate(int v);
+    QString cpboxPort() const;
+    void setCpboxPort(const QString& v);
     QString catIp() const;
     void setCatIp(const QString& value);
     int catPort() const;
@@ -175,6 +179,7 @@ public:
     int hotkeyCount() const;
 
     struct HotkeyData {
+        bool enabled = true;
         QString name;
         QString group;
         QStringList keys;
@@ -191,6 +196,7 @@ public:
         bool unlockX = false, unlockY = false;
         int unlockYDelayMs = 0;
         int aimDelayMs = 0;
+        int maskDelayMs = 0;
 
         bool   ctlEnabled = false;
         double ctlYOffset = 0.5;

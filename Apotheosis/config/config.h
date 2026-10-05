@@ -89,6 +89,7 @@ struct TriggerParams
 
 struct HotkeyProfile
 {
+    bool enabled = true;
     std::string name = "Aim";
     std::string group = u8"默认";
     std::vector<std::string> keys;
@@ -101,6 +102,7 @@ struct HotkeyProfile
     bool block_hotkey = false;
     bool mask_x = false;
     bool mask_y = false; // Block physical mouse input only while actively aiming at a target.
+    int mask_delay_ms = 0; // Delay physical XY masking after active aiming begins.
     bool unlock_x = false; // Disable automatic aiming on this axis.
     bool unlock_y = false;
     int unlock_y_delay_ms = 0; // Begin automatic Y unlock after target and hotkey overlap.
@@ -303,6 +305,7 @@ class Config
 public:
     std::string capture_device;
     std::string capture_source = "device"; // device | udp | tcp | ndi | dxgi
+    std::string capture_device_api = "mf"; // mf | dshow; applies to standard capture devices
     std::string capture_stream_url;
     std::string capture_ndi_source;
     // DXGI desktop capture: the monitor's device name (e.g. \\.\DISPLAY1); empty = primary monitor.
@@ -335,6 +338,7 @@ public:
     std::string kmbox_net_uuid = "12345";
     std::string ferrum_port = "";
     int ferrum_baudrate = 3000000;
+    std::string cpbox_port;
     std::string dhzbox_ip = "192.168.2.88";
     int dhzbox_port = 8888;
     int dhzbox_key = 88;
