@@ -157,6 +157,13 @@ void releaseFlash() {
 }
 void beginFlash(const std::string& key, int aimHotkeyIndex) {
     if(flash.active || outputOwned.load() || devicesChanging.load()) return;
+    // 滚轮爆闪：滚轮没有“按下/松开”两个阶段，一次脉冲就完成 —— 也就不存在
+    // 只按下没松开、卡住一直滚的老问题。
+    if(const int notches=wheelNotches(key); notches!=0) {
+        std::lock_guard<std::recursive_mutex> output(outputLock);
+        send(Output::Wheel,notches);
+        return;
+    }
     bool keyboard=true;
     int code=hidKey(key);
     if(!code) {
@@ -196,6 +203,8 @@ void finish(const std::string& message) {
     if(!released) currentStatus.message+=u8"；设备未确认松键，请检查连接";
 }
 bool pressed(const std::string& key) {
+    // 滚轮没有 HID 码：它由 isAnyKeyPressed 的滚轮边沿判定处理。
+    if(wheelKeyId(key)) return isAnyKeyPressed({key});
     const int vk=KeyCodes::getKeyCode(key);
     if(key.empty() || vk<=0) return false;
     const int hid=hidKey(key);

@@ -117,5 +117,41 @@ int main() {
         CHECK(scope.tick(false, false, 1, 0, 203).release_right);
         CHECK(!scope.engaged());
     }
+    {
+        // 连点/智能连点：单帧离区不再打断整轮（以前 reset 掉了，实机表现就是
+        // “打两枪就断”，而且每次回来都要重等首发等待）。
+        AmTriggerFsm f; f.configure(AmFireMode::Burst, 0);
+        CHECK(tick(f, 0, true, 0, 5, 10).press_left);
+        CHECK(tick(f, 5).release_left);
+        CHECK(!tick(f, 15).press_left);          // 冷却到期，先做一次清理
+        CHECK(tick(f, 16, true, 0, 5, 10).press_left);
+        CHECK(tick(f, 21).release_left);
+        CHECK(!tick(f, 31).press_left);
+        CHECK(tick(f, 32, true, 0, 5, 10).press_left);
+        CHECK(tick(f, 38, false).release_left);  // 离区：这一枪按时松开
+        CHECK(!tick(f, 60, false).press_left);   // 宽限内不重启
+        CHECK(!tick(f, 62, true, 20, 5, 10).press_left); // 清理观察
+        CHECK(tick(f, 63, true, 20, 5, 10).press_left);  // 目标回来立即续打，不等首发等待
+        // 宽限（≥60 ms）用完才回到旧语义：重新等首发等待。
+        AmTriggerFsm g; g.configure(AmFireMode::Burst, 0);
+        CHECK(tick(g, 0, true, 0, 5, 10).press_left);
+        CHECK(tick(g, 5).release_left);
+        CHECK(!tick(g, 6, false).press_left);    // 离区开始计时
+        CHECK(!tick(g, 100, false).press_left);  // 超出宽限：状态复位
+        CHECK(!tick(g, 101, true, 20, 5, 10).press_left); // 清理观察
+        CHECK(!tick(g, 110, true, 20, 5, 10).press_left); // 重新等首发等待
+        CHECK(tick(g, 130, true, 20, 5, 10).press_left);
+    }
+    {
+        // 目标整体消失：左键松开但本轮状态保留（releaseOnTargetLoss 路径）。
+        AmTriggerFsm f; boss::ScopeController scope(true);
+        f.configure(AmFireMode::Burst, 0);
+        CHECK(tick(f, 0, true, 0, 5, 10).press_left);
+        const auto lost = boss::releaseOnTargetLoss(f, scope, 2, 2, 0);
+        // 短暂丢目标：左键回归，但本轮打点状态保留。
+        CHECK(lost.left && f.started());
+        CHECK(!tick(f, 13, true, 20, 5, 10).press_left); // 清理观察
+        CHECK(tick(f, 14, true, 20, 5, 10).press_left);  // 回来就续打，不等首发等待
+    }
     std::cout << "AM trigger timing, modes, cancellation and scope checks passed\n";
 }

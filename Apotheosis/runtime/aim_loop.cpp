@@ -228,12 +228,20 @@ void finishSwitch31Shot(MouseThread* mouse)
 
 // 已经下发左键按下的这一枪必须完成最短按住时间。目标丢失、换档或松热键
 // 只能阻止下一枪，不能把本枪的切枪阶段截断。
+//
+// ★ 这个最短时间现在由状态机的「按住时长」保证（切枪档至少
+//   kSwitch31MinPressMs）。以前这里按 remainingHoldMs 直接 sleep，是在瞄准
+//   线程里持着 g_mtx 睡 max(20, 按住时长) 毫秒：瞄准整段停摆、目标丢失、
+//   切枪序列也要等睡眠结束才开始。按不住的这一枪交给 Switch31ShotGate 自己
+//   判定为不合格（不切枪），不再阻塞控制链。
+constexpr int kSwitch31MinPressMs = 20;
+// 「按住时长」填 0 时使用的最短点击：低于一帧的点击（120fps 检测 ≈ 8ms）
+// 会被游戏漏掉，表现为“不开枪”。显式填写大于 0 的时长仍按原值执行。
+constexpr int kDefaultClickPressMs = 20;
+
 void completeShot(MouseThread* mouse)
 {
     if (!mouse) return;
-    const int remainingMs = g_pendingSwitch31.remainingHoldMs(nowMs());
-    if (remainingMs > 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(remainingMs));
     mouse->releaseLeftButton();
     finishSwitch31Shot(mouse);
 }
@@ -1202,9 +1210,14 @@ bool tick(int* consumedVersion)
 
             // 开火后即使用户临时关掉切枪或键盘断开，本次已按下的左键仍按短按
             // 语义完成，不能中途退回「长按直到离区」。
-            const int fireDuration = switchPulse
-                ? std::max(trigger.trigger_fire_duration, 20)
+            const int requestedDuration = switchPulse
+                ? std::max(trigger.trigger_fire_duration, kSwitch31MinPressMs)
                 : trigger.trigger_fire_duration;
+            // 按住时长 0 = 由程序给一个游戏稳定能识别的最短点击。小于一帧的
+            // 点击（120fps 检测即 8ms）会被游戏漏掉，表现为“不开枪”；显式填写
+            // 的时长仍按原值执行，设置才有意义。
+            const int fireDuration = requestedDuration > 0
+                ? requestedDuration : kDefaultClickPressMs;
             const bool methodOk = cfg.input_method == "MAKCU" ||
                                   cfg.input_method == "MAKCUNEW" ||
                                   cfg.input_method == "KMBOXNET" ||
@@ -1332,15 +1345,14 @@ bool tick(int* consumedVersion)
                     g_flashPost.shotSent(triggerTarget.classId, triggerTarget.box);
                 g_pendingSwitch31.onPress(true, switchCapable,
                     trigger.trigger_switch31_delay_ms, fireDuration, nowMs());
-                if (switchCapable)
-                {
-                    // A completed shot owns its release and keyboard switch.
-                    // Do not wait for another detector tick: target loss,
-                    // hotkey release or a new target can otherwise interrupt
-                    // this cycle before the keyboard job is submitted.
-                    completeShot(mouse);
-                    g_trigger.reset();
-                }
+                // ★ 切枪档不再在这里 sleep + reset。旧写法在瞄准线程里
+                //   sleep 一整个 max(20, 按住时长)，而且 g_trigger.reset() 直接
+                //   跳过冷却阶段 —— 结果是每枪都卡住整条控制链（瞄准停摆 →
+                //   目标/命中区丢失 → 打两枪就断），同时「冷却时间」设置完全
+                //   不生效（节奏由切枪序列决定）。现在按住时长由状态机执行
+                //   （切枪档至少 kSwitch31MinPressMs），松开路径（含丢框/松
+                //   热键）都会调用 completeShot → finishSwitch31Shot，切枪
+                //   依旧不会被截断。
             }
         }
     }

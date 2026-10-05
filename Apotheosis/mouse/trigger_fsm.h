@@ -178,6 +178,11 @@ public:
         return now_ms - hit_zone_loss_since_ms_ < std::clamp(grace_ms, 0, 2000);
     }
 
+    // 这套旧状态机没有连点宽限：丢目标就清空（AmTriggerFsm 才有）。
+    // 两个方法只为满足 releaseOnTargetLoss 的模板接口而存在。
+    bool keepCycleOnTargetLoss(int64_t, int) { return false; }
+    bool releasePress(int64_t = 0, int = 0, int = 0) { return reset(); }
+
     bool reset()
     {
         const bool was_pressed = (phase_ == TriggerPhase::Pressed);

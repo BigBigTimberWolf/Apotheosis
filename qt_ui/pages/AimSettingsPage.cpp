@@ -145,6 +145,9 @@ const KeyEntry kKeyEntries[] = {
     { "X2MouseButton",    "鼠标侧键5 (X2MouseButton)" },
     { "MiddleMouseButton","鼠标中键 (MiddleMouseButton)" },
     { "LeftMouseButton",  "鼠标左键 (LeftMouseButton)" },
+    // 滚轮上/下：滚一格算一次触发（读取靠本机滚轮钩子，盒子不上报物理滚轮）。
+    { "WheelUp",          "滚轮上 (WheelUp)" },
+    { "WheelDown",        "滚轮下 (WheelDown)" },
     { nullptr, nullptr }
 };
 
@@ -1064,6 +1067,7 @@ void AimSettingsPage::buildRecoveredControllerCard()
         HotkeyProfile original;
         int resolution = 0, captureFps = 0;
         std::string inputMethod, captureSource;
+        QString startKey;
         {
             std::lock_guard<std::recursive_mutex> lock(configMutex);
             if (index < 0 || index >= int(config.hotkeys.size())) return;
@@ -1074,6 +1078,7 @@ void AimSettingsPage::buildRecoveredControllerCard()
             }
             resolution = config.detection_resolution; captureFps = config.capture_fps;
             inputMethod = config.input_method; captureSource = config.capture_source;
+            startKey = QString::fromStdString(config.ff_calibration_key);
         }
         auto apply = [this, index, original, resolution, captureFps, inputMethod, captureSource]
             (int bank, const control::FfCalibrationResult& result) {
@@ -1092,8 +1097,16 @@ void AimSettingsPage::buildRecoveredControllerCard()
             ConfigBridge::instance().markDirty(); ConfigBridge::instance().flush();
             reloadProfileToUi(); return true;
         };
+        auto startKeyChanged = [this](const QString& key) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(configMutex);
+                config.ff_calibration_key = key.toStdString();
+            }
+            ConfigBridge::instance().markDirty(); ConfigBridge::instance().flush();
+        };
         auto* calibration = new FfCalibrationDialog(index, QString::fromStdString(original.name),
-            {original.recovered_pid, original.recovered_secondary_pid, original.recovered_scope_pid}, apply, this);
+            {original.recovered_pid, original.recovered_secondary_pid, original.recovered_scope_pid}, apply, this,
+            startKey, startKeyChanged);
         calibration->setAttribute(Qt::WA_DeleteOnClose); calibration->open();
     });
     auto* advancedButton = new QPushButton(QString::fromUtf8(u8"开镜独立参数…"));

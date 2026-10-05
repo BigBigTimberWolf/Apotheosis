@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace control {
@@ -16,8 +18,22 @@ struct FfCalibrationResult {
     Vec2 pixelsPerCount{};
     double delayMs = 0.0;
     Vec2 rmse{};
-    const char* reason = "样本不足，需对静止目标重新标定";
+    // Raw detector travel (max - min of the box centre over the whole record).
+    // Reported so a user can separate "the scene really did not move" from
+    // "the recording moved but the fit was unstable".
+    Vec2 travelPixels{};
+    std::string reason = u8"样本不足，需对静止目标重新标定";
 };
+
+inline std::string ffPixelsText(double value) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.1f", value);
+    return buffer;
+}
+
+inline std::string ffTravelText(const Vec2& travel) {
+    return "X " + ffPixelsText(travel.x) + " px、Y " + ffPixelsText(travel.y) + " px";
+}
 
 // Offline fit only. A fixed target obeys image_position = intercept -
 // pixels_per_count * cumulative_successful_sends(t - delay). Fitting positions
@@ -30,18 +46,25 @@ inline FfCalibrationResult fitFfCalibration(
     if (observations.size() < 40 || moves.size() < 8) return result;
     int64_t previous = 0;
     for (const auto& o : observations) {
-        if (o.timeUs <= previous || !std::isfinite(o.center.x) || !std::isfinite(o.center.y))
+        if (o.timeUs <= previous || !std::isfinite(o.center.x) || !std::isfinite(o.center.y)) {
+            result.reason = u8"检测时间戳异常：采集或检测中断，请重试";
             return result;
+        }
         previous = o.timeUs;
     }
     previous = 0;
     for (const auto& m : moves) {
-        if (m.timeUs < previous || m.timeUs <= 0 || (m.counts.x == 0 && m.counts.y == 0))
+        if (m.timeUs < previous || m.timeUs <= 0 || (m.counts.x == 0 && m.counts.y == 0)) {
+            result.reason = u8"鼠标位移记录异常：请检查鼠标设备连接后重试";
             return result;
+        }
         previous = m.timeUs;
     }
     if (observations.front().timeUs >= moves.front().timeUs ||
-        observations.back().timeUs < moves.back().timeUs + 250000) return result;
+        observations.back().timeUs < moves.back().timeUs + 250000) {
+        result.reason = u8"采样区间不足：请按住热键直到界面提示采样完成再松开";
+        return result;
+    }
 
     struct AxisFit { double gain = 0, rmse = 0, score = 0; bool valid = false; };
     auto fitAxis = [](const std::vector<double>& count, const std::vector<double>& position) {
@@ -77,6 +100,13 @@ inline FfCalibrationResult fitFfCalibration(
         px[i] = observations[i].center.x - observations.front().center.x;
         py[i] = observations[i].center.y - observations.front().center.y;
     }
+    // Measured travel is reported even when the fit is rejected: it is the only
+    // number that tells "the scene moved too little" from "the scene drifted".
+    {
+        const auto rx = std::minmax_element(px.begin(), px.end());
+        const auto ry = std::minmax_element(py.begin(), py.end());
+        result.travelPixels = {*rx.second - *rx.first, *ry.second - *ry.first};
+    }
     double best = std::numeric_limits<double>::infinity();
     int firstBest = 0, lastBest = 0;
     for (int delay = 0; delay <= 200; ++delay) {
@@ -100,22 +130,35 @@ inline FfCalibrationResult fitFfCalibration(
         } else if (std::abs(score - best) <= 1e-10) lastBest = delay;
     }
     result.delayMs = (firstBest + lastBest) * 0.5;
-    if (result.valid) {
-        // A full no-send baseline/return must remain stationary. This catches
-        // slow drift that a high R² alone can hide.
-        const auto baselineTime = moves.front().timeUs;
-        Vec2 baseline, tail; int nb = 0, nt = 0;
-        for (const auto& o : observations) {
-            if (o.timeUs < baselineTime) { baseline += o.center; ++nb; }
-            if (o.timeUs >= moves.back().timeUs + 220000) { tail += o.center; ++nt; }
-        }
-        Counts total;
-        for (const auto& m : moves) { total.x += m.counts.x; total.y += m.counts.y; }
-        if (nb < 3 || nt < 3 || total.x != 0 || total.y != 0 ||
-            (baseline / nb - tail / nt).normSq() > 2.25) result.valid = false;
+    if (!result.valid) {
+        // Below kMinTravelPixels the detector noise dominates the regression, so
+        // the useful advice is about the scene, not about retrying unchanged.
+        constexpr double kMinTravelPixels = 8.0;
+        const double travel = std::min(result.travelPixels.x, result.travelPixels.y);
+        result.reason = travel < kMinTravelPixels
+            ? u8"移动像素过低：检测框全程只移动了 " + ffTravelText(result.travelPixels) +
+              u8"。请在训练场改用更低的倍率或更高的游戏灵敏度后重试"
+            : u8"数据不稳定：检测框移动 " + ffTravelText(result.travelPixels) +
+              u8"，但拟合误差过大。请保持目标、视角和倍率完全固定后重试";
+        return result;
     }
-    result.reason = result.valid ? "标定完成，可应用到所选参数档" :
-        "数据不稳定或位移不足：保持目标、视角和倍率固定后重试";
+    // A full no-send baseline/return must remain stationary. This catches
+    // slow drift that a high R² alone can hide.
+    const auto baselineTime = moves.front().timeUs;
+    Vec2 baseline, tail; int nb = 0, nt = 0;
+    for (const auto& o : observations) {
+        if (o.timeUs < baselineTime) { baseline += o.center; ++nb; }
+        if (o.timeUs >= moves.back().timeUs + 220000) { tail += o.center; ++nt; }
+    }
+    Counts total;
+    for (const auto& m : moves) { total.x += m.counts.x; total.y += m.counts.y; }
+    if (nb < 3 || nt < 3 || total.x != 0 || total.y != 0 ||
+        (baseline / nb - tail / nt).normSq() > 2.25) {
+        result.valid = false;
+        result.reason = u8"位移回到起点后目标位置发生变化：请保持目标、视角和倍率固定后重试";
+        return result;
+    }
+    result.reason = u8"标定完成，可应用到所选参数档";
     return result;
 }
 

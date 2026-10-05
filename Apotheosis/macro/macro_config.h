@@ -132,6 +132,26 @@ inline int hidKey(const std::string& id) {
     for (const auto& k : keys()) if (k.id == id) return k.hid;
     return 0;
 }
+
+// 滚轮没有 HID 按键码：它在按键列表里用固定 id 表示，输出按“格”计数。
+// 需要输出滚轮的地方（自动爆闪、宏动作）发送 WheelUp=+1 / WheelDown=-1 格，
+// 读取滚轮只能靠本机钩子（盒子不上报物理滚轮）。
+struct WheelKey { const char* id; const char* label; };
+inline const std::vector<WheelKey>& wheelKeys() {
+    static const std::vector<WheelKey> value = {
+        {"WheelUp", u8"滚轮 · 上"}, {"WheelDown", u8"滚轮 · 下"}};
+    return value;
+}
+inline bool wheelKeyId(const std::string& id) {
+    for (const auto& k : wheelKeys()) if (id == k.id) return true;
+    return false;
+}
+// 输出格数：上滚 +1、下滚 -1，其它按键为 0。
+inline int wheelNotches(const std::string& id) {
+    if (id == "WheelUp") return 1;
+    if (id == "WheelDown") return -1;
+    return 0;
+}
 inline void normalize(Program& p) {
     auto clean = [](std::string& s) { s.erase(std::remove_if(s.begin(),s.end(),
         [](char c){ return c=='\r'||c=='\n'; }),s.end()); if(s.size()>160) s.resize(160); };

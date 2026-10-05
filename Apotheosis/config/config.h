@@ -428,6 +428,10 @@ public:
     double aimpoint_recoil_max_px = 60.0;
     std::string aimpoint_recoil_fire_key = "LeftMouseButton";
 
+    // FF 自动标定：可选的“标定启动键”。在标定窗口按下这个键等同于点一次
+    // 「开始标定」，之后再按住该档的瞄准热键才开始采样。留空表示未设置。
+    std::string ff_calibration_key;
+
     std::vector<CrosshairColorProfileConfig> crosshair_colors;
     int laser_rect_w = 160, laser_rect_h = 240;
     int laser_center_x = 160, laser_center_y = 200;

@@ -160,4 +160,11 @@ int main(){int failures=0;auto check=[&](bool b,const char* n){if(!b){++failures
         check(!e.active()&&e.log().back().find("FE command failed")!=std::string::npos,
               "input transport failure reaches the macro's failing-step diagnostics");
     }
+    // 滚轮不是一个可“按住”的键：固定 id、按格输出、没有 HID 码。
+    check(wheelKeyId("WheelUp") && wheelKeyId("WheelDown"), "wheel keys are known ids");
+    check(!wheelKeyId("U") && !wheelKeyId(""), "ordinary keys are not wheel keys");
+    check(wheelNotches("WheelUp") == 1 && wheelNotches("WheelDown") == -1 && wheelNotches("U") == 0,
+          "wheel output is one notch up or down");
+    check(hidKey("WheelUp") == 0 && wheelKeys().size() == 2,
+          "wheel keys carry no HID code and are listed for the UI");
     std::printf("macro rules: %d failures\n",failures);return failures?1:0;}

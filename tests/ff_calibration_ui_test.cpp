@@ -48,5 +48,26 @@ int main(int argc,char** argv) {
         check(session.active(),"second session started");cancelled.reject();
         check(!session.active(),"closing the dialog cancels probes");
     }
+    // 标定启动键：按一下等于点一次“开始标定”，之后仍然按住瞄准热键才开始采样。
+    {
+        session.cancel();
+        FfCalibrationDialog unconfirmed(3,QStringLiteral("未确认"),{},[](int,const auto&){return true;},
+            nullptr,QStringLiteral("LeftMouseButton"));
+        auto* unconfirmedTimer=unconfirmed.findChild<QTimer*>();
+        auto tap=[&] {
+            runtime::g_ffCalibrationKeyTaps.fetch_add(1);
+            QMetaObject::invokeMethod(unconfirmedTimer,"timeout",Qt::DirectConnection);
+        };
+        tap();
+        check(!session.active(),"start key without the static-target confirmation cannot arm");
+        unconfirmed.findChild<QCheckBox*>("ffCalibrationStaticTarget")->setChecked(true);
+        tap();
+        const auto armed=session.snapshot();
+        check(session.active() && armed.state==runtime::FfCalibrationSession::State::Armed,
+            "tapping the start key arms the session exactly like the button");
+        unconfirmed.reject();
+        check(!session.active(),"closing the dialog cancels a key-armed session");
+    }
+    runtime::g_ffCalibrationKeyTaps.store(0);
     return failures?1:0;
 }

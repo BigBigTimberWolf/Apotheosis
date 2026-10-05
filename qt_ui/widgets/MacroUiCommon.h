@@ -102,6 +102,9 @@ inline QComboBox* keyCombo(bool mouse, bool none)
         for (int i = 0; i < 5; ++i)
             combo->addItem(QStringLiteral("鼠标 · ") + buttonNames()[i], QString::fromLatin1(ids[i]));
     }
+    // 滚轮不是按键：选中后是“滚一格”的输出/一次触发（见 macros::wheelKeys）。
+    for (const auto& wheel : macros::wheelKeys())
+        combo->addItem(q(wheel.label), QString::fromLatin1(wheel.id));
     for (const auto& key : macros::keys())
         combo->addItem(q(key.label), q(key.id));
     return combo;

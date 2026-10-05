@@ -4,7 +4,8 @@
 // Existing detections of a fixed target, with independent sensitivity, delayed
 // scene response and success acknowledgements later than queue submission.
 inline runtime::FfCalibrationSession::Snapshot simulateFfCalibration(
-    int hotkey, int64_t frameIntervalUs = 8000, double delayMs = 37.0, double noisePixels = .08)
+    int hotkey, int64_t frameIntervalUs = 8000, double delayMs = 37.0, double noisePixels = .08,
+    double gainX = 1.35, double gainY = .72)
 {
     auto& session = runtime::FfCalibrationSession::instance();
     const auto start = runtime::ffCalibrationNowUs() + 1000;
@@ -17,7 +18,7 @@ inline runtime::FfCalibrationSession::Snapshot simulateFfCalibration(
             if (e.timeUs <= imageTime-int64_t(delayMs*1000))
                 cumulative += control::Vec2{double(e.counts.x),double(e.counts.y)};
         const double noise=noisePixels*std::sin(frame*.73);
-        const control::Vec2 center{320-1.35*cumulative.x+noise,320-.72*cumulative.y-noise};
+        const control::Vec2 center{320-gainX*cumulative.x+noise,320-gainY*cumulative.y-noise};
         const std::vector<control::Candidate> candidates{{{center.x-20,center.y-30,40,60},0,.9}};
         const auto move=session.update(hotkey,now,imageTime,candidates,feedback,0);
         feedback.clear();
@@ -30,4 +31,14 @@ inline runtime::FfCalibrationSession::Snapshot simulateFfCalibration(
            snapshot.state==runtime::FfCalibrationSession::State::Failed) return session.snapshot(true);
     }
     return session.snapshot(true);
+}
+
+// Largest single-axis count of any recorded pulse: pins how far the adaptive
+// plan had to travel to reach a measurable response.
+inline int simulateFfCalibrationPeakCounts(
+    const runtime::FfCalibrationSession::Snapshot& data)
+{
+    int peak = 0;
+    for (const auto& m : data.moves) peak = std::max({peak, std::abs(m.counts.x), std::abs(m.counts.y)});
+    return peak;
 }

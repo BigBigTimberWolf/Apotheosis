@@ -23,6 +23,7 @@
 #include "runtime/active_hotkey.h"
 #include "Apotheosis.h"
 #include "runtime/config_snapshot.h"
+#include "runtime/ff_calibration_session.h"
 #include "runtime/sched_boost.h"
 #include "macro/macro_engine.h"
 #include "macro/macro_config.h"
@@ -38,6 +39,28 @@ namespace
 bool win32_key_pressed(int vk_code)
 {
     return (GetAsyncKeyState(vk_code) & 0x8000) != 0;
+}
+
+// 滚轮不是一个能“按住”的键：滚一格算一次触发，用一个短窗口表示“刚滚过”。
+// 只有本机低层钩子能看到滚轮（被控端盒子不上报物理滚轮），所以滚轮热键在
+// 鼠标接本机或 input_method = WINDOWS 时才有效。
+bool wheelKeyPulse(const std::string& key)
+{
+    constexpr int64_t kPulseMs = 80;
+    static std::atomic<uint64_t> seenUp{0}, seenDown{0};
+    static std::atomic<int64_t> lastUp{0}, lastDown{0};
+    const bool up = key == "WheelUp";
+    auto& seen = up ? seenUp : seenDown;
+    auto& stamp = up ? lastUp : lastDown;
+    const auto count = static_cast<uint64_t>(mouse_driver::windowsWheelCounter(up));
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (count != seen.load(std::memory_order_relaxed)) {
+        seen.store(count, std::memory_order_relaxed);
+        stamp.store(now, std::memory_order_relaxed);
+    }
+    const auto at = stamp.load(std::memory_order_relaxed);
+    return at > 0 && now - at <= kPulseMs;
 }
 
 int keyboardHidUsage(const std::string& key)
@@ -59,6 +82,12 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
         if (key_name.empty() || key_name == "None" ||
             key_name.find(u8"始终活跃") != std::string::npos)
             return true;
+
+        // 滚轮热键：本机钩子边沿判定，不走驱动按键回读。
+        if (macros::wheelKeyId(key_name)) {
+            if (wheelKeyPulse(key_name)) return true;
+            continue;
+        }
 
         bool pressed = false;
         if (cfg->input_method == "WINDOWS") {
@@ -184,6 +213,7 @@ void keyboardListener()
 {
     sched_boost::LiveThreadBoost threadBoost;
     HotkeyActivationSampler activationSampler;
+    bool calibrationKeyHeld = false;
     while (!shouldExit)
     {
         const auto scheduling = runtime_config::read();
@@ -198,7 +228,9 @@ void keyboardListener()
             auto pressed = [&](const std::string& key) {
                 for (const auto& entry : sampled)
                     if (entry.first == key) return entry.second;
-                const bool down = KeyCodes::getKeyCode(key) > 0 && isAnyKeyPressed({key});
+                // 滚轮没有 HID 码，走 isAnyKeyPressed 的滚轮边沿判定。
+                const bool down = (macros::wheelKeyId(key) || KeyCodes::getKeyCode(key) > 0) &&
+                    isAnyKeyPressed({key});
                 sampled.emplace_back(key, down);
                 return down;
             };
@@ -208,6 +240,14 @@ void keyboardListener()
             }
             next_active = selectActiveHotkeyIndex(
                 config.hotkeys, config.active_hotkey_group, isAnyKeyPressed);
+            // FF 标定的“标定启动键”走同一条设备读取路径：它在被控端按下，
+            // 与窗口焦点无关。这里只数按下沿，界面按 100ms 轮询也不会漏掉
+            // 一次短按；未设置时不产生任何设备往返。
+            const auto& calibrationKey = scheduling->ff_calibration_key;
+            const bool calibrationKeyDown = !calibrationKey.empty() && pressed(calibrationKey);
+            if (calibrationKeyDown && !calibrationKeyHeld)
+                runtime::g_ffCalibrationKeyTaps.fetch_add(1, std::memory_order_relaxed);
+            calibrationKeyHeld = calibrationKeyDown;
         }
         runtime::g_secondary_aim_hotkey_index.store(-1);
         runtime::g_active_hotkey_index.store(next_active);

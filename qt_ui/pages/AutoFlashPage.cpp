@@ -38,7 +38,10 @@ AutoFlashPage::AutoFlashPage(QWidget* parent) : QWidget(parent) {
     card->contentLayout()->addWidget(enabled_);
     const QString hint = QStringLiteral(
         "按住瞄准热键且已锁定目标时，目标框面积达到设定比例就点按一次。"
-        "目标持续大于阈值不会连续按；缩小到阈值以下或锁定新目标后可再次触发。");
+        "输出可以选键盘键、鼠标键，也可以选“滚轮 · 上/下”——滚轮是滚一格，"
+        "没有按下/松开两个阶段，不会卡在按住状态。"
+        "目标持续大于阈值不会连续按；缩小到阈值以下或锁定新目标后可再次触发。"
+        "滚轮读取只能靠本机钩子（被控端盒子不上报物理滚轮），所以滚轮热键只在鼠标接本机或输入方式为 WINDOWS 时有效。");
     card->setToolTip(hint);
     enabled_->setToolTip(hint);
 
@@ -58,6 +61,10 @@ AutoFlashPage::AutoFlashPage(QWidget* parent) : QWidget(parent) {
         {"X2MouseButton", "鼠标侧键 5"}};
     for (const auto& mouse : mouseKeys)
         key_->addItem(QString::fromUtf8(mouse.label), QString::fromUtf8(mouse.id));
+    // 滚轮爆闪：输出一次滚动（上/下各一格），没有“按下/松开”两阶段，
+    // 因此不会出现只按下没松开而卡住的情况。
+    for (const auto& wheel : macros::wheelKeys())
+        key_->addItem(QString::fromUtf8(wheel.label), QString::fromLatin1(wheel.id));
     for (const auto& keyboard : macros::keys())
         key_->addItem(QString::fromStdString(keyboard.label),
                       QString::fromStdString(keyboard.id));

@@ -35,8 +35,14 @@ inline TargetLossRelease releaseOnTargetLoss(Trigger& trigger,
     const bool keepHolding = scope.mode() == scopeMode &&
         trigger.keepHoldingOnTargetLoss(now_ms, holdGraceMs);
     if (!keepHolding) {
-        const bool wasPressed = trigger.reset();
-        release.left = timedRelease || wasPressed;
+        // 连点/智能连点：左键立刻松开，但本轮打点状态活过这次短暂丢框，
+        // 目标回来时不用重新等首发延迟（这就是“打两枪就断”的来源）。
+        if (trigger.keepCycleOnTargetLoss(now_ms, holdGraceMs)) {
+            release.left = trigger.releasePress(now_ms);
+        } else {
+            const bool wasPressed = trigger.reset();
+            release.left = timedRelease || wasPressed;
+        }
     }
     // Preserve an already held scope during the grace period, but never open
     // a new scope without a target. Pending tap releases still run on time.

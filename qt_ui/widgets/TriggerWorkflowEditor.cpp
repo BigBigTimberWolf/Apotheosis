@@ -360,16 +360,25 @@ TriggerWorkflowEditor::TriggerWorkflowEditor(QWidget* parent) : QWidget(parent) 
     fireMode_->addItem(zh(u8"智能持续"), 3);
     row(page, u8"开火模式", fireMode_);
     fireDuration_ = spin(0, 2000, 5, 0); row(page, u8"按住时长 ms", fireDuration_);
+    fireDuration_->setToolTip(zh(u8"0 = 自动：按约 20 ms 执行，保证游戏能稳定识别这一枪"
+        u8"（低于一帧的点击，例如 120fps 检测下的 8 ms，会被游戏漏掉，表现为“不开枪”）。"
+        u8"填写大于 0 的时长按填写的值执行；实际精度受检测帧间隔限制（约 8–33 ms 一拍）。"
+        u8"持续、智能持续不使用这一项（按住到离区/宽限结束）。"));
     durationJitter_ = spin(0, 500, 1, 0); durationJitter_->setParent(this); durationJitter_->hide();
     lossDelay_ = spin(0, 1000, 10, 20);
     lossDelay_->setObjectName("triggerLossDelay");
-    lossDelay_->setToolTip(zh(u8"仅智能持续生效：短暂丢失或离区时保持左键，到时松开；任一允许目标重新进区就重置计时。0 为立即松开；松开热键或关闭扳机立即停止。"));
+    lossDelay_->setToolTip(zh(u8"短暂丢失或离区时的宽限。智能持续：保持左键，到时松开；任一允许目标重新进区就重置计时，0 为立即松开。"
+        u8"连点、智能连点：至少保留 60 ms（设更大按设置的），宽限内单帧离区不会清空整轮打点，目标回来立即续打、不重等首发等待——"
+        u8"这就是“打两枪就断、怎么设置都一样”的来源。松开热键或关闭扳机立即停止。"));
     row(page, u8"短暂离区宽限 ms", lossDelay_);
     page->addStretch(); add(firePage);
 
     auto* cooldownPage = panelPage(zh(u8"06 · 冷却"),
-        zh(u8"从松开左键开始按设置的时长计时（最小 1 ms），到时经过一轮状态清理再允许下次按下。"), page);
+        zh(u8"从松开左键开始按设置的时长计时（最小 1 ms），到时经过一轮状态清理再允许下次按下。"
+            u8"检测帧间隔是这套状态机的推进步长，设置小于一帧的差异看不出来。"), page);
     fireInterval_ = spin(0, 2000, 5, 200); row(page, u8"松开后等待 ms", fireInterval_);
+    fireInterval_->setToolTip(zh(u8"两枪之间从松开左键开始计时。3-1 切枪档以前会跳过冷却（开完枪直接复位状态机），"
+        u8"所以怎么改这一项都一样；现在切枪档同样走这里的冷却。"));
     intervalJitter_ = spin(0, 500, 1, 0); intervalJitter_->setParent(this); intervalJitter_->hide();
     targetCooldown_ = spin(0, 2000, 5, 0); targetCooldown_->setParent(this); targetCooldown_->hide();
     page->addStretch(); add(cooldownPage);

@@ -555,6 +555,8 @@ bool Config::loadConfig(const std::string& filename)
         aimpoint_recoil_fire_key != "X1MouseButton" &&
         aimpoint_recoil_fire_key != "X2MouseButton")
         aimpoint_recoil_fire_key = "LeftMouseButton";
+    ff_calibration_key = get_string("", "ff_calibration_key", "");
+    if (ff_calibration_key == "None") ff_calibration_key.clear();
     const bool hasGlobalRecoilSpeed = ini.GetValue("", "aimpoint_recoil_speed_px_s", nullptr) != nullptr;
     const bool hasGlobalRecoilMaximum = ini.GetValue("", "aimpoint_recoil_max_px", nullptr) != nullptr;
     laser_rect_w = std::clamp(get_long("", "laser_rect_w", 160), 4, 4096);
@@ -1243,6 +1245,9 @@ bool Config::loadConfig(const std::string& filename)
     static const std::unordered_set<std::string> kAllowedAimKeys = {
         "None", "LeftMouseButton", "RightMouseButton",
         "MiddleMouseButton", "X1MouseButton", "X2MouseButton",
+        // 滚轮上/下：触发按键、组合第二键都可以选。读取靠本机滚轮钩子
+        // （macros::wheelKeyId），没有 HID 码，所以必须显式放行。
+        "WheelUp", "WheelDown",
     };
     for (auto& hk : hotkeys)
     {
@@ -1375,6 +1380,7 @@ bool Config::saveConfig(const std::string& filename)
         << "aimpoint_recoil_speed_px_s = " << aimpoint_recoil_speed_px_s << "\n"
         << "aimpoint_recoil_max_px = " << aimpoint_recoil_max_px << "\n"
         << "aimpoint_recoil_fire_key = " << aimpoint_recoil_fire_key << "\n"
+        << "ff_calibration_key = " << ff_calibration_key << "\n"
         << std::setprecision(3)
         << "laser_rect_w = " << laser_rect_w << "\n"
         << "laser_rect_h = " << laser_rect_h << "\n"
