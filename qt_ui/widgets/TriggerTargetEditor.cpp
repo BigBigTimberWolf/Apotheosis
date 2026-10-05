@@ -70,8 +70,10 @@ TriggerTargetEditor::TriggerTargetEditor(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(10);
     const QString hint = QStringLiteral(
-        "这里的类别、顺序和瞄点独立于自动瞄准。列表越靠上优先级越高；"
-        "空列表沿用旧版扳机命中区。范围宽高按目标框百分比计算，可超过目标框。");
+        "这里的类别、顺序和瞄点独立于自动瞄准。列表越靠上优先级越高：高优先级类别出现在视野内、"
+        "但准星还没进入它的命中区时，不会对低优先级类别开火，等准星进入高优先级命中区再开火；"
+        "高优先级类别没识别到或不在视野内时，才对低优先级类别开火。"
+        "空列表沿用旧版扳机命中区（不分优先级）。范围宽高按目标框百分比计算，可超过目标框。");
     setToolTip(hint);
 
     auto* addRow = new QHBoxLayout;

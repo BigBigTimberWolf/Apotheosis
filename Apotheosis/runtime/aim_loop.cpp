@@ -808,9 +808,13 @@ bool tick(int* consumedVersion)
                     trigger.trigger_y_percent, trigger.trigger_y_percent});
             }
         }
+        // An explicit class list is a priority order: a higher class in view but not under
+        // the crosshair yet holds fire for the lower ones. Without a list there is no priority.
         triggerTarget = g_triggerTargetSelector.select(
             triggerCandidates, rules, cross, hk.fovX, hk.fovY,
-            cfg.confidence_threshold, detectionFresh);
+            cfg.confidence_threshold, detectionFresh,
+            hk.trigger_classes.empty() ? boss::TriggerPriority::HitFirst
+                                       : boss::TriggerPriority::Strict);
         if (recordReplay)
             replayCandidates = std::move(in.candidates);
     }
