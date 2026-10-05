@@ -96,6 +96,24 @@ public:
         return sum;
     }
 
+    // Smith Predictor: total pixel displacement of sends that are in-flight
+    // (sent but not yet reflected in the image). Only valid with a calibrated
+    // delay; returns {0,0} for legacy mode (delayMs < 0).
+    control::Vec2 pendingCorrection(int64_t frameUs, double delayMs,
+                                    double pxPerCountX, double pxPerCountY) const
+    {
+        if (frameUs <= 0 || !std::isfinite(delayMs) || delayMs < 0.0) return {};
+        const int64_t cutoff = frameUs -
+            static_cast<int64_t>(std::clamp(delayMs, 0.0, 200.0) * 1000.0);
+        control::Vec2 sum;
+        for (const auto& event : events_)
+            if (event.timestampUs > cutoff) {
+                sum.x += event.dx * pxPerCountX;
+                sum.y += event.dy * pxPerCountY;
+            }
+        return sum;
+    }
+
     void reset()
     {
         events_.clear();

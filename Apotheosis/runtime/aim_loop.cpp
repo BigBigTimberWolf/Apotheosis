@@ -773,6 +773,11 @@ bool tick(int* consumedVersion)
         const auto& feedbackPid = scopeCtlActive ? hk.recovered_scope_pid
             : secondaryCtlActive ? hk.recovered_secondary_pid : hk.recovered_pid;
         in.motionEventSum = g_pidfFeedback.sample(frameUs, true, feedbackPid.motionDelayMs);
+        const bool crossFixed = !hk.crosshair_detect_enabled && !hk.laser_detect_enabled;
+        if (crossFixed)
+            in.pendingMotionPx = g_pidfFeedback.pendingCorrection(frameUs,
+                feedbackPid.motionDelayMs, feedbackPid.motionPixelsPerCountX,
+                feedbackPid.motionPixelsPerCountY);
         in.observationTimeUs = frameUs;
         in.frameIndex = ++g_frame_index;
         in.detectionFresh = detectionFresh;

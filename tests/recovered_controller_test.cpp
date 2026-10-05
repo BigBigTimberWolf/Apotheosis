@@ -716,5 +716,58 @@ int main()
         a.setConfig(withZone);
         check(a.config().hardDeadzoneX==200.0f,"free-wiggle zone is clamped to its 0..200 range");
     }
+    // Smith Predictor: pendingMotionPx reduces the PID error so the controller
+    // doesn't over-send while waiting for in-flight moves to appear in the image.
+    {
+        ControllerConfig cfg;
+        cfg.frameWidth = cfg.frameHeight = 320;
+        cfg.buckets.byClassId = { Bucket::Aim };
+        RecoveredPidConfig pidCfg;
+        pidCfg.kpX = pidCfg.kpY = 1.0f;
+        pidCfg.kiX = pidCfg.kiY = 0;
+        pidCfg.kdX = pidCfg.kdY = 0;
+        pidCfg.deadzoneX = pidCfg.deadzoneY = 0;
+        pidCfg.smoothMaxPixel = 200;
+        pidCfg.segmentEnabled = true; pidCfg.segment = 1;
+
+        RecoveredAimController withSmith, without;
+        withSmith.setConfig(cfg, pidCfg);
+        without.setConfig(cfg, pidCfg);
+
+        ControlInput in;
+        in.cross = {160, 160}; in.dtSec = 0.01;
+        in.candidates = {Candidate{{175, 155, 10, 10}, 0, 0.9}};
+        // Settle both controllers on the same target first.
+        for (int i = 0; i < 5; ++i) { withSmith.update(in); without.update(in); }
+
+        // Now simulate: we already sent 12 counts on X (≈10.9 px at 0.91 px/count)
+        // that haven't appeared in the image yet.
+        ControlInput inSmith = in;
+        inSmith.pendingMotionPx = {12 * 0.91, 0};
+        const auto outSmith = withSmith.update(inSmith);
+        const auto outNormal = without.update(in);
+        check(outSmith.engaged && outNormal.engaged,
+              "Smith Predictor: both controllers engage");
+        check(std::abs(outSmith.counts.x) < std::abs(outNormal.counts.x),
+              "Smith Predictor: pending correction reduces PID output");
+
+        // With enough pending correction, PID output drops further.
+        ControlInput inFull = in;
+        inFull.pendingMotionPx = {18, 0};
+        RecoveredAimController fullSmith;
+        fullSmith.setConfig(cfg, pidCfg);
+        for (int i = 0; i < 5; ++i) fullSmith.update(in);
+        const auto outFull = fullSmith.update(inFull);
+        check(outFull.counts.x < outSmith.counts.x,
+              "Smith Predictor: larger pending correction reduces output further");
+
+        // No pendingMotionPx → same output as baseline.
+        RecoveredAimController baseline;
+        baseline.setConfig(cfg, pidCfg);
+        for (int i = 0; i < 5; ++i) baseline.update(in);
+        const auto outBase = baseline.update(in);
+        check(outBase.counts.x == outNormal.counts.x,
+              "Smith Predictor: zero pending gives baseline output");
+    }
     return failures ? 1 : 0;
 }
