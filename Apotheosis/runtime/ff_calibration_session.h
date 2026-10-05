@@ -91,10 +91,21 @@ public:
         if (lastFrameUs_ > 0 && frameUs - lastFrameUs_ > 200000) {
             failLocked("图像间隔过长，标定中止"); return {};
         }
-        if (candidates.size() != 1 || !candidates.front().box.valid()) {
-            failLocked("标定区域需保留一个静止目标；目标丢失或多个目标时请重试"); return {};
+        if (candidates.empty()) {
+            failLocked("标定区域需保留一个静止目标；目标丢失时请重试"); return {};
         }
-        const auto& candidate = candidates.front();
+        const control::Candidate* pick = nullptr;
+        double bestArea = -1;
+        for (const auto& c : candidates) {
+            if (!c.box.valid()) continue;
+            if (data_.state == State::Sampling && c.classId != classId_) continue;
+            double a = c.box.w * c.box.h;
+            if (a > bestArea) { bestArea = a; pick = &c; }
+        }
+        if (!pick) {
+            failLocked("标定区域需保留一个静止目标；目标丢失时请重试"); return {};
+        }
+        const auto& candidate = *pick;
         if (data_.state == State::Armed) {
             data_.state = State::Sampling; startedUs_ = nowUs;
             nextPulseUs_ = nowUs + 400000; initialBox_ = candidate.box;
