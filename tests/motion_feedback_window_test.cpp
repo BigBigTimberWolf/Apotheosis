@@ -60,31 +60,24 @@ int main()
     window.add({8, 0, 1'041'000, 0});
     check(window.sample(1'050'000, true, 0).x, 8, "new alignment starts a fresh frame interval");
 
-    // Smith Predictor: pendingCorrection sums in-flight sends × conversion.
+    // pendingCorrection sums in-flight sends × conversion.
     {
         runtime::MotionFeedbackWindow w;
         check(w.pendingCorrection(1'000'000, -1, 0.91, 0.91).x, 0,
               "legacy delay returns no pending correction");
         check(w.pendingCorrection(1'000'000, 30, 0.91, 0.91).x, 0,
               "no events returns no pending correction");
-        // delay=30ms, frame at t=1'000'000us. Cutoff = 970'000us.
-        // Sends after 970'000 are in-flight.
-        w.add({10, -5, 980'000, 0}); // in-flight (980 > 970)
-        w.add({4, 2, 990'000, 1});   // in-flight (990 > 970)
-        w.add({6, 3, 960'000, 0});   // already reflected (960 <= 970)
+        w.add({10, -5, 980'000, 0});
+        w.add({4, 2, 990'000, 1});
+        w.add({6, 3, 960'000, 0});
         auto p = w.pendingCorrection(1'000'000, 30, 0.91, 0.91);
         check(p.x, (10 + 4) * 0.91, "pending X sums only in-flight sends");
         check(p.y, (-5 + 2) * 0.91, "pending Y sums only in-flight sends");
-        // Same window, different conversion.
         auto p2 = w.pendingCorrection(1'000'000, 30, 1.5, 0.8);
         check(p2.x, 14 * 1.5, "pending uses per-axis conversion X");
         check(p2.y, -3 * 0.8, "pending uses per-axis conversion Y");
-        // Advancing the frame shrinks the in-flight window.
-        // frame=1'020'000, delay=30ms → cutoff=990'000. Both 980'000 and
-        // 990'000 are <= cutoff so they are no longer pending.
         auto p3 = w.pendingCorrection(1'020'000, 30, 0.91, 0.91);
         check(p3.x, 0, "later frame: all sends now reflected");
-        // const: calling multiple times doesn't change state.
         auto p4 = w.pendingCorrection(1'000'000, 30, 0.91, 0.91);
         check(p4.x, 14 * 0.91, "pendingCorrection is const, repeatable");
     }

@@ -96,9 +96,6 @@ public:
         return sum;
     }
 
-    // Smith Predictor: total pixel displacement of sends that are in-flight
-    // (sent but not yet reflected in the image). Only valid with a calibrated
-    // delay; returns {0,0} for legacy mode (delayMs < 0).
     control::Vec2 pendingCorrection(int64_t frameUs, double delayMs,
                                     double pxPerCountX, double pxPerCountY) const
     {

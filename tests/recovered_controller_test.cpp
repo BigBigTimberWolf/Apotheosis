@@ -716,8 +716,7 @@ int main()
         a.setConfig(withZone);
         check(a.config().hardDeadzoneX==200.0f,"free-wiggle zone is clamped to its 0..200 range");
     }
-    // Smith Predictor: pendingMotionPx reduces the PID error so the controller
-    // doesn't over-send while waiting for in-flight moves to appear in the image.
+    // Smith Predictor: pendingMotionPx reduces PID error for in-flight sends.
     {
         ControllerConfig cfg;
         cfg.frameWidth = cfg.frameHeight = 320;
@@ -737,11 +736,8 @@ int main()
         ControlInput in;
         in.cross = {160, 160}; in.dtSec = 0.01;
         in.candidates = {Candidate{{175, 155, 10, 10}, 0, 0.9}};
-        // Settle both controllers on the same target first.
         for (int i = 0; i < 5; ++i) { withSmith.update(in); without.update(in); }
 
-        // Now simulate: we already sent 12 counts on X (≈10.9 px at 0.91 px/count)
-        // that haven't appeared in the image yet.
         ControlInput inSmith = in;
         inSmith.pendingMotionPx = {12 * 0.91, 0};
         const auto outSmith = withSmith.update(inSmith);
@@ -751,7 +747,6 @@ int main()
         check(std::abs(outSmith.counts.x) < std::abs(outNormal.counts.x),
               "Smith Predictor: pending correction reduces PID output");
 
-        // With enough pending correction, PID output drops further.
         ControlInput inFull = in;
         inFull.pendingMotionPx = {18, 0};
         RecoveredAimController fullSmith;
@@ -761,7 +756,6 @@ int main()
         check(outFull.counts.x < outSmith.counts.x,
               "Smith Predictor: larger pending correction reduces output further");
 
-        // No pendingMotionPx → same output as baseline.
         RecoveredAimController baseline;
         baseline.setConfig(cfg, pidCfg);
         for (int i = 0; i < 5; ++i) baseline.update(in);

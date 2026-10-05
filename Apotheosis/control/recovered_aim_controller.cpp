@@ -301,11 +301,6 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
         pid_.resetIntegral();
         pid_.seedDerivativeAfterPause();
     }
-    // Smith Predictor: subtract the predicted pixel effect of in-flight sends
-    // so the PID sees the estimated current error, not the delayed observation.
-    // Only active when the crosshair is at a fixed screen position (not detected
-    // in the image), because a detected crosshair shifts with the camera and
-    // self-motion cancels out of the observed error.
     const Vec2 pidError = out.controlAnchor - input.cross - input.pendingMotionPx;
     const auto step = pid_.update(pidError, velocityFeedforward, input.dtSec);
     out.counts = step.counts;
