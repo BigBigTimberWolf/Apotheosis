@@ -390,6 +390,12 @@ add_logic_test(aimpoint_prediction_test "${CMAKE_CURRENT_LIST_DIR}/aimpoint_pred
     "${APP_SOURCE_ROOT}/control/recovered_pid.cpp"
     "${APP_SOURCE_ROOT}/control/recovered_tracker.cpp"
     "${APP_SOURCE_ROOT}/control/recovered_aim_controller.cpp")
+add_logic_test(smith_lead_test "${CMAKE_CURRENT_LIST_DIR}/smith_lead_test.cpp"
+    "${APP_SOURCE_ROOT}/control/types.cpp"
+    "${APP_SOURCE_ROOT}/control/anchor.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_pid.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_tracker.cpp"
+    "${APP_SOURCE_ROOT}/control/recovered_aim_controller.cpp")
 
 add_logic_test(hotkey_selection_test "${CMAKE_CURRENT_LIST_DIR}/hotkey_selection_test.cpp")
 if(WIN32)

@@ -5,6 +5,7 @@
 #include "dynamic_fov.h"
 #include "recovered_pid.h"
 #include "recovered_tracker.h"
+#include "smith_lead.h"
 
 namespace control {
 
@@ -15,7 +16,7 @@ public:
     void setConfig(const ControllerConfig& config, const RecoveredPidConfig& pid);
     ControlOutput update(const ControlInput& input);
     void reset();
-    void resetCompensation() { compensator_.reset(); macroSmoothed_=macroCarry_={}; }
+    void resetCompensation() { compensator_.reset(); smithLead_.reset(); macroSmoothed_=macroCarry_={}; }
     void resetPidAxes(bool x, bool y) { pid_.resetAxes(x, y); }
     void seedPidDerivativeAfterPause() { pid_.seedDerivativeAfterPause(); }
 
@@ -24,6 +25,7 @@ private:
     RecoveredDualTracker tracker_;
     RecoveredPid pid_;
     FollowCompensator compensator_;
+    SmithLead smithLead_;
     DynamicFov fov_;
     int selectedId_ = -1;
     int selectedClassId_ = -1;

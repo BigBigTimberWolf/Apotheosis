@@ -294,7 +294,14 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
     // Extrapolation always uses the maneuver-aware predict velocity (snaps within
     // one observation frame on reversal/stop/new target); the PID feedforward
     // above keeps the frozen smooth velocity.
-    out.controlAnchor = out.anchor + offset + target.predictVelocity*(std::clamp(input.macro.predictionMs,0.,500.)/1000.);
+    // The Smith lead hands back the in-flight motion that the target's own movement
+    // explains, so the subtraction of `pendingMotionPx` below only removes what the
+    // target cannot account for. It is zero until the send-to-image delay is calibrated.
+    const Vec2 smithLead = smithLead_.update(velocityFeedforward, input.pendingMotionPx,
+                                             pidConfig.motionDelayMs >= 0.0f ? pidConfig.motionDelayMs * 1e-3 : 0.0,
+                                             input.dtSec);
+    out.controlAnchor = out.anchor + offset + target.predictVelocity*(std::clamp(input.macro.predictionMs,0.,500.)/1000.)
+        + smithLead;
     if (changedTarget) {
         // Frozen second-port switch rule: do not carry old-target I or produce
         // a one-frame D spike from the old target's error.
