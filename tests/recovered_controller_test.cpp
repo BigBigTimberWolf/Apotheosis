@@ -717,6 +717,8 @@ int main()
         check(a.config().hardDeadzoneX==200.0f,"free-wiggle zone is clamped to its 0..200 range");
     }
     // Smith Predictor: pendingMotionPx reduces PID error for in-flight sends.
+    // 需要标定过的延迟：真实链路里 pendingCorrection() 在 motionDelayMs < 0 时
+    // 就是返回 0，"没标定就不减"是本来就有的契约，这里显式写出来。
     {
         ControllerConfig cfg;
         cfg.frameWidth = cfg.frameHeight = 320;
@@ -728,6 +730,7 @@ int main()
         pidCfg.deadzoneX = pidCfg.deadzoneY = 0;
         pidCfg.smoothMaxPixel = 200;
         pidCfg.segmentEnabled = true; pidCfg.segment = 1;
+        pidCfg.motionDelayMs = 40.0f;  // calibrated send-to-image lag
 
         RecoveredAimController withSmith, without;
         withSmith.setConfig(cfg, pidCfg);
@@ -762,6 +765,34 @@ int main()
         const auto outBase = baseline.update(in);
         check(outBase.counts.x == outNormal.counts.x,
               "Smith Predictor: zero pending gives baseline output");
+
+        // ★ 在飞位移按发送事件整块跳变（一次最多 smoothMaxPixel，默认就是 50 px），
+        //   延迟一抖窗口边界就扫过事件、整笔进出。减掉的必须是摊平后的量：首帧只能
+        //   走一部分，持续下去才收敛到全部修正量（直流增益 1，平均修正不变）。
+        ControlInput inBurst = in;
+        inBurst.pendingMotionPx = {50, 0};   // 最坏情况：一整笔打满限幅的事件
+        RecoveredAimController stepping;
+        stepping.setConfig(cfg, pidCfg);
+        for (int i = 0; i < 5; ++i) stepping.update(in);
+        const double before = double(stepping.update(in).counts.x);
+        const double firstFrame = double(stepping.update(inBurst).counts.x);
+        double converged = firstFrame;
+        for (int i = 0; i < 60; ++i) converged = double(stepping.update(inBurst).counts.x);
+        const double firstMove = std::abs(before - firstFrame);
+        const double totalMove = std::abs(before - converged);
+        check(firstMove > 0.0 && totalMove > 0.0 && firstMove < totalMove * 0.35,
+              "Smith Predictor: one frame of new in-flight motion moves the error gradually");
+        check(std::abs(totalMove) > std::abs(firstMove),
+              "Smith Predictor: a sustained in-flight amount keeps reducing the output");
+
+        // 没标定（motionDelayMs < 0）时不做任何减法，和真实链路一致。
+        RecoveredPidConfig noCal = pidCfg;
+        noCal.motionDelayMs = -1.0f;
+        RecoveredAimController uncalibrated;
+        uncalibrated.setConfig(cfg, noCal);
+        for (int i = 0; i < 5; ++i) uncalibrated.update(in);
+        check(uncalibrated.update(inSmith).counts.x == outNormal.counts.x,
+              "Smith Predictor: an uncalibrated delay never subtracts in-flight motion");
     }
     return failures ? 1 : 0;
 }

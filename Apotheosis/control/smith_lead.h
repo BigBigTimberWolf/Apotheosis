@@ -45,19 +45,37 @@ public:
             // velocity starts at the current reading, the in-flight history at 0.
             velocity_ = velocity;
             pending_ = {};
+            subtract_ = pending; // 首次直接取当前值，避免启动时凭空多一个台阶
             ready_ = true;
         }
         const double velocityAlpha = -std::expm1(-dtSec / kVelocityTauSec);
         const double pendingAlpha = -std::expm1(-dtSec / kPendingTauSec);
+        const double subtractAlpha = -std::expm1(-dtSec / kSubtractTauSec);
         velocity_ += (velocity - velocity_) * velocityAlpha;
         pending_ += (pending - pending_) * pendingAlpha;
+        subtract_ += (pending - subtract_) * subtractAlpha;
         return {axis(velocity_.x, pending_.x, pending.x, delaySec),
                 axis(velocity_.y, pending_.y, pending.y, delaySec)};
     }
 
+    // 给 PID 误差减掉的那份"在飞位移"，按发送事件在时间上摊开。
+    //
+    // ★ 原始 pending 是按事件整块跳变的：一次成功发送就是一个事件、最多
+    //   smoothMaxPixel（默认 50 px），它进出延迟窗口时 PID 误差就整块跳一下 ——
+    //   而准星死区只有 5 px，这一跳是死区的十倍。标定出来的延迟是常量，实际的
+    //   发送→画面延迟却在抖（帧间隔、采集、推理），窗口边界来回扫，事件就整笔进出
+    //   → 这就是"延迟一波动就不稳"。近距离目标要瞄的点落在大框里、离准星天然就远，
+    //   误差常打到限幅、每次发送都是最大笔，所以只有近目标看得见抖。
+    //
+    //   这里用与延迟同量级的时间常数把台阶摊平；直流增益仍是 1，平均修正量不变，
+    //   所以不会因为这一改变得更容易过冲。未标定（delaySec <= 0）时整体 reset 并
+    //   返回 0，与 pendingCorrection() 在 delayMs < 0 时不产生值的契约一致。
+    Vec2 smoothedPending() const { return subtract_; }
+
     void reset() {
         velocity_ = {};
         pending_ = {};
+        subtract_ = {};
         ready_ = false;
     }
 
@@ -66,6 +84,8 @@ private:
     // history is longer so a one-off burst is not mistaken for target motion.
     static constexpr double kVelocityTauSec = 0.05;
     static constexpr double kPendingTauSec = 0.12;
+    // 减掉用的那份跟延迟同量级：既摊平事件台阶，又不会比真实在飞量滞后太多。
+    static constexpr double kSubtractTauSec = 0.04;
 
     static bool finite(const Vec2& v) { return std::isfinite(v.x) && std::isfinite(v.y); }
 
@@ -76,7 +96,7 @@ private:
         return slow > 0.0 ? magnitude : -magnitude;
     }
 
-    Vec2 velocity_{}, pending_{};
+    Vec2 velocity_{}, pending_{}, subtract_{};
     bool ready_ = false;
 };
 

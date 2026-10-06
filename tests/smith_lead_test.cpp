@@ -49,6 +49,27 @@ void ruleTests()
         check(drained.x > 0.0 && drained.x <= 3.0 && drained.y < 0.0 && drained.y >= -1.0,
               "the lead never exceeds the motion that is in flight right now");
     }
+    // 在飞位移按发送事件整块跳变：一次成功发送最多 smoothMaxPixel（默认 50 px），
+    // 标定延迟与实际延迟之间的抖动会让窗口边界扫过事件，于是它整笔进/出。减掉的那
+    // 份必须摊平，否则 PID 误差跟着跳台阶（准星死区 5 px，这一跳 50 px）。
+    {
+        SmithLead lead;
+        lead.update({0, 0}, {0, 0}, kDelaySec, 0.008);
+        double previous = lead.smoothedPending().x;
+        double maxStep = 0.0, firstStep = 0.0;
+        for (int n = 0; n < 400; ++n) {
+            lead.update({0, 0}, {50, 0}, kDelaySec, 0.008);
+            const double now = lead.smoothedPending().x;
+            const double step = std::abs(now - previous);
+            if (n == 0) firstStep = step;
+            maxStep = std::max(maxStep, step);
+            previous = now;
+        }
+        check(firstStep > 0.0 && maxStep < 50.0 * 0.35,
+              "a whole-event step in flight is spread over time, not applied in one frame");
+        check(std::abs(previous - 50.0) < 0.5,
+              "spreading keeps unity DC gain: the average correction is unchanged");
+    }
     {
         SmithLead lead;
         const Vec2 first = lead.update({240, 0}, {30, 0}, kDelaySec, 0.005);

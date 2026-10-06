@@ -308,7 +308,13 @@ ControlOutput RecoveredAimController::update(const ControlInput& input)
         pid_.resetIntegral();
         pid_.seedDerivativeAfterPause();
     }
-    const Vec2 pidError = out.controlAnchor - input.cross - input.pendingMotionPx;
+    // ★ 减掉的是**摊平过**的在飞位移，不是原始值。原始 pending 一次成功发送就是
+    //   一个整块事件（最多 smoothMaxPixel，默认 50 px），它进出延迟窗口时误差会跳
+    //   台阶；延迟一波动（帧间隔、采集、推理）或发送量忽大忽小，窗口边界就跟着扫，
+    //   PID 就看到台阶状误差 —— 表现为"延迟一波动就不稳"。近距离目标要瞄的点落在
+    //   大框里、离准星天然就远，误差常打满限幅、每次发送都是最大笔，所以只有近目标
+    //   看得见抖。摊平后直流增益仍是 1，平均修正量不变。
+    const Vec2 pidError = out.controlAnchor - input.cross - smithLead_.smoothedPending();
     const auto step = pid_.update(pidError, velocityFeedforward, input.dtSec);
     out.counts = step.counts;
     if(input.macro.smoothing<1||input.macro.speed>0) {
