@@ -576,7 +576,9 @@ void CrosshairPage::startColorPick(PickRole role) {
         cm.setShowWindow(true);
 
     m_pickRole = role;
-    m_pickToken = crosshair::ArmColorPick(0);
+    // 采 3×3 中位数：准星是细线 + 抗锯齿，单像素很容易点到边缘混色像素，
+    // 那个样本会把颜色范围整体撑大，最后就是锁背景。
+    m_pickToken = crosshair::ArmColorPick(1);
     if (role == PickRole::Direct) m_pickColorBtn->setText(QStringLiteral("取消取色"));
     if (role == PickRole::TargetSample) m_labTargetBtn->setText(QStringLiteral("取消目标采样"));
     if (role == PickRole::BackgroundSample) m_labBackgroundBtn->setText(QStringLiteral("取消背景采样"));
@@ -605,7 +607,8 @@ void CrosshairPage::updateLabPreview() {
     const auto result = crosshair::deriveColorLabBands(m_labTargets, m_labBackgrounds);
     m_labApplyBtn->setEnabled(!result.bands.empty());
     if (m_labTargets.empty()) {
-        m_labSummary->setText(QStringLiteral("先采目标色，再采容易误识别的背景色。"));
+        m_labSummary->setText(QStringLiteral("先采目标色，再采容易误识别的背景色；"
+            "每次采样取 3×3 中位数，采到准星边缘的混色像素会被自动忽略。"));
     } else {
         QStringList ranges;
         for (const auto& band : result.bands) {
@@ -614,12 +617,27 @@ void CrosshairPage::updateLabPreview() {
                 .arg(band.s_min).arg(band.s_max)
                 .arg(band.v_min).arg(band.v_max);
         }
+        QString extra;
+        if (result.dropped_samples > 0)
+            extra += QStringLiteral("。已忽略 %1 个可疑样本（多半是准星边缘的混色像素）")
+                .arg(result.dropped_samples);
+        if (result.bands.size() > 1)
+            extra += QStringLiteral("。为避开背景色，范围拆成了 %1 段（检测端会取并集，"
+                "拆得越多越容易在画质抖动时漏帧）").arg(result.bands.size());
+        int enabledColors = 0;
+        for (const auto& c : m_colors) if (c.enabled) ++enabledColors;
+        if (enabledColors + result.bands.size() > crosshair::kMaxColorBands)
+            extra += QStringLiteral("。★ 启用中的颜色档 %1 + 本次 %2 段会超过检测上限 %3 条，"
+                "超出的部分不会生效，请先停用不用的颜色档或清空本次样本")
+                .arg(enabledColors).arg(result.bands.size()).arg(crosshair::kMaxColorBands);
         m_labSummary->setText(
-            QStringLiteral("目标样本 %1，背景样本 %2；背景误命中 %3。候选范围：%4%5")
+            QStringLiteral("目标样本 %1，背景样本 %2；背景误命中 %3。候选范围：%4%5%6")
                 .arg(m_labTargets.size()).arg(m_labBackgrounds.size())
                 .arg(result.background_hits).arg(ranges.join(QStringLiteral(" / ")))
+                .arg(extra)
                 .arg(result.background_hits > 0
-                    ? QStringLiteral("。这些背景色与目标色重叠，建议补采不同位置或手动微调。")
+                    ? QStringLiteral("。这些背景色的 S/V 夹在目标样本中间，两个轴都挖不开："
+                        "请在准星的不同位置或不同画质下多采几个目标色，或把该背景色再采一次。")
                     : QString()));
     }
     crosshair::SetColorLabPreview(m_labPreviewToggle->isChecked()
