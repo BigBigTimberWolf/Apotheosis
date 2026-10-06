@@ -1,6 +1,7 @@
 #include "crosshair_runtime.h"
 #include "am_centroid.h"
 #include "centroid_cluster.h"
+#include "color_lab.h"
 
 #include <algorithm>
 #include <chrono>
@@ -58,7 +59,8 @@ std::mutex g_laser_mutex;
 int g_laser_hotkey = -1;
 int g_last_gpu_hotkey = -1;
 
-constexpr int kMaxGpuBands = 16;
+// 与实验室共用同一个上限常量，避免两边各写一个数字。
+constexpr int kMaxGpuBands = crosshair::kMaxColorBands;
 
 struct GpuDetectorState
 {
@@ -235,10 +237,14 @@ PivotSnapshot process_frame(const cv::Mat& bgrFrame, int64_t captured_ns, bool c
     }
 
     std::optional<cv::Point2f> hit;
+    // 镭射路径同时取整条线段（枪口→激光点），预览要把这条线画出来。
+    crosshair::LaserResult laserLine;
     if (cross_enabled && cross_has_color)
         hit = g_detector.detect(bgrFrame, cross_settings);
-    else if (laser_enabled && laser_has_color)
-        hit = g_laser_detector.detect(bgrFrame, laser_settings);
+    else if (laser_enabled && laser_has_color) {
+        laserLine = g_laser_detector.detectLine(bgrFrame, laser_settings);
+        if (laserLine.found) hit = laserLine.tip;
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_laser_mutex);
@@ -253,6 +259,10 @@ PivotSnapshot process_frame(const cv::Mat& bgrFrame, int64_t captured_ns, bool c
     snap.active_hotkey = active_idx;
     snap.ts = captured_ns > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(captured_ns))
                               : std::chrono::steady_clock::now();
+    snap.laser_valid = laserLine.found;
+    snap.laser_muzzle = laserLine.muzzle;
+    snap.laser_tip = laserLine.tip;
+    snap.laser_visible_tip = laserLine.visible_tip;
     if (hit)
     {
         snap.x = static_cast<double>(hit->x);

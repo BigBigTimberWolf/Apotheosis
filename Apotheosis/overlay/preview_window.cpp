@@ -357,10 +357,23 @@ void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
         if (fresh)
         {
             if (cfg.hotkey_active && ov.fov_radius_x > 0.0 && ov.fov_radius_y > 0.0) {
+                // 动态 FOV 的筛选半径是两轴各自收放的（追赶时给目标留位置、换目标
+                // 时不会把已对准的轴一起撑开），所以直接按半径画就会一会儿横椭圆
+                // 一会儿竖椭圆。这里只改画法：按配置的 FOV 比例画形状恒定的椭圆，
+                // 大小取两轴比例的**几何平均** —— 面积跟真实筛选椭圆一致，既不会
+                // 谎报"某轴还有位置"，也不会显得比实际小一圈。筛选逻辑一点没变
+                // （contains() 用的还是 per-axis 的 radii）。
+                const double baseRadiusX = std::max(1.0, cfg.fov_base_x / 2.0);
+                const double baseRadiusY = std::max(1.0, cfg.fov_base_y / 2.0);
+                const double ratioX = std::max(0.0, ov.fov_radius_x / baseRadiusX);
+                const double ratioY = std::max(0.0, ov.fov_radius_y / baseRadiusY);
+                const double factor = std::clamp(std::sqrt(ratioX * ratioY), 0.0, 1.0);
+                const cv::Size dynamicAxes(
+                    std::max(1, static_cast<int>(std::lround(baseRadiusX * factor))),
+                    std::max(1, static_cast<int>(std::lround(baseRadiusY * factor))));
                 preview_draw::ellipse(canvas,
                     cv::Point(static_cast<int>(std::lround(ov.cross_x)), static_cast<int>(std::lround(ov.cross_y))),
-                    cv::Size(std::max(1, static_cast<int>(std::lround(ov.fov_radius_x))),
-                             std::max(1, static_cast<int>(std::lround(ov.fov_radius_y)))),
+                    dynamicAxes,
                     0, 0, 360, bgr(255, 180, 80), 1, cv::LINE_AA);
                 if (ov.mask_x || ov.mask_y || ov.unlock_x || ov.unlock_y) {
                     draw_text_with_bg(canvas, std::string("Input mask requested: ") +
@@ -529,6 +542,25 @@ void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
             preview_draw::rectangle(canvas, roi & bounds, bgr(0, 150, 255), 1, cv::LINE_AA);
         if ((target & bounds).area() > 0)
             preview_draw::rectangle(canvas, target & bounds, bgr(255, 100, 230), 1, cv::LINE_AA);
+        // 检测到的激光线：枪口→激光点，外加可见端点和激光点两个标记。
+        // 以前这里只有两个矩形框，看不出它到底认到了哪条线。
+        const auto laserSnap = crosshair_runtime::read();
+        const auto laserAgeMs = laserSnap.ts.time_since_epoch().count() == 0 ? -1LL
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - laserSnap.ts).count();
+        if (laserSnap.laser_valid && laserSnap.active_hotkey >= 0 &&
+            laserAgeMs >= 0 && laserAgeMs <= crosshair_runtime::kFreshnessMs) {
+            const auto toPoint = [](const cv::Point2f& p) {
+                return cv::Point(static_cast<int>(std::lround(p.x)),
+                                 static_cast<int>(std::lround(p.y)));
+            };
+            preview_draw::line(canvas, toPoint(laserSnap.laser_muzzle),
+                               toPoint(laserSnap.laser_tip), bgr(90, 255, 120), 1, cv::LINE_AA);
+            preview_draw::circle(canvas, toPoint(laserSnap.laser_visible_tip), 2,
+                                 bgr(90, 255, 120), -1, cv::LINE_AA);
+            preview_draw::circle(canvas, toPoint(laserSnap.laser_tip), 3,
+                                 bgr(60, 220, 90), 1, cv::LINE_AA);
+        }
     }
 
     {

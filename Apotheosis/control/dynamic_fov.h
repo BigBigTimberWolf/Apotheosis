@@ -62,6 +62,11 @@ public:
             const double blend = wanted > current ? expandAlpha : alpha;
             return current + blend * (wanted - current);
         };
+        // ★ 两轴按各自轴的误差独立收放，这是"追赶时给目标留位置"和"换目标不
+        //   会把已对准的轴一起撑开"两条保证的来源，不能改成两轴共用一个系数
+        //   （那会踩掉 recovered_controller_test 里的 slow-pursuit / new-target
+        //   两条回归）。椭圆的形状看起来会翻转，那是绘制层的事，已在
+        //   preview_window.cpp 里按配置的 FOV 比例画成稳定形状。
         radii_ = {update(radii_.x, base_.x, target.centerX() - cross.x),
                   update(radii_.y, base_.y, target.centerY() - cross.y)};
     }
