@@ -115,6 +115,23 @@ void drawMarker(PreviewCanvas& c, cv::Point p, cv::Scalar color, int marker,
 }
 }
 
+// ★ 动态 FOV 的筛选半径是两轴各自收放的（追赶时给目标留位置、换目标时不会把
+//   已经对准的轴一起撑开 —— recovered_controller_test 把这两条都钉住了），所以
+//   直接按半径画椭圆，误差落在哪个轴不同形状就横竖翻转。这里只统一「画法」：
+//   按配置的 FOV 比例画形状恒定的椭圆，大小取两轴比例的**几何平均**，面积与真实
+//   筛选椭圆一致 —— 既不谎报"某轴还有位置"，也不显得比实际小一圈。
+//   实时叠加和回放叠加共用这一处，避免两边各写一份。
+cv::Size dynamic_fov_axes(int base_x, int base_y, double radius_x, double radius_y)
+{
+    const double baseRadiusX = std::max(1.0, base_x / 2.0);
+    const double baseRadiusY = std::max(1.0, base_y / 2.0);
+    const double ratioX = std::max(0.0, radius_x / baseRadiusX);
+    const double ratioY = std::max(0.0, radius_y / baseRadiusY);
+    const double factor = std::clamp(std::sqrt(ratioX * ratioY), 0.0, 1.0);
+    return {std::max(1, static_cast<int>(std::lround(baseRadiusX * factor))),
+            std::max(1, static_cast<int>(std::lround(baseRadiusY * factor)))};
+}
+
 cv::Size preview_display_size(cv::Size source, bool& initializeSize)
 {
     if (initializeSize) {
@@ -357,20 +374,8 @@ void render_overlays(PreviewCanvas& canvas, const PreviewConfigSnapshot& cfg)
         if (fresh)
         {
             if (cfg.hotkey_active && ov.fov_radius_x > 0.0 && ov.fov_radius_y > 0.0) {
-                // 动态 FOV 的筛选半径是两轴各自收放的（追赶时给目标留位置、换目标
-                // 时不会把已对准的轴一起撑开），所以直接按半径画就会一会儿横椭圆
-                // 一会儿竖椭圆。这里只改画法：按配置的 FOV 比例画形状恒定的椭圆，
-                // 大小取两轴比例的**几何平均** —— 面积跟真实筛选椭圆一致，既不会
-                // 谎报"某轴还有位置"，也不会显得比实际小一圈。筛选逻辑一点没变
-                // （contains() 用的还是 per-axis 的 radii）。
-                const double baseRadiusX = std::max(1.0, cfg.fov_base_x / 2.0);
-                const double baseRadiusY = std::max(1.0, cfg.fov_base_y / 2.0);
-                const double ratioX = std::max(0.0, ov.fov_radius_x / baseRadiusX);
-                const double ratioY = std::max(0.0, ov.fov_radius_y / baseRadiusY);
-                const double factor = std::clamp(std::sqrt(ratioX * ratioY), 0.0, 1.0);
-                const cv::Size dynamicAxes(
-                    std::max(1, static_cast<int>(std::lround(baseRadiusX * factor))),
-                    std::max(1, static_cast<int>(std::lround(baseRadiusY * factor))));
+                const cv::Size dynamicAxes = dynamic_fov_axes(
+                    cfg.fov_base_x, cfg.fov_base_y, ov.fov_radius_x, ov.fov_radius_y);
                 preview_draw::ellipse(canvas,
                     cv::Point(static_cast<int>(std::lround(ov.cross_x)), static_cast<int>(std::lround(ov.cross_y))),
                     dynamicAxes,
@@ -872,16 +877,20 @@ void draw_color_lab_preview(PreviewCanvas& canvas)
 void render_replay_frame(PreviewCanvas& canvas,
                          const std::vector<runtime::ReplayFrame>& frames,
                          size_t frame_index,
-                         float playback_speed)
+                         float playback_speed,
+                         cv::Size base_fov)
 {
     if (canvas.empty() || frames.empty()) return;
     frame_index = std::min(frame_index, frames.size() - 1);
     const auto& frame = frames[frame_index];
     if (frame.fov_radius_x > 0.0 && frame.fov_radius_y > 0.0) {
+        // 和实时叠加同一套画法：形状恒定、面积与真实筛选范围一致。
+        const cv::Size replayAxes = dynamic_fov_axes(
+            std::max(1, base_fov.width), std::max(1, base_fov.height),
+            frame.fov_radius_x, frame.fov_radius_y);
         preview_draw::ellipse(canvas,
             cv::Point(static_cast<int>(std::lround(frame.cross_x)), static_cast<int>(std::lround(frame.cross_y))),
-            cv::Size(std::max(1, static_cast<int>(std::lround(frame.fov_radius_x))),
-                     std::max(1, static_cast<int>(std::lround(frame.fov_radius_y)))),
+            replayAxes,
             0, 0, 360, bgr(255, 180, 80), 1, cv::LINE_AA);
     }
     if (frame.mask_x || frame.mask_y || frame.unlock_x || frame.unlock_y) {
@@ -1112,7 +1121,8 @@ void preview_loop()
                 g_display_content = {};
                 g_pick_cursor_inside = false;
             }
-            render_replay_frame(replayCanvas, replay_frames, replay_index, speed);
+            render_replay_frame(replayCanvas, replay_frames, replay_index, speed,
+                                cv::Size(cfg.fov_base_x, cfg.fov_base_y));
             show_preview(replayCanvas);
 
             if (replay_index + 1 >= replay_frames.size() && now >= replay_next_tick)
