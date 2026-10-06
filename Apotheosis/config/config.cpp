@@ -538,6 +538,9 @@ bool Config::loadConfig(const std::string& filename)
     auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
     auto_flash_enabled = get_bool("", "auto_flash_enabled", false);
     auto_flash_area_percent = finiteSetting("auto_flash_area_percent", 5.0, 0.1, 100.0);
+    // 按类别单独设的阈值："0:5.0;1:8.0"。坏字段跳过，不会让整份配置作废。
+    auto_flash_rules = runtime::parseAutoFlashRules(
+        get_string("", "auto_flash_rules", ""));
     auto_flash_key = get_string("", "auto_flash_key", "");
 
     crosshair_algorithm = std::clamp(get_long("", "crosshair_algorithm", 0), 0, 1);
@@ -1418,6 +1421,8 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Auto flash: percent of the full detection frame area\n"
          << "auto_flash_enabled = " << to_bool_str(auto_flash_enabled) << "\n"
          << "auto_flash_area_percent = " << auto_flash_area_percent << "\n"
+         << "# 按瞄准类别单独设的阈值：\"类别:面积%;类别:面积%\"；空 = 全部用上面的全局值\n"
+         << "auto_flash_rules = " << runtime::joinAutoFlashRules(auto_flash_rules) << "\n"
          << "auto_flash_key = " << auto_flash_key << "\n\n";
 
     file << "# Legacy Lua fields retained for configuration compatibility.\n"

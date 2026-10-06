@@ -378,6 +378,7 @@ add_logic_test(trigger_snap_return_test "${CMAKE_CURRENT_LIST_DIR}/trigger_snap_
     "${APP_SOURCE_ROOT}/control/types.cpp")
 add_logic_test(motion_feedback_window_test "${CMAKE_CURRENT_LIST_DIR}/motion_feedback_window_test.cpp")
 add_logic_test(ff_calibration_test "${CMAKE_CURRENT_LIST_DIR}/ff_calibration_test.cpp")
+add_logic_test(auto_flash_rules_test "${CMAKE_CURRENT_LIST_DIR}/auto_flash_rules_test.cpp")
 if(Qt6Widgets_FOUND)
     add_logic_test(ff_calibration_ui_test "${CMAKE_CURRENT_LIST_DIR}/ff_calibration_ui_test.cpp")
     target_include_directories(ff_calibration_ui_test PRIVATE "${CMAKE_SOURCE_DIR}/qt_ui")

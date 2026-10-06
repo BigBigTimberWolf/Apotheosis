@@ -156,6 +156,8 @@ uint64_t g_frame_index = 0;
 int g_last_active_hotkey = -1;
 int g_flash_target_id = -1;
 int g_flash_hotkey = -1;
+// 本拍命中的爆闪规则类别（-1 = 用的全局兜底阈值）。
+int g_flash_class = -1;
 bool g_flash_above = false;
 int64_t g_flash_last_fire_ms = 0;
 double g_flash_threshold = -1.0;
@@ -166,6 +168,7 @@ void resetAutoFlash() {
         macros::cancelAutoFlash();
     g_flash_target_id = -1;
     g_flash_hotkey = -1;
+    g_flash_class = -1;
     g_flash_above = false;
 }
 int64_t g_hotkey_activated_ms = 0;
@@ -864,20 +867,30 @@ bool tick(int* consumedVersion)
 
     // Auto flash watches the same locked box as the aim controller. It queues
     // a short press on a different thread, so this control tick never sleeps.
-    if (triggerMode != 0 || !cfg.auto_flash_enabled || cfg.auto_flash_key.empty() ||
+    // 阈值按锁定目标的瞄准类别取：有专档用专档，没有就用全局值（= 任意类别兜底）。
+    const runtime::AutoFlashRule* flashRule = nullptr;
+    runtime::AutoFlashRule flashFallback{-1, std::clamp(cfg.auto_flash_area_percent, 0.1, 100.0)};
+    if (cfg.auto_flash_enabled) {
+        flashRule = runtime::pickAutoFlashRule(cfg.auto_flash_rules, out.targetClassId);
+        if (!flashRule) flashRule = &flashFallback;
+    }
+    if (triggerMode != 0 || !cfg.auto_flash_enabled || !flashRule || cfg.auto_flash_key.empty() ||
         !out.engaged || !out.hasTarget || cfg.detection_resolution <= 0 ||
         out.targetBox.w <= 0.0 || out.targetBox.h <= 0.0) {
         resetAutoFlash();
     } else {
-        const double threshold = std::clamp(cfg.auto_flash_area_percent, 0.1, 100.0);
+        const double threshold = std::clamp(flashRule->area_percent, 0.1, 100.0);
         const double frameArea = static_cast<double>(cfg.detection_resolution) *
                                  cfg.detection_resolution;
         const double areaPercent = 100.0 * out.targetBox.w * out.targetBox.h / frameArea;
+        // 目标、热键、命中的规则（类别 + 阈值）或输出键任一变化都要重新武装。
         if (g_flash_target_id != out.targetId || g_flash_hotkey != activeIdx ||
+            g_flash_class != flashRule->class_id ||
             g_flash_threshold != threshold || g_flash_key != cfg.auto_flash_key) {
             resetAutoFlash();
             g_flash_target_id = out.targetId;
             g_flash_hotkey = activeIdx;
+            g_flash_class = flashRule->class_id;
             g_flash_threshold = threshold;
             g_flash_key = cfg.auto_flash_key;
         }

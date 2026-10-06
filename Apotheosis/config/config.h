@@ -9,6 +9,7 @@
 
 #include "control/recovered_pid.h"
 #include "macro/macro_config.h"
+#include "runtime/auto_flash_rules.h"
 
 enum class ClassBucket
 {
@@ -406,7 +407,10 @@ public:
     bool   auto_capture_save_label = true;
     // Auto flash: locked target box area as a percentage of the detection frame.
     bool auto_flash_enabled = false;
+    // 全局阈值 = 「任意类别」兜底行的值（旧配置直接沿用）。
     double auto_flash_area_percent = 5.0;
+    // 按瞄准类别单独设的阈值；命中的类别没有专档时回落到上面那个全局值。
+    std::vector<runtime::AutoFlashRule> auto_flash_rules;
     std::string auto_flash_key;
 
     std::vector<ClassFilterState> class_filters;
