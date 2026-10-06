@@ -29,6 +29,9 @@ public:
     struct Snapshot {
         State state = State::Idle;
         int hotkey = -1, bank = 0, completed = 0, total = 0;
+        // 被跳过的帧数（瞬时丢框/采集卡顿/框尺寸抖动）。这些帧不写入观测，
+        // 也不再像旧实现那样直接判死整轮标定。
+        int skipped = 0;
         const char* message = "未开始";
         std::vector<control::FfCalibrationObservation> observations;
         std::vector<control::FfCalibrationMove> moves;
@@ -75,7 +78,8 @@ public:
         }
         Snapshot s;
         s.state = data_.state; s.hotkey = data_.hotkey; s.bank = data_.bank;
-        s.completed = data_.completed; s.total = data_.total; s.message = data_.message;
+        s.completed = data_.completed; s.total = data_.total; s.skipped = data_.skipped;
+        s.message = data_.message;
         if (includeSamples && s.state == State::Ready) {
             s.observations = data_.observations; s.moves = data_.moves;
         }
@@ -110,11 +114,18 @@ public:
         }
         if (frameUs <= 0) { failLocked("没有有效采集时间戳，不能标定响应延迟"); return {}; }
         if (frameUs <= lastFrameUs_) return {};
-        if (lastFrameUs_ > 0 && frameUs - lastFrameUs_ > 200000) {
-            failLocked("图像间隔过长，标定中止"); return {};
+        if (lastFrameUs_ > 0 && frameUs - lastFrameUs_ > kFrameGapUs) {
+            if (frameUs - lastFrameUs_ > kMaxFrameGapUs) {
+                failLocked("采集中断过久，标定中止"); return {};
+            }
+            lastFrameUs_ = frameUs;
+            if (!noteSkipped()) return {};
+            return {};
         }
         if (candidates.empty()) {
-            failLocked("标定区域需保留一个静止目标；目标丢失时请重试"); return {};
+            if (!noteMissingTarget(nowUs)) return {};
+            lastFrameUs_ = frameUs;
+            return {};
         }
         const control::Candidate* pick = nullptr;
         double bestArea = -1;
@@ -125,7 +136,9 @@ public:
             if (a > bestArea) { bestArea = a; pick = &c; }
         }
         if (!pick) {
-            failLocked("标定区域需保留一个静止目标；目标丢失时请重试"); return {};
+            if (!noteMissingTarget(nowUs)) return {};
+            lastFrameUs_ = frameUs;
+            return {};
         }
         const auto& candidate = *pick;
         if (data_.state == State::Armed) {
@@ -140,8 +153,16 @@ public:
         if (candidate.classId != classId_ ||
             candidate.box.w / initialBox_.w < 0.85 || candidate.box.w / initialBox_.w > 1.15 ||
             candidate.box.h / initialBox_.h < 0.85 || candidate.box.h / initialBox_.h > 1.15) {
-            failLocked("目标或倍率发生变化，标定中止"); return {};
+            // 运动模糊/一帧跟丢都会让框尺寸抖一下；连续多帧才说明真的换了目标或倍率。
+            if (++sizeStreak_ >= kMaxSizeFrames) {
+                failLocked("目标或倍率发生变化，标定中止"); return {};
+            }
+            lastFrameUs_ = frameUs;
+            if (!noteSkipped()) return {};
+            return {};
         }
+        sizeStreak_ = 0;
+        missFrames_ = 0; missSinceUs_ = 0;
         for (const auto& move : successfulMoves) {
             if (move.timeUs < startedUs_) continue; // residual prior sends are settled in the baseline
             if (queuedUs_ == 0 || move.timeUs < queuedUs_ ||
@@ -161,13 +182,21 @@ public:
         if (data_.moves.empty() && queuedUs_ == 0 && nowUs >= nextPulseUs_) {
             // Compare averaged halves, not each box against the first noisy
             // detection. Ordinary detector jitter must not abort a fixed scene.
-            const auto half = data_.observations.size() / 2;
+            const size_t samples = data_.observations.size();
+            const double half = double(samples / 2);
             control::Vec2 first, second;
-            for (size_t i = 0; i < data_.observations.size(); ++i)
-                (i < half ? first : second) += data_.observations[i].center;
-            if (half < 3 || (first / double(half) - second /
-                double(data_.observations.size() - half)).normSq() > 2.25) {
-                failLocked("开始前目标不稳定，请保持目标和视角静止"); return {};
+            for (size_t i = 0; i < samples; ++i)
+                (i < samples / 2 ? first : second) += data_.observations[i].center;
+            const bool stable = samples >= 4 && half >= 2.0 &&
+                (first / half - second / (double(samples) - half)).normSq() <= 2.25;
+            if (!stable) {
+                // ★ 还没稳（或帧数还不够）时不再直接判死：手还在微调、低帧率下基线
+                //   帧太少都会撞上这里。先延长基线重测，几次都不行才报失败。
+                if (++stabilityRetries_ > kMaxStabilityRetries) {
+                    failLocked("开始前目标不稳定，请保持目标和视角静止"); return {};
+                }
+                nextPulseUs_ = nowUs + 200000;
+                return {};
             }
         }
         if (queuedUs_ != 0) {
@@ -209,6 +238,15 @@ private:
     static constexpr int64_t kSettleUs = 180000;     // capture pipeline + response lag
     static constexpr int64_t kArmTimeoutUs = 60000000;
     static constexpr int64_t kSamplingTimeoutUs = 30000000;
+    // 瞬时故障容忍（登记表 BUG-0001/0004/0005）：单帧丢框、一次采集卡顿、运动
+    // 模糊让框尺寸抖一下，只跳过该帧；连续/累计过多才判失败。
+    static constexpr int kMaxMissFrames = 4;            // 连续无目标的帧数
+    static constexpr int64_t kMaxMissUs = 400000;       // 连续无目标的时长
+    static constexpr int kMaxSizeFrames = 8;            // 连续目标/倍率异常帧数
+    static constexpr int kMaxSkippedFrames = 24;        // 累计跳过帧数
+    static constexpr int64_t kFrameGapUs = 200000;      // 正常的帧间隔上限
+    static constexpr int64_t kMaxFrameGapUs = 600000;   // 单次卡顿上限
+    static constexpr int kMaxStabilityRetries = 6;      // 基线不稳时的重测次数（每次 +200ms）
     static int pairAxis(int index) { return (index / 2) % 2; }
     control::Counts pulseAt(size_t index) const {
         const int axis = pairAxis(int(index));
@@ -226,6 +264,7 @@ private:
         havePrevious_ = false; pendingResponse_ = false;
         pendingIndex_ = -1; pendingAxis_ = 0; pendingAmplitude_ = 0;
         settleFromUs_ = 0; dispatched_ = {};
+        missFrames_ = 0; sizeStreak_ = 0; missSinceUs_ = 0; stabilityRetries_ = 0;
     }
     // Closes the settled window and turns it into a response measurement for the
     // pulse that was in flight when the window opened.
@@ -264,6 +303,24 @@ private:
         }
         amplitude_[axis] = std::clamp(next, kMinimumAmplitude, kMaximumAmplitude);
     }
+    // 记一次"跳过"（不写入观测）。累计过多说明采集/检测真的有问题，才判失败。
+    bool noteSkipped() {
+        if (++data_.skipped > kMaxSkippedFrames) {
+            failLocked("丢帧过多（自动跳过超过上限）：请检查采集卡顿或降低检测分辨率后重试");
+            return false;
+        }
+        return true;
+    }
+    // 连续无目标：帧数和时长任一超限才判失败，避免低帧率下"一帧漏检就整轮失败"。
+    bool noteMissingTarget(int64_t nowUs) {
+        ++missFrames_;
+        if (missSinceUs_ == 0) missSinceUs_ = nowUs;
+        if (missFrames_ >= kMaxMissFrames || nowUs - missSinceUs_ > kMaxMissUs) {
+            failLocked("标定区域需保留一个静止目标；目标丢失时请重试");
+            return false;
+        }
+        return noteSkipped();
+    }
     void failLocked(const char* message) {
         data_.state = State::Failed; data_.message = message;
         active_.store(false, std::memory_order_release);
@@ -287,6 +344,8 @@ private:
     bool havePrevious_ = false, pendingResponse_ = false;
     int pendingIndex_ = -1, pendingAxis_ = 0, pendingAmplitude_ = 0;
     int64_t settleFromUs_ = 0;
+    int missFrames_ = 0, sizeStreak_ = 0, stabilityRetries_ = 0;
+    int64_t missSinceUs_ = 0;
 };
 
 } // namespace runtime

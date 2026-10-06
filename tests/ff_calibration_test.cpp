@@ -32,6 +32,50 @@ int main() {
         auto missing=data.moves; missing.pop_back();
         check(!fitFfCalibration(data.observations,missing).valid,"missing successful sends cannot produce a valid fit");
         check(!fitFfCalibration({},data.moves).valid,"insufficient samples are rejected");
+        // 诊断字段：没有噪声时静止抖动接近 0，延迟不该贴在扫描上限上。
+        check(result.jitterPixels.x < 1.0 && result.jitterPixels.y < 1.0 &&
+              result.score > 0.0 && result.inlierRatio > 0.9 && !result.delayAtScanLimit,
+              "fit reports the measured jitter, residual score and usable-sample ratio");
+    }
+    // 现场最常见的“拟合误差过大”其实来自少数被污染的画面：手抖一下、开一枪的
+    // 后坐、一帧运动模糊。旧实现是整段最小二乘 + 绝对门槛，几帧就能把一轮判死。
+    {
+        session.cancel();session.arm(3,0);
+        const auto clean=simulateFfCalibration(3,8000,37,.08);
+        auto spiked=clean.observations;
+        for(size_t i=0;i<spiked.size();i+=12) {
+            spiked[i].center.x+=9.0;
+            spiked[i].center.y-=7.0;
+        }
+        const auto spikedFit=fitFfCalibration(spiked,clean.moves);
+        std::printf("spiked %.1f%%: valid=%d X=%.4f inliers=%.2f\n",
+            100.0/12.0,spikedFit.valid,spikedFit.pixelsPerCount.x,spikedFit.inlierRatio);
+        check(spikedFit.valid && std::abs(spikedFit.pixelsPerCount.x-1.35)<.05,
+              "a few contaminated frames no longer fail the whole calibration");
+    }
+    // 抖动大的场景：静止抖动本身就有 3 px 时，旧门槛（rmse ≤ max(0.8, 6%位移)）
+    // 必失败；现在门槛跟着实测抖动放大，仍然要求残差相对位移足够小。
+    {
+        session.cancel();session.arm(3,0);
+        const auto jittery=simulateFfCalibration(3,8000,37,3.0);
+        const auto jitteryFit=fitFfCalibration(jittery.observations,jittery.moves);
+        std::printf("jitter 3px: valid=%d X=%.4f jitter=(%.2f,%.2f) rms=(%.2f,%.2f)\n",
+            jitteryFit.valid,jitteryFit.pixelsPerCount.x,jitteryFit.jitterPixels.x,
+            jitteryFit.jitterPixels.y,jitteryFit.rmse.x,jitteryFit.rmse.y);
+        check(jittery.state==State::Ready && jitteryFit.valid &&
+              std::abs(jitteryFit.pixelsPerCount.x-1.35)<.12 &&
+              jitteryFit.rmse.x > 1.2,
+              "a noisy-but-clean scene fits once the tolerance follows the measured jitter");
+    }
+    // 但噪声大到跟位移一个量级时必须照样拒绝（不能因为“门槛会放大”就什么都收）。
+    {
+        session.cancel();session.arm(3,0);
+        const auto hopeless=simulateFfCalibration(3,8000,37,12.0);
+        const auto hopelessFit=fitFfCalibration(hopeless.observations,hopeless.moves);
+        std::printf("jitter 12px: valid=%d score=%.2f rms=(%.2f,%.2f)\n",
+            hopelessFit.valid,hopelessFit.score,hopelessFit.rmse.x,hopelessFit.rmse.y);
+        check(!hopelessFit.valid && hopelessFit.reason.find("数据不稳定")!=std::string::npos,
+              "noise comparable to the probe is still rejected with the measured numbers");
     }
     auto begin=[&] {
         session.cancel();session.arm(3,0);
@@ -102,8 +146,6 @@ int main() {
     auto now=begin();session.released();check(session.snapshot().state==State::Failed,"release during sampling aborts");
     now=begin();session.update(4,now+10000,now+9000,{Candidate{{300,300,40,40},0,.9}},{},0);
     check(session.snapshot().state==State::Failed,"profile switching aborts");
-    now=begin();session.update(3,now+10000,now+9000,{}, {},0);
-    check(session.snapshot().state==State::Failed,"target loss aborts");
     now=begin();session.update(3,now+10000,now+9000,{Candidate{{300,300,40,40},0,.9}},{},1);
     check(session.snapshot().state==State::Failed,"driver failure aborts");
     now=begin();session.cancel();
@@ -112,5 +154,59 @@ int main() {
           "cancel between computation and dispatch cannot enqueue a late probe");
     check(session.update(3,now+400000,now+399000,{Candidate{{300,300,40,40},0,.9}},{},0).x==0,
           "cancelled session emits no further probe movement");
+
+    // 瞬时故障不再判死整轮标定（登记表 BUG-0001/0004/0005）：单帧丢框、一次采集
+    // 卡顿、运动模糊让框抖一下，都只跳过该帧；连续或累计超限才失败。
+    {
+        now=begin();
+        session.update(3,now+10000,now+9000,{}, {},0);
+        check(session.snapshot().state==State::Sampling && session.snapshot().skipped==1,
+              "a single missed frame is skipped and counted, not fatal");
+        for(int i=0;i<4;++i)
+            session.update(3,now+20000+i*9000,now+19000+i*9000,{}, {},0);
+        check(session.snapshot().state==State::Failed,
+              "a persistent target loss still aborts");
+    }
+    {
+        now=begin();
+        session.update(3,now+300000,now+299000,{Candidate{{300,300,40,40},0,.9}},{},0);
+        check(session.snapshot().state==State::Sampling && session.snapshot().skipped==1,
+              "a single capture hiccup is skipped, not fatal");
+        now=begin();
+        session.update(3,now+900000,now+899000,{Candidate{{300,300,40,40},0,.9}},{},0);
+        check(session.snapshot().state==State::Failed,"a long capture stall still aborts");
+    }
+    {
+        now=begin();
+        session.update(3,now+10000,now+9000,{Candidate{{300,300,80,80},0,.9}},{},0);
+        check(session.snapshot().state==State::Sampling && session.snapshot().skipped==1,
+              "one motion-blurred box is skipped, not fatal");
+        for(int i=0;i<8;++i)
+            session.update(3,now+20000+i*9000,now+19000+i*9000,{Candidate{{300,300,80,80},0,.9}},{},0);
+        check(session.snapshot().state==State::Failed,
+              "a persistent magnification change still aborts");
+    }
+    // 手还在微调时开始标定：旧实现立刻"开始前目标不稳定"判死；现在先延长基线重测。
+    {
+        session.cancel();session.arm(3,0);
+        int64_t t=runtime::ffCalibrationNowUs()+1000;
+        for(int i=0;i<10;++i,t+=8000) {
+            const double x=320.0+i*1.2;
+            session.update(3,t,t-16000,{Candidate{{x-20,270,40,60},0,.9}},{},0);
+        }
+        for(int i=0;i<60;++i,t+=8000)
+            session.update(3,t,t-16000,{Candidate{{300,290,40,60},0,.9}},{},0);
+        check(session.snapshot().state==State::Sampling,
+              "an unsettled baseline waits for the scene to settle instead of aborting");
+    }
+    // 被跳过的帧在录到的观测里就是"洞"：拟合必须照样成立。
+    {
+        std::vector<FfCalibrationObservation> thinned;
+        for(size_t i=0;i<noisy.observations.size();++i)
+            if(i%17!=0) thinned.push_back(noisy.observations[i]);
+        const auto holedFit=fitFfCalibration(thinned,noisy.moves);
+        check(holedFit.valid && std::abs(holedFit.pixelsPerCount.x-1.35)<.03,
+              "skipped frames leave holes that the fit still handles");
+    }
     return failures?1:0;
 }

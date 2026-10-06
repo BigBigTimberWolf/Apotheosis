@@ -159,18 +159,24 @@ private:
                 result_ = control::fitFfCalibration(samples.observations, samples.moves); fitted_ = true;
             }
             status_->setText(result_.valid ? QStringLiteral(
-                "X %1、Y %2 px/count；响应延迟约 %3 ms\n检测框实测位移：X %4、Y %5 px；拟合误差：X %6、Y %7 px。松开热键后可应用。")
+                "X %1、Y %2 px/count；响应延迟约 %3 ms\n检测框实测位移：X %4、Y %5 px；拟合误差：X %6、Y %7 px\n"
+                "静止抖动：X %8、Y %9 px；可用帧 %10%。%11松开热键后可应用。")
                 .arg(result_.pixelsPerCount.x, 0, 'f', 4).arg(result_.pixelsPerCount.y, 0, 'f', 4)
                 .arg(result_.delayMs, 0, 'f', 1)
                 .arg(result_.travelPixels.x, 0, 'f', 1).arg(result_.travelPixels.y, 0, 'f', 1)
                 .arg(result_.rmse.x, 0, 'f', 2).arg(result_.rmse.y, 0, 'f', 2)
+                .arg(result_.jitterPixels.x, 0, 'f', 1).arg(result_.jitterPixels.y, 0, 'f', 1)
+                .arg(result_.inlierRatio * 100.0, 0, 'f', 0)
+                .arg(result_.delayAtScanLimit ? QStringLiteral("\n★ ") : QString())
                 : QString::fromStdString(result_.reason));
             applyButton_->setEnabled(result_.valid && !session.active());
         } else if (s.state == runtime::FfCalibrationSession::State::Idle) {
             status_->setText(idleHint_);
         } else {
-            status_->setText(QStringLiteral("%1\n已完成 %2 / %3 次移动")
-                .arg(QString::fromUtf8(s.message)).arg(s.completed).arg(s.total));
+            // 被跳过的帧要显示出来：现在单帧丢框不再判死，用户得知道"这轮跳过了一些帧"。
+            status_->setText(QStringLiteral("%1\n已完成 %2 / %3 次移动%4")
+                .arg(QString::fromUtf8(s.message)).arg(s.completed).arg(s.total)
+                .arg(s.skipped > 0 ? QStringLiteral(" · 已跳过 %1 帧").arg(s.skipped) : QString()));
         }
         if (!session.active()) {
             bank_->setEnabled(true); confirmed_->setEnabled(true); startKeyBox_->setEnabled(true);
