@@ -46,6 +46,7 @@ private slots:
     void onDeleteProfile();
     void onCopyProfile();
     void onPasteProfile();
+    void onRenameProfile();
     void onAddGroup();
     void onDeleteGroup();
     void onTargetClassesChanged();

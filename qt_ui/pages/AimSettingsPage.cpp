@@ -334,12 +334,14 @@ void AimSettingsPage::buildLeftPanel(QWidget* parent)
         QMenu menu(this);
         if (auto* item = m_profileList->itemAt(pos)) {
             const int row = m_profileList->row(item);
+            auto* rename = menu.addAction(QStringLiteral("重命名热键"));
             auto* copy = menu.addAction(QStringLiteral("复制热键"));
             auto* remove = menu.addAction(QStringLiteral("删除热键"));
             const QAction* action = menu.exec(m_profileList->viewport()->mapToGlobal(pos));
             if (!action) return;
             m_profileList->setCurrentRow(row);
-            if (action == copy) onCopyProfile();
+            if (action == rename) onRenameProfile();
+            else if (action == copy) onCopyProfile();
             else if (action == remove) onDeleteProfile();
         } else {
             auto* paste = menu.addAction(QStringLiteral("粘贴热键"));
@@ -2025,9 +2027,42 @@ void AimSettingsPage::onDeleteProfile()
     reloadFromRuntime();
 }
 
-void AimSettingsPage::onCopyProfile()
+// 右键菜单里的“重命名热键”：改的就是这个档的 name，其他参数一律不动。
+// 名字只用于界面显示和标定窗口标题，改完刷新列表并保持当前选中项。
+void AimSettingsPage::onRenameProfile()
 {
     const int ri = currentRuntimeIndex();
+    if (ri < 0) return;
+    QString current;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri >= static_cast<int>(config.hotkeys.size())) return;
+        current = QString::fromUtf8(config.hotkeys[ri].name.c_str());
+    }
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("重命名热键"),
+        QStringLiteral("名称"), QLineEdit::Normal, current, &ok).trimmed();
+    if (!ok || name.isEmpty() || name == current) return;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri >= static_cast<int>(config.hotkeys.size())) return;
+        config.hotkeys[ri].name = name.toStdString();
+    }
+    ConfigBridge::instance().markDirty();
+    // 只刷新列表文字，不整页重建，免得把用户的编辑状态丢掉。
+    for (int row = 0; row < m_profileList->count(); ++row) {
+        auto* item = m_profileList->item(row);
+        if (!item || item->data(Qt::UserRole).toInt() != ri) continue;
+        if (auto* w = m_profileList->itemWidget(item)) {
+            if (auto* label = w->findChild<QLabel*>("pname")) label->setText(name);
+        }
+        break;
+    }
+    refreshActivation();
+}
+
+void AimSettingsPage::onCopyProfile()
+{    const int ri = currentRuntimeIndex();
     if (ri < 0) return;
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
