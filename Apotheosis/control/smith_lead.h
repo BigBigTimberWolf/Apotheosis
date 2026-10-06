@@ -50,7 +50,18 @@ public:
         }
         const double velocityAlpha = -std::expm1(-dtSec / kVelocityTauSec);
         const double pendingAlpha = -std::expm1(-dtSec / kPendingTauSec);
-        const double subtractAlpha = -std::expm1(-dtSec / kSubtractTauSec);
+        // ★ 摊平用的时间常数跟着标定的延迟走：被滤的信号就是"过去一个延迟内的发送
+        //   总和"，它的固有时间尺度就是延迟，所以取 0.75 倍 —— 平滑到 95% 约需 2.2 个
+        //   延迟，明显小于"补偿自己再引入一个大延迟"（Smith 的意义正是对抗 1 个延迟，
+        //   补偿比它要修的东西还慢就没意义了）。
+        //   上下限：短延迟时 0.75 倍会小到比一帧还短、等于没滤（下限 15 ms）；长延迟时
+        //   会推到 100 ms 以上、到 95% 要 300 ms 以上，而那时窗口里装的发送笔数多、
+        //   单笔占总额比例小、台阶本来就小，不需要那么慢（上限 80 ms）。
+        //   换算成帧率无关的写法：每帧跳变 = 1-exp(-dt/τ) = 1-exp(-1/N)，N 是窗口里的
+        //   发送笔数，所以 30fps 和 240fps 的画面平滑速率一致。
+        const double subtractTau = std::clamp(kSubtractTauRatio * delaySec,
+                                              kSubtractMinTauSec, kSubtractMaxTauSec);
+        const double subtractAlpha = -std::expm1(-dtSec / subtractTau);
         velocity_ += (velocity - velocity_) * velocityAlpha;
         pending_ += (pending - pending_) * pendingAlpha;
         subtract_ += (pending - subtract_) * subtractAlpha;
@@ -84,8 +95,11 @@ private:
     // history is longer so a one-off burst is not mistaken for target motion.
     static constexpr double kVelocityTauSec = 0.05;
     static constexpr double kPendingTauSec = 0.12;
-    // 减掉用的那份跟延迟同量级：既摊平事件台阶，又不会比真实在飞量滞后太多。
-    static constexpr double kSubtractTauSec = 0.04;
+    // 减掉用的那份与延迟同量级（0.75×，带上下限）：既摊平事件台阶，又不会比真实
+    // 在飞量滞后太多。
+    static constexpr double kSubtractTauRatio = 0.75;
+    static constexpr double kSubtractMinTauSec = 0.015;
+    static constexpr double kSubtractMaxTauSec = 0.080;
 
     static bool finite(const Vec2& v) { return std::isfinite(v.x) && std::isfinite(v.y); }
 

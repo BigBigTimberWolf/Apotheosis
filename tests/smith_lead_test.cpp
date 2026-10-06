@@ -70,6 +70,30 @@ void ruleTests()
         check(std::abs(previous - 50.0) < 0.5,
               "spreading keeps unity DC gain: the average correction is unchanged");
     }
+    // τ 跟着标定延迟走：延迟越短，摊平越快（否则补偿自己会比它要修的延迟还慢）。
+    // 上下限也要生效：极短延迟不许比一帧还快，极长延迟不许慢到过不了头。
+    {
+        auto stepAfterOneFrame = [](double delaySec) {
+            SmithLead lead;
+            lead.update({0, 0}, {0, 0}, delaySec, 0.004167); // 240fps 一帧
+            lead.update({0, 0}, {50, 0}, delaySec, 0.004167);
+            return lead.smoothedPending().x;
+        };
+        const double shortDelay = stepAfterOneFrame(0.020);
+        const double longDelay = stepAfterOneFrame(0.100);
+        check(shortDelay > longDelay,
+              "a short calibrated delay smooths faster than a long one");
+        check(stepAfterOneFrame(0.005) == stepAfterOneFrame(0.010),
+              "very short delays hit the same lower bound instead of smoothing faster");
+        check(stepAfterOneFrame(0.110) == stepAfterOneFrame(0.200),
+              "very long delays hit the same upper bound instead of smoothing slower");
+        // 240fps（4.17 ms 一帧）、延迟 40 ms → τ=30 ms → 一帧只走 ~13% ≈ 6.5 px
+        // （旧实现是整笔 50 px）。
+        std::printf("smith lead: adaptive tau @240fps  20ms->%.1f px  40ms->%.1f px  100ms->%.1f px\n",
+                    shortDelay, stepAfterOneFrame(0.040), longDelay);
+        check(stepAfterOneFrame(0.040) > 0.0 && stepAfterOneFrame(0.040) < 8.0,
+              "at 240fps one whole-event step moves the correction only a few pixels");
+    }
     {
         SmithLead lead;
         const Vec2 first = lead.update({240, 0}, {30, 0}, kDelaySec, 0.005);
